@@ -1,0 +1,144 @@
+/* ===== Retro Claude design system ===== */
+:root {
+  --bg:        #F5F1E8;   /* warm paper */
+  --bg-panel:  #FAF7F0;
+  --bg-sunken: #EDE7D9;
+  --ink:       #2B2622;
+  --ink-soft:  #6B6358;
+  --line:      #D9CFBE;
+  --clay:      #C15F3C;
+  --clay-soft: #E4B49C;
+  --sel:       #EADFC8;
+  --term-bg:   #262019;
+  --term-fg:   #E8E0D0;
+  --font-serif: "Times New Roman", Georgia, serif;
+  --font-mono:  "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --radius: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#22201B; --bg-panel:#2B2822; --bg-sunken:#1C1A16;
+    --ink:#ECE4D4; --ink-soft:#A79B85; --line:#3D3830;
+    --clay:#D2795A; --clay-soft:#5A4436; --sel:#3A342A;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-serif);
+  /* faint paper grain */
+  background-image: radial-gradient(rgba(120,100,70,0.035) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ===== Tab strip (boxy file-folder tabs) ===== */
+.tabbar {
+  display: flex; align-items: flex-end; gap: 2px;
+  padding: 6px 8px 0 8px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line);
+  min-height: 40px; user-select: none;
+}
+.tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 220px; padding: 6px 12px;
+  font-family: var(--font-serif); font-size: 14px; color: var(--ink-soft);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line); border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  position: relative; top: 1px;
+}
+.tab:hover { background: var(--bg-panel); }
+.tab.active {
+  background: var(--bg-panel); color: var(--ink);
+  border-top: 2px solid var(--clay);
+  padding-top: 5px; /* compensate the 2px border so text doesn't jump */
+}
+.tab .close {
+  color: var(--ink-soft); font-size: 15px; line-height: 1;
+  padding: 0 2px; border-radius: 2px;
+}
+.tab .close:hover { color: #fff; background: var(--clay); }
+.tab.add { color: var(--ink-soft); font-size: 18px; padding: 4px 12px; }
+
+/* ===== Content region ===== */
+.content { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--bg-panel); }
+
+/* ===== File browser ===== */
+.filebrowser { display: flex; flex-direction: column; height: 100%; }
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 12px; background: var(--bg-panel); border-bottom: 1px solid var(--line);
+}
+.toolbar button {
+  font-family: var(--font-serif); font-size: 13px; color: #fff;
+  background: var(--clay); border: 1px solid var(--clay);
+  padding: 5px 12px; border-radius: var(--radius); cursor: pointer; white-space: nowrap;
+}
+.toolbar button:hover { filter: brightness(1.06); }
+
+.breadcrumb { display: flex; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); }
+.crumb { cursor: pointer; }
+.crumb:hover { color: var(--clay); text-decoration: underline; }
+
+.entries { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0; }
+.entry {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 14px; font-family: var(--font-mono); font-size: 13px; color: var(--ink);
+  cursor: pointer;
+}
+.entry:hover { background: var(--clay-soft); }
+.entry.selected { background: var(--sel); box-shadow: inset 2px 0 0 var(--clay); }
+
+/* ===== Context menu (hard retro drop, no soft glow) ===== */
+.ctx-backdrop { position: fixed; inset: 0; z-index: 50; }
+.ctx-menu {
+  position: fixed; min-width: 190px; list-style: none; margin: 0; padding: 4px 0;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  box-shadow: 3px 3px 0 var(--line); font-family: var(--font-serif); font-size: 14px;
+}
+.ctx-menu li { padding: 6px 14px; cursor: pointer; color: var(--ink); }
+.ctx-menu li:hover { background: var(--clay-soft); }
+
+/* ===== Recent menu ===== */
+.recentmenu { position: relative; margin-right: 8px; align-self: center; }
+.recentmenu > button {
+  font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  background: var(--bg-panel); border: 1px solid var(--line);
+  padding: 5px 12px; border-radius: var(--radius); cursor: pointer;
+}
+.recentmenu > button:hover { border-color: var(--clay); color: var(--clay); }
+.recent-list, .session-list { list-style: none; margin: 0; padding: 4px 0; }
+.recent-list {
+  position: absolute; top: 100%; left: 0; z-index: 60; min-width: 300px; max-height: 70vh; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 3px 3px 0 var(--line);
+}
+.recent-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  font-family: var(--font-mono); font-size: 13px;
+}
+.recent-row > span { flex: 1; cursor: pointer; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.recent-row > span:hover { color: var(--clay); }
+.recent-row button {
+  font-family: var(--font-serif); font-size: 12px; color: var(--ink-soft);
+  background: transparent; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 2px 8px; cursor: pointer;
+}
+.recent-row button:hover { color: var(--clay); border-color: var(--clay); }
+.session-list { background: var(--bg-sunken); border-top: 1px solid var(--line); }
+.session-list li {
+  padding: 5px 12px 5px 24px; font-family: var(--font-mono); font-size: 12px; color: var(--ink); cursor: pointer;
+  display: flex; justify-content: space-between; gap: 10px;
+}
+.session-list li:hover { background: var(--clay-soft); }
+.ts { color: var(--ink-soft); white-space: nowrap; }
+.empty { padding: 6px 14px; color: var(--ink-soft); font-family: var(--font-mono); font-size: 12px; }
+
+/* ===== Terminal ===== */
+.terminal { height: 100%; width: 100%; background: var(--term-bg); padding: 6px 8px; }

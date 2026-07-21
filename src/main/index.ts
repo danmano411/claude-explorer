@@ -1,7 +1,11 @@
 import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
+import { registerFsHandlers } from './fs.handlers'
+import { registerRecentsHandlers } from './recents.handlers'
+import { registerSessionsHandlers } from './sessions.handlers'
+import { registerExternalHandlers } from './external.handlers'
+import { registerPtyHandlers } from './pty.handlers'
 
-// Phase 0 bootstrap. Phase 3 (Task 3.1) adds register*Handlers(...) calls in whenReady.
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
@@ -28,6 +32,11 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  registerFsHandlers()
+  registerRecentsHandlers()
+  registerSessionsHandlers()
+  registerExternalHandlers()
+  registerPtyHandlers(() => mainWindow)
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
