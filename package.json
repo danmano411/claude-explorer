@@ -47,6 +47,13 @@
     ],
     "win": {
       "target": "nsis"
-    }
+    },
+    "icon": "img/icon.png",
+    "extraResources": [
+      {
+        "from": "img/icon.png",
+        "to": "icon.png"
+      }
+    ]
   }
 }

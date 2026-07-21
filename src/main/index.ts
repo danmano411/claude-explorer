@@ -13,12 +13,17 @@ import { flushAll } from './trash'
 let mainWindow: BrowserWindow | null = null
 let flushed = false
 
+const iconPath = app.isPackaged
+  ? join(process.resourcesPath, 'icon.png')
+  : join(__dirname, '../../img/icon.png')
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
     show: false,
     backgroundColor: '#F5F1E8',
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

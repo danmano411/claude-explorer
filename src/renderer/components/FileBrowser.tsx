@@ -99,11 +99,32 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     if (paths.some((p) => app.isBusy(p)) || app.isBusy(destFolder)) { notify('That item is busy — drop refused.'); return; }
     for (const src of paths) {
       const mode = forced ?? ((ev.ctrlKey || !sameDrive(src, destFolder)) ? 'copy' : 'move');
+      // dropping into the folder an item already lives in is a no-op for a move
+      if (mode === 'move' && winDirname(src) === destFolder) continue;
       const cmd = mode === 'copy' ? copyCmd(src, destFolder) : moveCmd(src, destFolder);
       try { await runGuarded([src, destFolder], cmd); } catch { return; }
     }
     app.setDrag(null);
     load();
+  };
+
+  // Shared drop entry point (used by folder rows AND the open-folder background → dir).
+  const dropInto = (dest: string, ev: React.DragEvent) => {
+    const payload = app.drag;
+    if (!payload || !payload.paths.length) return;
+    const paths = payload.paths;
+    if (dragButton.current === 2) {
+      setMenu({
+        x: ev.clientX, y: ev.clientY, items: [
+          { label: 'Move here', onClick: () => runDrop(paths, dest, ev, 'move') },
+          { label: 'Copy here', onClick: () => runDrop(paths, dest, ev, 'copy') },
+          { separator: true },
+          { label: 'Cancel', onClick: () => app.setDrag(null) },
+        ],
+      });
+    } else {
+      runDrop(paths, dest, { ctrlKey: ev.ctrlKey, shiftKey: ev.shiftKey });
+    }
   };
 
   const buildMenu = (entry: DirEntry | undefined, paths: string[]): MenuItem[] => {
@@ -178,8 +199,11 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
         onNavigate={nav}
       />
       <ul
-        className="entries"
+        className={['entries', app.drag && dropTarget === dir ? 'dir-drop' : ''].join(' ').trim()}
         onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, items: buildMenu(undefined, []) }); }}
+        onDragOver={(ev) => { if (app.drag) { ev.preventDefault(); setDropTarget(dir); } }}
+        onDragLeave={(ev) => { if (ev.currentTarget === ev.target) setDropTarget((t) => (t === dir ? null : t)); }}
+        onDrop={(ev) => { ev.preventDefault(); setDropTarget(null); dropInto(dir, ev); }}
       >
         {entries.map((e, i) => {
           const selected = selection.indices.has(i);
@@ -204,27 +228,12 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
                 app.setDrag({ paths, sourceTabId: tabId });
                 ev.dataTransfer.setData('application/x-ce-files', JSON.stringify(paths));
               }}
-              onDragOver={(ev) => { if (e.isDirectory) { ev.preventDefault(); setDropTarget(e.path); } }}
+              onDragOver={(ev) => { if (e.isDirectory && app.drag) { ev.preventDefault(); ev.stopPropagation(); setDropTarget(e.path); } }}
               onDragLeave={() => setDropTarget((t) => (t === e.path ? null : t))}
               onDrop={(ev) => {
-                ev.preventDefault(); setDropTarget(null);
-                if (!e.isDirectory) return;
-                const payload = app.drag;
-                if (!payload || !payload.paths.length) return;
-                const paths = payload.paths;
-                const dest = e.path;
-                if (dragButton.current === 2) {
-                  setMenu({
-                    x: ev.clientX, y: ev.clientY, items: [
-                      { label: 'Move here', onClick: () => runDrop(paths, dest, ev, 'move') },
-                      { label: 'Copy here', onClick: () => runDrop(paths, dest, ev, 'copy') },
-                      { separator: true },
-                      { label: 'Cancel', onClick: () => app.setDrag(null) },
-                    ],
-                  });
-                } else {
-                  runDrop(paths, dest, { ctrlKey: ev.ctrlKey, shiftKey: ev.shiftKey });
-                }
+                if (!e.isDirectory) return; // fall through to the container (drop into current dir)
+                ev.preventDefault(); ev.stopPropagation(); setDropTarget(null);
+                dropInto(e.path, ev);
               }}
             >
               {renaming?.path === e.path ? (
@@ -263,7 +272,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <p>Delete {confirmDel.length} item(s)? They can be restored with Ctrl+Z or from the Recycle Bin.</p>
             <div className="modal-actions">
-              <button onClick={doDelete}>Delete</button>
+              <button className="danger" onClick={doDelete}>Delete</button>
               <button onClick={() => setConfirmDel(null)}>Cancel</button>
             </div>
           </div>
