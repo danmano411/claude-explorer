@@ -7,7 +7,7 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "test": "set \"NODE_OPTIONS=--experimental-require-module\" && vitest run",
-    "package": "electron-vite build && electron-builder --win"
+    "package": "electron-vite build && set \"NODE_OPTIONS=--experimental-require-module\" && electron-builder --win"
   },
   "keywords": [
     "claude",
@@ -45,6 +45,7 @@
   "build": {
     "appId": "com.danma.claude-explorer",
     "productName": "Claude Explorer",
+    "npmRebuild": false,
     "directories": {
       "output": "dist"
     },
