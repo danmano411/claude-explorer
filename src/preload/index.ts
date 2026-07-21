@@ -23,6 +23,18 @@ const api: Api = {
     ipcRenderer.on(CH.ptyExit, h);
     return () => ipcRenderer.off(CH.ptyExit, h);
   },
+  // --- v2 file operations ---
+  fsRename: (from, to) => ipcRenderer.invoke(CH.fsRename, from, to),
+  fsMkdir: (p) => ipcRenderer.invoke(CH.fsMkdir, p),
+  fsNewFile: (p) => ipcRenderer.invoke(CH.fsNewFile, p),
+  fsCopy: (src, dst) => ipcRenderer.invoke(CH.fsCopy, src, dst),
+  fsMove: (src, dst) => ipcRenderer.invoke(CH.fsMove, src, dst),
+  fsDelete: (paths) => ipcRenderer.invoke(CH.fsDelete, paths),
+  fsRestore: (records) => ipcRenderer.invoke(CH.fsRestore, records),
+  fsExists: (p) => ipcRenderer.invoke(CH.fsExists, p),
+  openPath: (p) => ipcRenderer.invoke(CH.openPath, p),
+  revealPath: (p) => ipcRenderer.invoke(CH.revealPath, p),
+  recentsRemove: (p) => ipcRenderer.invoke(CH.recentsRemove, p),
 };
 
 contextBridge.exposeInMainWorld('api', api);

@@ -18,3 +18,9 @@ export interface ClaudeSession {
 }
 
 export type TabView = 'files' | 'terminal'
+
+export interface TrashRecord {
+  original: string // absolute path the item was deleted from
+  staged: string // absolute path in the same-drive trash staging dir
+  name: string // basename, for display
+}
