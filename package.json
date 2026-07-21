@@ -31,5 +31,22 @@
     "node-pty": "^1.1.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
+  },
+  "build": {
+    "appId": "com.danma.claude-explorer",
+    "productName": "Claude Explorer",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }
