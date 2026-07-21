@@ -19,3 +19,10 @@ export function addRecent(path: string): void {
   const next = computeRecents(listRecents(), path, Date.now());
   writeFileSync(file(), JSON.stringify(next, null, 2));
 }
+
+export function computeRemoved(prev: RecentFolder[], path: string): RecentFolder[] {
+  return prev.filter((r) => r.path !== path)
+}
+export function removeRecent(path: string): void {
+  writeFileSync(file(), JSON.stringify(computeRemoved(listRecents(), path), null, 2))
+}
