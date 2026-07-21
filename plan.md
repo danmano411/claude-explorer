@@ -21,6 +21,29 @@
 
 ---
 
+## Execution: Subagent-Driven (dispatch one fresh subagent per task)
+
+Use **superpowers:subagent-driven-development**. Model + mode per task below. "Model" = pass to the Agent tool's `model` param. Reviewer (this session) gates between tasks.
+
+| Task | What | Model | Mode | Has test |
+|---|---|---|---|---|
+| 0.1 Scaffold | config + bootstrap (footgun-heavy) | **opus** | 🔴 LINEAR (blocks all) | run-check |
+| 0.2 IPC contract | frozen types/channels | **opus** | 🔴 LINEAR (blocks all) | — |
+| 1.1 fs | dir listing | **haiku** | 🟢 PARALLEL group A | — |
+| 1.2 recents | store + dedupe | **sonnet** | 🟢 PARALLEL group A | ✅ unit (TDD) |
+| 1.3 sessions | jsonl parse + slug | **opus** | 🟢 PARALLEL group A | ✅ unit (TDD) |
+| 1.4 external | terminal launcher | **sonnet** | 🟢 PARALLEL group A | manual |
+| 1.5 pty | native pty + IPC events | **opus** | 🟢 PARALLEL group A | manual |
+| 2.1 preload | api bridge | **sonnet** | 🔵 PARALLEL group B | — |
+| 2.2 tab shell | state model + orchestration | **opus** | 🔵 PARALLEL group B | — |
+| 2.3 FileBrowser | grid/breadcrumb/menu | **sonnet** | 🔵 PARALLEL group B | — |
+| 2.4 Terminal+RecentMenu | xterm + recents UI | **sonnet** | 🔵 PARALLEL group B | — |
+| 3.1 wire + e2e | integrate everything | **opus** | 🔴 LINEAR | ✅ **E2E gate** |
+| 3.2 package | electron-builder win | **sonnet** | 🔴 LINEAR | smoke |
+
+**Order:** `0.1 → 0.2` (linear) → **[group A ∥ group B all at once]** → `3.1 → 3.2` (linear).
+Groups A and B are mutually independent (main vs renderer) — dispatch all 9 concurrently after Phase 0. **Unit tests** live inside 1.2/1.3 (written before impl). **E2E** is the Task 3.1 Step 5 gate — nothing ships until it passes on real hardware.
+
 ## Parallel Execution Map
 
 Phase 0 is the foundation and MUST land first (it creates the scaffold + the shared contract every other task imports). After Phase 0, the two phases below can run concurrently across subagents:
@@ -589,6 +612,45 @@ Manual: after Phase 3 wiring, spawn a pty on a known folder and confirm claude s
 
 ---
 
+## UI Design System — "Retro Claude" (every renderer task MUST use these tokens)
+
+Goal: the whole app should feel like Claude's own surfaces — warm paper, clay-coral accent, quiet serif for chrome, mono for the file/terminal body — with a light retro-terminal edge (boxy 1px borders, no rounded blobs, subtle grain). Not neon-hacker; warm and papery. Ships as CSS variables in `src/renderer/index.css`; components use `var(--…)` and the class names they already reference — no inline hex.
+
+**Author `:root` in `index.css` exactly:**
+```css
+:root {
+  /* Claude paper palette */
+  --bg:        #F5F1E8;   /* warm paper, app background */
+  --bg-panel:  #FAF7F0;   /* raised panels, entry list */
+  --bg-sunken: #EDE7D9;   /* toolbar / tab strip trough */
+  --ink:       #2B2622;   /* primary text (warm near-black) */
+  --ink-soft:  #6B6358;   /* secondary text, timestamps */
+  --line:      #D9CFBE;   /* 1px hairline borders */
+  --clay:      #C15F3C;   /* Anthropic coral — accent, active, CTAs */
+  --clay-soft: #E4B49C;   /* hover wash of clay */
+  --sel:       #EADFC8;   /* selected row */
+  /* terminal (Claude-dark inverse for contrast) */
+  --term-bg:   #262019;
+  --term-fg:   #E8E0D0;
+  --font-serif: "Times New Roman", Georgia, serif;   /* Claude uses Copernicus; TNR is the local stand-in */
+  --font-mono:  "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --radius: 3px;  /* barely-there; retro = boxy, not pill */
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#22201B; --bg-panel:#2B2822; --bg-sunken:#1C1A16; --ink:#ECE4D4; --ink-soft:#A79B85; --line:#3D3830; --sel:#3A342A; }
+}
+```
+
+**Rules for the components (bake into 2.2–2.4 styling):**
+- **Tab strip:** `--bg-sunken` trough; tabs are boxy (`--radius`), 1px `--line`, active tab gets a 2px top border in `--clay` and `--bg-panel` fill (like a raised file folder). File tabs prefix `📁`, terminal tabs prefix `▸` in `--clay`.
+- **File browser:** mono font, single-column rows, `--bg-panel`; hover row = `--clay-soft` wash; selected = `--sel`; folders in `--ink`, the "Open this folder in Claude" button is a filled `--clay` pill-less button (white text). Breadcrumb crumbs in `--ink-soft`, current segment `--clay`.
+- **Context menu:** `--bg-panel`, 1px `--line`, no shadow blur beyond `0 2px 0 var(--line)` (hard retro drop, not soft glow).
+- **Terminal:** xterm theme `{ background: '#262019', foreground: '#E8E0D0', cursor: '#C15F3C' }` — pass this into the `new XTerm({ theme })` call in Task 2.4.
+- **RecentMenu:** dropdown styled like the context menu; session rows show title in `--ink`, timestamp in `--ink-soft` mono, hover `--clay-soft`.
+- **Global:** `--font-serif` only for the app title / menu labels; everything data-bearing is `--font-mono`. Optional grain: a 4% opacity repeating-radial noise on `body` — nice-to-have, skip if it costs time.
+
+Design polish (spacing, hover states, the grain, empty states) is an explicit deliverable of **Task 3.1 Step 3**, reviewed at the E2E gate — not an afterthought.
+
 ## Phase 2 — Renderer (parallelizable after Phase 0)
 
 ### Task 2.1: Preload bridge
@@ -869,7 +931,12 @@ export function Terminal({ ptyId }: { ptyId: string }) {
 
   useEffect(() => {
     if (!ref.current) return;
-    const term = new XTerm({ cursorBlink: true, fontFamily: 'Cascadia Mono, Consolas, monospace', fontSize: 13 });
+    const term = new XTerm({
+      cursorBlink: true,
+      fontFamily: 'Cascadia Mono, Consolas, monospace',
+      fontSize: 13,
+      theme: { background: '#262019', foreground: '#E8E0D0', cursor: '#C15F3C' }, // Retro Claude, see UI Design System
+    });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(ref.current);
@@ -989,7 +1056,7 @@ import './index.css';
 createRoot(document.getElementById('root')!).render(<App />);
 ```
 
-- [ ] **Step 3: Minimal styling in `index.css`** — tab bar as a horizontal flex row, `.content` fills remaining height, context menu `position: fixed`, entries list scrollable. (Author concrete CSS; keep it under ~80 lines.)
+- [ ] **Step 3: Full "Retro Claude" styling in `index.css`** — implement the **UI Design System** section verbatim: paste the `:root` + dark-mode token blocks, then style every component to its rules (boxy folder-tabs with clay active border, paper file rows with clay-soft hover, hard-drop context menu, clay CTA button, mono data / serif chrome). Layout: tab strip is a horizontal flex row over `--bg-sunken`; `.content` fills remaining height (`flex:1; min-height:0`); `.entries` scrolls; context menu `position:fixed`. This is a real design pass, not a reset — budget ~150 lines. Model for this task is **opus** specifically so the UI lands polished.
 
 - [ ] **Step 4: Rebuild native module if needed**
 
