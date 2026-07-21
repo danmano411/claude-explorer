@@ -28,7 +28,6 @@ export function FileBrowser({ cwd, onNavigate, onOpenClaude, onOpenExternal }: {
     <div className="filebrowser">
       <div className="toolbar">
         <Breadcrumb cwd={cwd} onNavigate={onNavigate} />
-        <button onClick={() => onOpenClaude(cwd)}>Open this folder in Claude</button>
       </div>
       <ul className="entries">
         {entries.map((e) => (
@@ -39,7 +38,16 @@ export function FileBrowser({ cwd, onNavigate, onOpenClaude, onOpenExternal }: {
             onDoubleClick={() => e.isDirectory ? onNavigate(e.path) : undefined}
             onContextMenu={(ev) => { if (e.isDirectory) { ev.preventDefault(); setSel(e.path); setMenu({ x: ev.clientX, y: ev.clientY, items: folderMenu(e.path) }); } }}
           >
-            {e.isDirectory ? '📁' : '📄'} {e.name}
+            <span className="entry-label">{e.isDirectory ? '📁' : '📄'} {e.name}</span>
+            {e.isDirectory && (
+              <button
+                className="entry-open"
+                title="Open this folder in Claude"
+                onClick={(ev) => { ev.stopPropagation(); onOpenClaude(e.path); }}
+              >
+                →
+              </button>
+            )}
           </li>
         ))}
       </ul>

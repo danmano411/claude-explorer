@@ -89,12 +89,21 @@ body {
 
 .entries { flex: 1; overflow-y: auto; list-style: none; margin: 0; padding: 4px 0; }
 .entry {
-  display: flex; align-items: center; gap: 8px;
-  padding: 4px 14px; font-family: var(--font-mono); font-size: 13px; color: var(--ink);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px 4px 14px; font-family: var(--font-mono); font-size: 13px; color: var(--ink);
   cursor: pointer;
 }
 .entry:hover { background: var(--clay-soft); }
 .entry.selected { background: var(--sel); box-shadow: inset 2px 0 0 var(--clay); }
+.entry-label { flex: 1; display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* orange "take me to Claude" arrow, per folder row */
+.entry-open {
+  flex: none; background: transparent; border: none; cursor: pointer;
+  color: var(--clay); font-family: var(--font-mono); font-size: 16px; font-weight: bold; line-height: 1;
+  padding: 1px 8px; border-radius: 2px; opacity: 0.5;
+}
+.entry:hover .entry-open, .entry.selected .entry-open { opacity: 1; }
+.entry-open:hover { background: var(--clay); color: #fff; }
 
 /* ===== Context menu (hard retro drop, no soft glow) ===== */
 .ctx-backdrop { position: fixed; inset: 0; z-index: 50; }
