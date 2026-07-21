@@ -157,3 +157,71 @@ body {
 
 /* ===== Terminal ===== */
 .terminal { height: 100%; width: 100%; background: var(--term-bg); padding: 6px 8px; }
+
+/* ================= v2: file-manager chrome ================= */
+
+/* NavBar (back / fwd / refresh / address) */
+.navbar { display: flex; align-items: center; gap: 4px; padding: 6px 8px; background: var(--bg-panel); border-bottom: 1px solid var(--line); }
+.nav-btn {
+  font-family: var(--font-mono); font-size: 14px; color: var(--ink);
+  background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 2px 9px; cursor: pointer; line-height: 1.4;
+}
+.nav-btn:hover:not(:disabled) { border-color: var(--clay); color: var(--clay); }
+.nav-btn:disabled { opacity: 0.35; cursor: default; }
+.address { flex: 1; min-width: 0; }
+.address-input {
+  width: 100%; font-family: var(--font-mono); font-size: 12px; padding: 3px 7px;
+  border: 1px solid var(--clay); border-radius: var(--radius); background: var(--bg); color: var(--ink);
+}
+
+/* drop target on a folder row */
+.entry.drop-target { box-shadow: inset 0 0 0 2px var(--clay); background: var(--clay-soft); }
+
+/* inline rename */
+.rename-input {
+  font-family: var(--font-mono); font-size: 13px; padding: 0 3px; width: 60%;
+  border: 1px solid var(--clay); background: var(--bg); color: var(--ink);
+}
+
+/* status bar */
+.statusbar {
+  display: flex; gap: 18px; padding: 3px 12px; background: var(--bg-sunken);
+  border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft);
+}
+
+/* context menu items (separator / disabled support) */
+.ctx-item { padding: 6px 14px; cursor: pointer; color: var(--ink); }
+.ctx-item:hover { background: var(--clay-soft); }
+.ctx-item.disabled { color: var(--ink-soft); opacity: 0.5; cursor: default; }
+.ctx-item.disabled:hover { background: transparent; }
+.ctx-sep { height: 1px; margin: 4px 0; background: var(--line); }
+
+/* delete-confirm modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(20, 15, 10, 0.38); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal {
+  background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 4px 4px 0 var(--line);
+  padding: 20px 22px; max-width: 380px; font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.modal-actions button {
+  font-family: var(--font-serif); font-size: 13px; padding: 5px 14px; border-radius: var(--radius);
+  cursor: pointer; border: 1px solid var(--line); background: var(--bg-sunken); color: var(--ink);
+}
+.modal-actions button.danger, .modal-actions button:last-child { background: var(--clay); border-color: var(--clay); color: #fff; }
+.modal-actions button:first-child { background: var(--bg-sunken); border-color: var(--line); color: var(--ink); }
+
+/* transient toast (busy refusal etc.) */
+.toast {
+  position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: var(--bg); font-family: var(--font-mono); font-size: 12px;
+  padding: 8px 14px; border-radius: var(--radius); z-index: 120; box-shadow: 2px 2px 0 rgba(0,0,0,0.3);
+}
+
+/* tab drag-reorder + spring-load */
+.tab.drag-over { box-shadow: inset 2px 0 0 var(--clay); }
+.tab.spring-target { box-shadow: inset 0 0 0 2px var(--clay); background: var(--bg-panel); }
+
+/* remove-from-recent × */
+.recent-remove { color: var(--ink-soft); }
+.recent-remove:hover { color: #fff; background: var(--clay); border-color: var(--clay); }

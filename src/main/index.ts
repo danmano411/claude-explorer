@@ -5,8 +5,13 @@ import { registerRecentsHandlers } from './recents.handlers'
 import { registerSessionsHandlers } from './sessions.handlers'
 import { registerExternalHandlers } from './external.handlers'
 import { registerPtyHandlers } from './pty.handlers'
+import { registerFsMutateHandlers } from './fsmutate.handlers'
+import { registerTrashHandlers } from './trash.handlers'
+import { registerOpenHandlers } from './open.handlers'
+import { flushAll } from './trash'
 
 let mainWindow: BrowserWindow | null = null
+let flushed = false
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -37,6 +42,9 @@ app.whenReady().then(() => {
   registerSessionsHandlers()
   registerExternalHandlers()
   registerPtyHandlers(() => mainWindow)
+  registerFsMutateHandlers()
+  registerTrashHandlers()
+  registerOpenHandlers()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -45,4 +53,12 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// Flush any still-staged deleted items to the OS Recycle Bin before exit.
+app.on('will-quit', (e) => {
+  if (flushed) return
+  e.preventDefault()
+  flushed = true
+  flushAll().finally(() => app.quit())
 })

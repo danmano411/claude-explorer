@@ -66,6 +66,18 @@ export function RecentMenu({ onOpen, onOpenFolder }: {
                 >
                   Sessions
                 </button>
+                <button
+                  className="recent-remove"
+                  title="Remove from recent"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    await window.api.recentsRemove(r.path)
+                    setRecents(await window.api.recentsList())
+                    if (expanded === r.path) setExpanded(null)
+                  }}
+                >
+                  ×
+                </button>
               </div>
               {expanded === r.path && (
                 <ul className="session-list">
