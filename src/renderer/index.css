@@ -140,7 +140,13 @@ body {
   padding: 2px 8px; cursor: pointer;
 }
 .recent-row button:hover { color: var(--clay); border-color: var(--clay); }
-.session-list { background: var(--bg-sunken); border-top: 1px solid var(--line); }
+.recent-row button.active { color: #fff; background: var(--clay); border-color: var(--clay); }
+.session-list { background: var(--bg-sunken); border-top: 1px solid var(--line); max-height: 220px; overflow-y: auto; }
+.show-more {
+  padding: 5px 12px 5px 24px; font-family: var(--font-serif); font-size: 12px;
+  color: var(--clay); cursor: pointer; border-top: 1px solid var(--line);
+}
+.show-more:hover { background: var(--clay-soft); color: var(--ink); }
 .session-list li {
   padding: 5px 12px 5px 24px; font-family: var(--font-mono); font-size: 12px; color: var(--ink); cursor: pointer;
   display: flex; justify-content: space-between; gap: 10px;
