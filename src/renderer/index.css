@@ -257,9 +257,7 @@ body {
   border: 1px solid var(--clay); border-radius: 3px; padding: 0 4px; width: 8em;
 }
 
-/* settings gear + modal */
-.gear { background: none; border: none; cursor: pointer; font-size: 15px; padding: 4px 8px; color: var(--ink-soft); }
-.gear:hover { color: var(--clay); }
+/* settings modal */
 .settings-field { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; }
 .settings-field span { font-size: 13px; color: var(--ink-soft); }
 .settings-field input { font: inherit; padding: 6px 8px; border: 1px solid var(--ink-soft); border-radius: 4px; background: var(--bg); color: var(--ink); }

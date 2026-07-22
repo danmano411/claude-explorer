@@ -70,7 +70,8 @@ export function TabBar({
         if (over?.index === i) cls += over.side === 'right' ? ' drop-right' : ' drop-left';
         if (springId === t.id) cls += ' spring-target';
         const isTerminal = t.view === 'terminal';
-        const st = isTerminal ? (status.get(t.ptyId!) ?? 'running') : null;
+        const isClaude = isTerminal && t.terminalKind === 'claude';
+        const st = isClaude ? (status.get(t.ptyId!) ?? 'running') : null;
         return (
           <button
             key={t.id}
@@ -117,9 +118,9 @@ export function TabBar({
             }}
             onDragEnd={() => { setDragFrom(null); setOver(null); clearSpring(); }}
           >
-            {isTerminal
+            {isClaude
               ? <span className={'tab-status ' + st} />
-              : '📁 '}
+              : isTerminal ? '▶ ' : '📁 '}
             {renaming === t.id ? (
               <input
                 className="tab-rename"

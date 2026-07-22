@@ -10,6 +10,7 @@ import { registerTrashHandlers } from './trash.handlers'
 import { registerOpenHandlers } from './open.handlers'
 import { registerSettingsHandlers } from './settings.handlers'
 import { registerIdeHandlers } from './ide.handlers'
+import { buildMenu } from './menu'
 import { flushAll } from './trash'
 
 let mainWindow: BrowserWindow | null = null
@@ -54,6 +55,7 @@ app.whenReady().then(() => {
   registerOpenHandlers()
   registerSettingsHandlers()
   registerIdeHandlers()
+  buildMenu()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

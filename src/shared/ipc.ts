@@ -28,6 +28,7 @@ export const CH = {
   ideOpen: 'ide:open',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  menuCommand: 'menu:command', // main -> renderer event (File/Settings menu items)
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -60,4 +61,5 @@ export interface Api {
   settingsGet(): Promise<Settings>
   settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
   clipboardReadText(): string // sync; clipboard is reachable from the preload process
+  onMenuCommand(cb: (cmd: string) => void): () => void // 'new-tab' | 'close-tab' | 'open-settings'
 }

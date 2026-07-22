@@ -29,6 +29,16 @@ export function App() {
     });
   }, []);
 
+  // Application menu (File/Settings) posts commands; dispatch through a ref so
+  // the subscription (mounted once) always calls the latest closures.
+  const menuHandler = useRef<(cmd: string) => void>(() => {});
+  menuHandler.current = (cmd) => {
+    if (cmd === 'new-tab') addTab();
+    else if (cmd === 'close-tab') { if (active) closeTab(active); }
+    else if (cmd === 'open-settings') setShowSettings(true);
+  };
+  useEffect(() => window.api.onMenuCommand((cmd) => menuHandler.current(cmd)), []);
+
   const update = (id: string, patch: Partial<Tab>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
 
@@ -107,13 +117,10 @@ export function App() {
         onOpenTerminal={onOpenTerminal}
         onOpenIde={onOpenIde}
         recentMenu={
-          <>
-            <RecentMenu
-              onOpen={(p, resumeId) => openClaudeNewTab(p, resumeId)}
-              onOpenFolder={openFolderTab}
-            />
-            <button className="gear" title="Settings" onClick={() => setShowSettings(true)}>⚙</button>
-          </>
+          <RecentMenu
+            onOpen={(p, resumeId) => openClaudeNewTab(p, resumeId)}
+            onOpenFolder={openFolderTab}
+          />
         }
       />
       <div className="content">

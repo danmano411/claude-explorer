@@ -39,6 +39,11 @@ const api: Api = {
   settingsGet: () => ipcRenderer.invoke(CH.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
   clipboardReadText: () => clipboard.readText(),
+  onMenuCommand: (cb) => {
+    const h = (_e: unknown, cmd: string) => cb(cmd);
+    ipcRenderer.on(CH.menuCommand, h);
+    return () => ipcRenderer.off(CH.menuCommand, h);
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);
