@@ -38,28 +38,6 @@ If you live in Claude Code, you spend a lot of time `cd`-ing into project folder
 - **Navigation** — back / forward / refresh and an editable address bar.
 - **Retro Claude look** — warm paper, clay accents, serif chrome, mono data.
 
-## Install (end users)
-
-Grab the latest installer from the [Releases page](https://github.com/danmano411/claude-explorer/releases), run `Claude Explorer Setup x.y.z.exe`, and follow the prompts.
-
-The installer creates a **Desktop shortcut** and a **Start Menu** entry. To pin it to the taskbar, right-click the running app (or its Start Menu entry) → **Pin to taskbar**.
-
-**Prerequisite:** Claude Code must be installed and on your `PATH` (or at `~/.local/bin/claude`). Claude Explorer launches your existing `claude` CLI — it doesn't bundle one. Install it from [claude.com/claude-code](https://claude.com/claude-code).
-
-## Build it yourself
-
-```bash
-git clone https://github.com/danmano411/claude-explorer.git
-cd claude-explorer
-npm install
-
-npm run dev        # run in development
-npm test           # run the unit suite
-npm run package    # build the Windows installer -> dist/
-```
-
-`npm run package` runs `electron-vite build` then `electron-builder --win`, producing `dist/Claude Explorer Setup x.y.z.exe`.
-
 ## Updating
 
 **Installed from a release:** Claude Explorer checks GitHub Releases when it starts. When a new version is available it downloads in the background and asks you to restart — click **Restart now** and you're updated. (Choosing **Later** applies it the next time you quit.) No manual downloads needed.
