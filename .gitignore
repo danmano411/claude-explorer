@@ -5,3 +5,4 @@ dist/
 .superpowers/
 CLAUDE.md
 .private/
+.env
