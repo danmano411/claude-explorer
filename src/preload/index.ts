@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
 
@@ -38,6 +38,7 @@ const api: Api = {
   ideOpen: (p) => ipcRenderer.invoke(CH.ideOpen, p),
   settingsGet: () => ipcRenderer.invoke(CH.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
+  clipboardReadText: () => clipboard.readText(),
 };
 
 contextBridge.exposeInMainWorld('api', api);

@@ -59,4 +59,5 @@ export interface Api {
   ideOpen(path: string): Promise<void>
   settingsGet(): Promise<Settings>
   settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
+  clipboardReadText(): string // sync; clipboard is reachable from the preload process
 }

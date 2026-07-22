@@ -26,9 +26,19 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
     // still sends CR (submit). Mirrors the external terminal's behavior.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+      if (e.type !== 'keydown') return true;
+      // Ctrl+V / Ctrl+Shift+V paste the clipboard (xterm otherwise sends ^V to the shell).
+      // term.paste respects bracketed-paste mode, matching right-click paste.
+      if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) {
+        const text = window.api.clipboardReadText();
+        if (text) term.paste(text);
+        return false;
+      }
+      // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
+      // still sends CR (submit). Mirrors the external terminal's behavior.
+      if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
         window.api.ptyWrite(ptyId, '\n');
-        return false; // stop xterm from also sending its default
+        return false;
       }
       return true;
     });
