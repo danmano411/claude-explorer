@@ -158,6 +158,22 @@ body {
 /* ===== Terminal ===== */
 .terminal { height: 100%; width: 100%; background: var(--term-bg); padding: 6px 8px; }
 
+/* Reserve a stable scrollbar gutter so the text layer never draws under the
+   scrollbar (the overlap bug), and theme the scroller to match the terminal. */
+.terminal .xterm-viewport {
+  background: var(--term-bg) !important;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;                       /* Firefox/Chromium */
+  scrollbar-color: #4a4038 var(--term-bg);
+}
+.terminal .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.terminal .xterm-viewport::-webkit-scrollbar-track { background: var(--term-bg); }
+.terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #4a4038; border-radius: 5px;
+  border: 2px solid var(--term-bg);            /* inset the thumb off the track edges */
+}
+.terminal .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--clay); }
+
 /* ================= v2: file-manager chrome ================= */
 
 /* NavBar (back / fwd / refresh / address) */

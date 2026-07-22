@@ -27,8 +27,11 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     const ro = new ResizeObserver(resize);
     ro.observe(ref.current);
     resize();
+    // Re-fit once layout/fonts have settled so column count accounts for the
+    // reserved scrollbar gutter (prevents text drawing under the scrollbar).
+    const settle = setTimeout(resize, 60);
 
-    return () => { offData(); offExit(); ro.disconnect(); term.dispose(); };
+    return () => { clearTimeout(settle); offData(); offExit(); ro.disconnect(); term.dispose(); };
   }, [ptyId]);
 
   return <div className="terminal" ref={ref} style={{ width: '100%', height: '100%' }} />;
