@@ -29,7 +29,6 @@
     "@vitejs/plugin-react": "^4.7.0",
     "electron": "^41.7.1",
     "electron-builder": "^26.15.3",
-    "electron-rebuild": "^3.2.9",
     "electron-vite": "^3.1.0",
     "typescript": "^7.0.2",
     "vite": "^6.4.3",
