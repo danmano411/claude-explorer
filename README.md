@@ -62,21 +62,17 @@ npm run package    # build the Windows installer -> dist/
 
 ## Updating
 
-Claude Explorer does **not** auto-update. Updates are manual and in-place — a new installer upgrades an existing install without you having to uninstall first.
+**Installed from a release:** Claude Explorer checks GitHub Releases when it starts. When a new version is available it downloads in the background and asks you to restart — click **Restart now** and you're updated. (Choosing **Later** applies it the next time you quit.) No manual downloads needed.
 
-**If you installed from a release:** download the newer `Claude Explorer Setup x.y.z.exe` from [Releases](https://github.com/danmano411/claude-explorer/releases) and run it. Your existing shortcuts and taskbar pin keep working.
-
-**If you build from source:**
+**Built from source:** auto-update is disabled for local builds (they aren't tied to the release feed). To update:
 
 ```bash
 git pull
-npm install        # in case dependencies changed
+npm install
 npm run package
 ```
 
-Then run the freshly built installer in `dist/`. The app version lives in `package.json` (`version`); bump it before packaging so the installer name and About reflect the new release.
-
-> Auto-update (electron-updater) isn't wired up yet — it needs a release feed and code signing. Contributions welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Then run the freshly built installer in `dist/` — it upgrades in place.
 
 ## Tech stack
 
