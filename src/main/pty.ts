@@ -29,11 +29,31 @@ export class PtyManager {
   private handles = new Map<string, Handle>()
 
   spawn(
-    opts: { path: string; resumeId?: string },
+    opts: { path: string; resumeId?: string; shell?: boolean },
     onData: (id: string, d: string) => void,
     onExit: (id: string, code: number) => void,
   ): string {
     const id = randomUUID()
+
+    // Plain interactive shell tab (feature 5) — no Claude.
+    if (opts.shell) {
+      let proc: pty.IPty
+      try {
+        proc = pty.spawn('powershell.exe', ['-NoLogo'], {
+          name: 'xterm-color', cwd: opts.path, cols: 80, rows: 24,
+          env: process.env as Record<string, string>,
+        })
+      } catch (err) {
+        const msg = `\r\n\x1b[31mFailed to launch shell: ${(err as Error).message}\x1b[0m\r\n`
+        queueMicrotask(() => { onData(id, msg); onExit(id, 1) })
+        return id
+      }
+      proc.onData((d) => onData(id, d))
+      proc.onExit(({ exitCode }) => { onExit(id, exitCode); this.handles.delete(id) })
+      this.handles.set(id, { proc })
+      return id
+    }
+
     const claudeArgs = opts.resumeId ? ['--resume', opts.resumeId] : []
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)

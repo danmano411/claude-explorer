@@ -1,6 +1,6 @@
 {
   "name": "claude-explorer",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

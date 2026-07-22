@@ -1,4 +1,4 @@
-import type { DirEntry, RecentFolder, ClaudeSession, TrashRecord } from './types'
+import type { DirEntry, RecentFolder, ClaudeSession, TrashRecord, Settings } from './types'
 
 export const CH = {
   fsList: 'fs:list',
@@ -25,6 +25,10 @@ export const CH = {
   openPath: 'shell:openPath',
   revealPath: 'shell:reveal',
   recentsRemove: 'recents:remove',
+  ideOpen: 'ide:open',
+  settingsGet: 'settings:get',
+  settingsSet: 'settings:set',
+  menuCommand: 'menu:command', // main -> renderer event (File/Settings menu items)
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -35,7 +39,7 @@ export interface Api {
   recentsAdd(path: string): Promise<void>
   sessionsList(path: string): Promise<ClaudeSession[]>
   externalOpen(path: string): Promise<void>
-  ptySpawn(opts: { path: string; resumeId?: string }): Promise<string> // returns ptyId
+  ptySpawn(opts: { path: string; resumeId?: string; shell?: boolean }): Promise<string> // returns ptyId
   ptyWrite(ptyId: string, data: string): void
   ptyResize(ptyId: string, cols: number, rows: number): void
   ptyKill(ptyId: string): void
@@ -53,4 +57,9 @@ export interface Api {
   openPath(path: string): Promise<void>
   revealPath(path: string): Promise<void>
   recentsRemove(path: string): Promise<void>
+  ideOpen(path: string): Promise<void>
+  settingsGet(): Promise<Settings>
+  settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
+  clipboardReadText(): string // sync; clipboard is reachable from the preload process
+  onMenuCommand(cb: (cmd: string) => void): () => void // 'new-tab' | 'close-tab' | 'open-settings'
 }

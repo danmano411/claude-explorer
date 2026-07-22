@@ -23,6 +23,26 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     const offExit = window.api.onPtyExit((id) => { if (id === ptyId) term.write('\r\n[session ended]\r\n'); });
     term.onData((d) => window.api.ptyWrite(ptyId, d));
 
+    // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
+    // still sends CR (submit). Mirrors the external terminal's behavior.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      // Ctrl+V / Ctrl+Shift+V paste the clipboard (xterm otherwise sends ^V to the shell).
+      // term.paste respects bracketed-paste mode, matching right-click paste.
+      if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) {
+        const text = window.api.clipboardReadText();
+        if (text) term.paste(text);
+        return false;
+      }
+      // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
+      // still sends CR (submit). Mirrors the external terminal's behavior.
+      if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+        window.api.ptyWrite(ptyId, '\n');
+        return false;
+      }
+      return true;
+    });
+
     const resize = () => { fit.fit(); window.api.ptyResize(ptyId, term.cols, term.rows); };
     const ro = new ResizeObserver(resize);
     ro.observe(ref.current);
