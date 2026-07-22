@@ -8,6 +8,8 @@ import { registerPtyHandlers } from './pty.handlers'
 import { registerFsMutateHandlers } from './fsmutate.handlers'
 import { registerTrashHandlers } from './trash.handlers'
 import { registerOpenHandlers } from './open.handlers'
+import { registerSettingsHandlers } from './settings.handlers'
+import { registerIdeHandlers } from './ide.handlers'
 import { flushAll } from './trash'
 
 let mainWindow: BrowserWindow | null = null
@@ -50,6 +52,8 @@ app.whenReady().then(() => {
   registerFsMutateHandlers()
   registerTrashHandlers()
   registerOpenHandlers()
+  registerSettingsHandlers()
+  registerIdeHandlers()
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -35,6 +35,9 @@ const api: Api = {
   openPath: (p) => ipcRenderer.invoke(CH.openPath, p),
   revealPath: (p) => ipcRenderer.invoke(CH.revealPath, p),
   recentsRemove: (p) => ipcRenderer.invoke(CH.recentsRemove, p),
+  ideOpen: (p) => ipcRenderer.invoke(CH.ideOpen, p),
+  settingsGet: () => ipcRenderer.invoke(CH.settingsGet),
+  settingsSet: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
 };
 
 contextBridge.exposeInMainWorld('api', api);

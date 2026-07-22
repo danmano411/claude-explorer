@@ -24,3 +24,9 @@ export interface TrashRecord {
   staged: string // absolute path in the same-drive trash staging dir
   name: string // basename, for display
 }
+
+export interface Settings {
+  ideCommand: string // e.g. "code"; launched as `<ideCommand> <folder>`
+}
+
+export type PtyStatus = 'running' | 'waiting' | 'stopped'

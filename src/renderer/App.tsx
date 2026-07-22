@@ -1,13 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
-import { newFilesTab, type Tab } from './tabs';
+import { newFilesTab, newTerminalTab, type Tab } from './tabs';
+import { reorder } from './tabreorder';
+import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { RecentMenu } from './components/RecentMenu';
+import { SettingsModal } from './components/SettingsModal';
 import { TabBar } from './TabBar';
+
+const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
 export function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string>('');
+  const [showSettings, setShowSettings] = useState(false);
+  const status = usePtyStatus();
   const lastActivated = useRef<Map<string, number>>(new Map());
 
   const selectTab = (id: string) => {
@@ -50,20 +57,38 @@ export function App() {
     }
   };
 
-  const reorderTabs = (from: number, to: number) => {
-    setTabs((ts) => {
-      const a = [...ts];
-      const [moved] = a.splice(from, 1);
-      a.splice(to, 0, moved);
-      return a;
-    });
-  };
+  const reorderTabs = (from: number, insert: number) =>
+    setTabs((ts) => reorder(ts, from, insert));
 
+  // Orange-arrow / in-place: converts the current files tab into a Claude terminal.
   const openClaude = async (id: string, cwd: string, resumeId?: string) => {
     await window.api.recentsAdd(cwd);
     const ptyId = await window.api.ptySpawn({ path: cwd, resumeId });
-    update(id, { view: 'terminal', cwd, ptyId, title: cwd.split(/[\\/]/).pop() || cwd });
+    update(id, { view: 'terminal', cwd, ptyId, terminalKind: 'claude', title: basename(cwd) });
   };
+
+  // Feature 1: Open Recent launches Claude in a NEW tab (never overrides current).
+  const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
+    await window.api.recentsAdd(cwd);
+    const ptyId = await window.api.ptySpawn({ path: cwd, resumeId });
+    const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd));
+    setTabs((ts) => [...ts, t]); selectTab(t.id);
+  };
+
+  // Feature 5: open a plain shell terminal tab at a folder.
+  const openShellTab = async (cwd: string) => {
+    const ptyId = await window.api.ptySpawn({ path: cwd, shell: true });
+    const t = newTerminalTab(cwd, 'shell', ptyId, 'Terminal');
+    setTabs((ts) => [...ts, t]); selectTab(t.id);
+  };
+
+  // Feature 4: tab context-menu actions (resolve the tab's cwd, then act).
+  const cwdOf = (id: string) => tabs.find((t) => t.id === id)?.cwd;
+  const onOpenExplorer = (id: string) => { const p = cwdOf(id); if (p) window.api.openPath(p); };
+  const onOpenTerminal = (id: string) => { const p = cwdOf(id); if (p) openShellTab(p); };
+  const onOpenIde = (id: string) => { const p = cwdOf(id); if (p) window.api.ideOpen(p); };
+  const onRename = (id: string, title: string) =>
+    update(id, { title: title.trim() || (cwdOf(id) ? basename(cwdOf(id)!) : 'Tab'), renamed: true });
 
   const activeTab = tabs.find((t) => t.id === active);
 
@@ -72,15 +97,23 @@ export function App() {
       <TabBar
         tabs={tabs}
         activeId={active}
+        status={status}
         onSelect={selectTab}
         onClose={closeTab}
         onAdd={addTab}
         onReorder={reorderTabs}
+        onRename={onRename}
+        onOpenExplorer={onOpenExplorer}
+        onOpenTerminal={onOpenTerminal}
+        onOpenIde={onOpenIde}
         recentMenu={
-          <RecentMenu
-            onOpen={(p, resumeId) => activeTab && openClaude(activeTab.id, p, resumeId)}
-            onOpenFolder={openFolderTab}
-          />
+          <>
+            <RecentMenu
+              onOpen={(p, resumeId) => openClaudeNewTab(p, resumeId)}
+              onOpenFolder={openFolderTab}
+            />
+            <button className="gear" title="Settings" onClick={() => setShowSettings(true)}>⚙</button>
+          </>
         }
       />
       <div className="content">
@@ -88,7 +121,12 @@ export function App() {
           <FileBrowser
             cwd={activeTab.cwd}
             tabId={activeTab.id}
-            onNavigate={(p) => update(activeTab.id, { cwd: p, title: p.split(/[\\/]/).pop() || p })}
+            onNavigate={(p) =>
+              update(activeTab.id, {
+                cwd: p,
+                ...(activeTab.renamed ? {} : { title: basename(p) }),
+              })
+            }
             onOpenClaude={(p) => openClaude(activeTab.id, p)}
             onOpenExternal={(p) => window.api.externalOpen(p)}
           />
@@ -97,6 +135,7 @@ export function App() {
           <Terminal ptyId={activeTab.ptyId} />
         )}
       </div>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

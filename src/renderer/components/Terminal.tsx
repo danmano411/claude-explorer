@@ -23,6 +23,16 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     const offExit = window.api.onPtyExit((id) => { if (id === ptyId) term.write('\r\n[session ended]\r\n'); });
     term.onData((d) => window.api.ptyWrite(ptyId, d));
 
+    // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
+    // still sends CR (submit). Mirrors the external terminal's behavior.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+        window.api.ptyWrite(ptyId, '\n');
+        return false; // stop xterm from also sending its default
+      }
+      return true;
+    });
+
     const resize = () => { fit.fit(); window.api.ptyResize(ptyId, term.cols, term.rows); };
     const ro = new ResizeObserver(resize);
     ro.observe(ref.current);
