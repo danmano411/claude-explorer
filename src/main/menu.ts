@@ -53,6 +53,12 @@ export function buildMenu() {
       label: 'Settings',
       submenu: [
         { label: 'Preferences…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings') },
+        { type: 'separator' },
+        {
+          label: 'Toggle Developer Mode',
+          accelerator: 'CmdOrCtrl+Shift+D',
+          click: () => send('toggle-mode'),
+        },
       ],
     },
   ]

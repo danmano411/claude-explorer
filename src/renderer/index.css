@@ -267,3 +267,19 @@ body {
 /* remove-from-recent × */
 .recent-remove { color: var(--ink-soft); }
 .recent-remove:hover { color: #fff; background: var(--clay); border-color: var(--clay); }
+
+/* Explorer / Developer mode toggle (status bar) */
+.mode-toggle {
+  margin-left: auto;
+  font: inherit;
+  background: none;
+  border: 1px solid var(--clay);
+  color: var(--clay);
+  border-radius: var(--radius);
+  padding: 0 8px;
+  cursor: pointer;
+}
+.mode-toggle--dev {
+  background: var(--clay);
+  color: var(--bg);
+}
