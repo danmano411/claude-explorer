@@ -960,6 +960,42 @@ git commit -m "feat(mode): Explorer/Developer toggle in settings, menu, and stat
 - Create: `src/renderer/opresult.ts`
 - Create: `src/renderer/components/ConfirmDialog.tsx`
 - Modify: `src/renderer/components/FileBrowser.tsx`
+- Modify: `src/renderer/undo.ts`
+
+**Plan amendment (found during Task 1):** `undo.ts` was missing from the original file map. Its `Command` factories call `window.api.*` directly and expect raw return values, so all six break under `OpResult`. Migrate them like this:
+
+```ts
+import type { OpResult } from '../shared/types'
+
+export class OpError extends Error {
+  constructor(public result: Extract<OpResult<unknown>, { ok: false }>) {
+    super(result.reason)
+  }
+}
+
+/** Unwraps or throws, so a blocked command never reaches the undo stack. */
+async function must<T>(p: Promise<OpResult<T>>): Promise<T> {
+  const r = await p
+  if (!r.ok) throw new OpError(r)
+  return r.value
+}
+```
+
+Each factory takes an optional trailing `confirm?: string` and wraps its call in `must(...)`, e.g.:
+
+```ts
+export function renameCmd(from: string, to: string, confirm?: string): Command {
+  return {
+    label: `Rename ${winBasename(from)}`,
+    do: async () => { await must(window.api.fsRename(from, to, confirm)) },
+    undo: async () => { await must(window.api.fsRename(to, from, confirm)) },
+  }
+}
+```
+
+**Why throwing is correct here:** `UndoStack.run()` pushes to `past` only *after* `await c.do()` resolves. Throwing therefore keeps a denied or unconfirmed operation out of the undo stack for free — no change to `UndoStack` itself. `FileBrowser` catches `OpError`, and on `NEEDS_CONFIRM` re-runs `undo.run(renameCmd(from, to, 'CONFIRM'))` — the command is simply rebuilt with the confirm value.
+
+Also fix `moveCmd` line 28: `src.slice(0, src.lastIndexOf('\\'))` is the same D3 bug — use `winDirname(src)`.
 
 **Interfaces:**
 - Consumes: `OpResult`, `ListResult`, `DirEntry.hidden`, `DirEntry.isSymlink` (Task 1); `StatusBar` props (Task 6); `CONFIRM_WORD` — redeclare it locally as `'CONFIRM'` rather than importing from `src/main/`, so the renderer bundle never pulls in a main-process module.
