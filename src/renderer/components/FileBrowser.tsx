@@ -1,13 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DirEntry } from '../../shared/types';
+import type { DirEntry, FileMode } from '../../shared/types';
 import { sameDrive, winBasename, winDirname } from '../../shared/pathutil';
 import { emptySelection, applyClick, type Selection } from '../selection';
 import { initHistory, canBack, canForward, navigate, goBack, goForward } from '../history';
-import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, type Command } from '../undo';
+import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, OpError, type Command } from '../undo';
+import { unwrap, type ConfirmRequest } from '../opresult';
 import { useAppState } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
+import { ConfirmDialog } from './ConfirmDialog';
 import { ContextMenu, type MenuItem } from './ContextMenu';
+
+/** A command factory: the confirm word is baked in at build time, so a retry is
+ *  just "build the same command again, this time with the typed word". */
+type CommandFactory = (confirm?: string) => Command;
 
 export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExternal }: {
   cwd: string;
@@ -20,44 +26,100 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const [history, setHistory] = useState(() => initHistory(cwd));
   const dir = history.current;
   const [entries, setEntries] = useState<DirEntry[]>([]);
+  const [listError, setListError] = useState('');
+  const [mode, setMode] = useState<FileMode>('explorer');
   const [selection, setSelection] = useState<Selection>(emptySelection());
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [renaming, setRenaming] = useState<{ path: string; value: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<string[] | null>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const dragButton = useRef(0);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const notify = (m: string) => { setToast(m); setTimeout(() => setToast(''), 2500); };
+  // Policy refusals are longer than "busy" chatter, so they get more time on screen.
+  const notify = (m: string, ms = 2500) => {
+    clearTimeout(toastTimer.current);
+    setToast(m);
+    toastTimer.current = setTimeout(() => setToast(''), ms);
+  };
 
-  const selectedPaths = useMemo(
-    () => [...selection.indices].sort((a, b) => a - b).map((i) => entries[i]).filter(Boolean).map((e) => e.path),
-    [selection, entries]
+  // Explorer mode hides the noise; Developer mode shows everything. Indices used
+  // by selection/keyboard address THIS list, never the unfiltered one.
+  const shown = useMemo(
+    () => (mode === 'developer' ? entries : entries.filter((e) => !e.hidden)),
+    [entries, mode]
   );
 
-  const load = () => { window.api.fsList(dir).then(setEntries).catch(() => setEntries([])); };
+  const selectedPaths = useMemo(
+    () => [...selection.indices].sort((a, b) => a - b).map((i) => shown[i]).filter(Boolean).map((e) => e.path),
+    [selection, shown]
+  );
+
+  const applyList = (r: Awaited<ReturnType<typeof window.api.fsList>>) => {
+    if (r.ok) { setEntries(r.entries); setListError(''); }
+    else { setEntries([]); setListError(r.reason); }
+  };
+  const load = () => {
+    window.api.fsList(dir).then(applyList).catch((err) => {
+      setEntries([]);
+      setListError(err instanceof Error ? err.message : 'Could not read this folder');
+    });
+  };
 
   // load list when directory changes
-  useEffect(() => { window.api.fsList(dir).then(setEntries).catch(() => setEntries([])); setSelection(emptySelection()); }, [dir]);
+  useEffect(() => { load(); setSelection(emptySelection()); }, [dir]);
   // sync from external cwd changes (App / spring-load)
   useEffect(() => { if (cwd !== dir) setHistory((h) => navigate(h, cwd)); }, [cwd]);
   // report effective dir upward
   useEffect(() => { if (dir !== cwd) onNavigate(dir); }, [dir]);
 
+  // mode is persisted in main; the status-bar button and the menu share one path
+  useEffect(() => { window.api.settingsGet().then((s) => setMode(s.mode)); }, []);
+  const toggleMode = () => {
+    const next: FileMode = mode === 'developer' ? 'explorer' : 'developer';
+    setMode(next);
+    setSelection(emptySelection()); // indices address `shown`, which just changed
+    void window.api.settingsSet({ mode: next });
+  };
+  useEffect(
+    () => window.api.onMenuCommand((cmd) => { if (cmd === 'toggle-mode') toggleMode(); }),
+    [mode]
+  );
+
   const nav = (p: string) => setHistory((h) => navigate(h, p));
   const refresh = () => load();
 
-  const runGuarded = async (paths: string[], cmd: Command) => {
-    try { await app.withGuard(paths, () => app.undo.run(cmd)); }
-    catch { notify('That item is busy — try again in a moment.'); throw new Error('busy'); }
+  /** Runs a command through the busy guard and the undo stack. Returns false
+   *  (without pushing anything onto the stack) when main refused it. */
+  const runGuarded = async (paths: string[], make: CommandFactory, confirm?: string): Promise<boolean> => {
+    try {
+      await app.withGuard(paths, () => app.undo.run(make(confirm)));
+      return true;
+    } catch (err) {
+      if (err instanceof OpError) {
+        const r = err.result;
+        if (r.code === 'NEEDS_CONFIRM') {
+          setConfirmRequest({
+            reason: r.reason,
+            typed: r.typed,
+            retry: async (word: string) => { if (await runGuarded(paths, make, word)) load(); },
+          });
+        } else notify(r.reason, 6000);
+      } else notify('That item is busy — try again in a moment.');
+      return false;
+    }
   };
 
   const paste = async (destDir: string) => {
     const cb = app.clipboard;
     if (!cb || !cb.paths.length) return;
     for (const src of cb.paths) {
-      const cmd = cb.mode === 'copy' ? copyCmd(src, destDir) : moveCmd(src, destDir);
-      try { await runGuarded([src, destDir], cmd); } catch { return; }
+      const make: CommandFactory = cb.mode === 'copy'
+        ? (c) => copyCmd(src, destDir, c)
+        : (c) => moveCmd(src, destDir, c);
+      if (!(await runGuarded([src, destDir], make))) return;
     }
     if (cb.mode === 'cut') app.setClipboard(null);
     load();
@@ -69,25 +131,26 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     const name = r.value.trim();
     if (!name || name === winBasename(r.path)) return;
     const dest = winDirname(r.path) + '\\' + name;
-    try { await runGuarded([r.path], renameCmd(r.path, dest)); } catch { return; }
+    if (!(await runGuarded([r.path], (c) => renameCmd(r.path, dest, c)))) return;
     load();
   };
 
-  const createThenRename = async (make: () => Command) => {
+  const createThenRename = async (make: CommandFactory) => {
     const before = new Set(entries.map((e) => e.path));
-    try { await runGuarded([dir], make()); } catch { return; }
+    if (!(await runGuarded([dir], make))) return;
     const list = await window.api.fsList(dir);
-    setEntries(list);
-    const created = list.find((e) => !before.has(e.path));
+    applyList(list);
+    if (!list.ok) return;
+    const created = list.entries.find((e) => !before.has(e.path));
     if (created) setRenaming({ path: created.path, value: created.name });
   };
-  const newFolder = () => createThenRename(() => mkdirCmd(dir, 'New folder'));
-  const newFile = () => createThenRename(() => newFileCmd(dir, 'New file'));
+  const newFolder = () => createThenRename((c) => mkdirCmd(dir, 'New folder', c));
+  const newFile = () => createThenRename((c) => newFileCmd(dir, 'New file', c));
 
   const doDelete = async () => {
     const paths = confirmDel; setConfirmDel(null);
     if (!paths?.length) return;
-    try { await runGuarded(paths, deleteCmd(paths)); } catch { return; }
+    if (!(await runGuarded(paths, (c) => deleteCmd(paths, c)))) return;
     setSelection(emptySelection()); load();
   };
 
@@ -98,11 +161,13 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const runDrop = async (paths: string[], destFolder: string, ev: { ctrlKey: boolean; shiftKey: boolean }, forced?: 'move' | 'copy') => {
     if (paths.some((p) => app.isBusy(p)) || app.isBusy(destFolder)) { notify('That item is busy — drop refused.'); return; }
     for (const src of paths) {
-      const mode = forced ?? ((ev.ctrlKey || !sameDrive(src, destFolder)) ? 'copy' : 'move');
+      const kind = forced ?? ((ev.ctrlKey || !sameDrive(src, destFolder)) ? 'copy' : 'move');
       // dropping into the folder an item already lives in is a no-op for a move
-      if (mode === 'move' && winDirname(src) === destFolder) continue;
-      const cmd = mode === 'copy' ? copyCmd(src, destFolder) : moveCmd(src, destFolder);
-      try { await runGuarded([src, destFolder], cmd); } catch { return; }
+      if (kind === 'move' && winDirname(src) === destFolder) continue;
+      const make: CommandFactory = kind === 'copy'
+        ? (c) => copyCmd(src, destFolder, c)
+        : (c) => moveCmd(src, destFolder, c);
+      if (!(await runGuarded([src, destFolder], make))) return;
     }
     app.setDrag(null);
     load();
@@ -172,7 +237,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
       if (typing) return;
       if (e.key === 'Backspace') { e.preventDefault(); nav(winDirname(dir)); return; }
-      if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(entries.map((_, i) => i)) }); return; }
+      if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
       if (e.key === 'Escape') { setSelection(emptySelection()); setMenu(null); return; }
       if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) app.setClipboard({ mode: 'cut', paths: selectedPaths }); return; }
       if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) app.setClipboard({ mode: 'copy', paths: selectedPaths }); return; }
@@ -181,11 +246,32 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       if (e.ctrlKey && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
       if (e.ctrlKey && e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newFolder(); return; }
       if (e.key === 'F2') { if (selectedPaths.length === 1) { const p = selectedPaths[0]; setRenaming({ path: p, value: winBasename(p) }); } return; }
-      if (e.key === 'Delete') { if (selectedPaths.length) setConfirmDel(selectedPaths); return; }
+      if (e.key === 'Delete') {
+        e.preventDefault();
+        const paths = selectedPaths;
+        if (!paths.length) return;
+        if (e.shiftKey) {
+          // Permanent delete bypasses staging and returns [], so there is nothing
+          // to restore — deliberately NO undo entry. Explorer mode is refused by
+          // main; the refusal reason arrives here as a toast.
+          void unwrap(
+            async (confirm) => {
+              const r = await window.api.fsDelete(paths, { permanent: true, confirm });
+              if (r.ok) { setSelection(emptySelection()); load(); } // also covers the confirmed retry
+              return r;
+            },
+            (m) => notify(m, 6000),
+            setConfirmRequest,
+          );
+          return;
+        }
+        setConfirmDel(paths);
+        return;
+      }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [dir, entries, selectedPaths, app.clipboard]);
+  }, [dir, shown, selectedPaths, app.clipboard]);
 
   return (
     <div className="filebrowser">
@@ -205,13 +291,15 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
         onDragLeave={(ev) => { if (ev.currentTarget === ev.target) setDropTarget((t) => (t === dir ? null : t)); }}
         onDrop={(ev) => { ev.preventDefault(); setDropTarget(null); dropInto(dir, ev); }}
       >
-        {entries.map((e, i) => {
+        {listError && <li className="empty">{listError}</li>}
+        {shown.map((e, i) => {
           const selected = selection.indices.has(i);
           return (
             <li
               key={e.path}
               draggable
               className={[selected ? 'entry selected' : 'entry', dropTarget === e.path ? 'drop-target' : ''].join(' ').trim()}
+              style={e.hidden ? { opacity: 0.55 } : undefined}
               onMouseDown={(ev) => { dragButton.current = ev.button; }}
               onClick={(ev) => setSelection((s) => applyClick(s, i, { ctrl: ev.ctrlKey, shift: ev.shiftKey }))}
               onDoubleClick={() => (e.isDirectory ? nav(e.path) : window.api.openPath(e.path))}
@@ -250,7 +338,9 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
                   }}
                 />
               ) : (
-                <span className="entry-label">{e.isDirectory ? '📁' : '📄'} {e.name}</span>
+                <span className="entry-label" title={e.isSymlink ? 'Junction / symlink' : undefined}>
+                  {e.isDirectory ? '📁' : '📄'} {e.name}{e.isSymlink ? ' ↗' : ''}
+                </span>
               )}
               {e.isDirectory && !renaming && (
                 <button
@@ -265,7 +355,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
           );
         })}
       </ul>
-      <StatusBar count={entries.length} selected={selection.indices.size} />
+      <StatusBar count={shown.length} selected={selection.indices.size} mode={mode} onToggleMode={toggleMode} />
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
       {confirmDel && (
         <div className="modal-backdrop" onClick={() => setConfirmDel(null)}>
@@ -277,6 +367,9 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
             </div>
           </div>
         </div>
+      )}
+      {confirmRequest && (
+        <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
       )}
       {toast && <div className="toast">{toast}</div>}
     </div>
