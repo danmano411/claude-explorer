@@ -35,8 +35,19 @@ If you live in Claude Code, you spend a lot of time `cd`-ing into project folder
 - **Open Recent** — recent folders plus resumable Claude sessions, parsed straight from `~/.claude/projects`. Start fresh or resume an existing conversation; prune entries you don't want.
 - **Full file management** — rename, copy, cut, paste, delete (to the Recycle Bin), new folder/file. Right-click menu, `Ctrl+C/X/V`, `F2`, `Del`, and full `Ctrl+Z` / `Ctrl+Y` undo/redo (delete included).
 - **Drag and drop** — within a folder, into subfolders, and across tabs. Windows move/copy conventions (same drive = move, cross-drive = copy, `Ctrl` = copy, `Shift` = move, right-drag = menu). Multiselect with `Shift`/`Ctrl`.
+- **Read-only viewer and diff** — open any file in a tab with syntax highlighting, see a Git status letter on every row, and open a coloured unified diff to answer "what did Claude just change?". See [Viewing files](#viewing-files).
 - **Navigation** — back / forward / refresh and an editable address bar.
 - **Retro Claude look** — warm paper, clay accents, serif chrome, mono data.
+
+## Viewing files
+
+Claude Explorer is a cockpit for supervising an AI that edits your files, so it can show you those files — and, more to the point, show you what changed.
+
+- **Read-only viewer.** Double-click any file to open it in its own tab (a first-class tab, not a split pane, so it reorders, renames and closes like every other tab). Syntax highlighting comes from [Shiki](https://shiki.style), the same TextMate grammars VS Code uses, in a Solarized theme picked to sit inside the Retro Claude palette. Grammars load on demand, so opening a `.json` file never pays for the TypeScript grammar. Files over ~200k characters render as plain text rather than freezing the UI; binary files and files over 5 MB say so in a sentence and offer **Open in default app**.
+- **Git status gutter.** In a Git repository, every row in the listing carries git's own letter — `M` modified, `A` added, `D` deleted, `U` untracked, `R` renamed, `·` for a folder that merely contains changes. Files Claude *deleted* still get a ghost row, struck through, because "Claude removed this" is exactly the change you most want to notice. The gutter refreshes when the terminal next door goes quiet, so it keeps up with a session that is editing while you watch. A folder that isn't a repo simply has no gutter — that's a normal state, not an error.
+- **Diff view — "what did Claude just change?"** Right-click a changed file → **Show changes** (or double-click a ghost row) to open a unified diff in its own tab: additions and deletions coloured, a `+n / −n` summary, and real file line numbers taken from the `@@` headers — the number you type back into Claude, not a position within the diff. Diffs are Git-only; there is no snapshot subsystem for non-Git folders.
+
+**Editing stays in Claude.** The viewer is read-only by design, and that is a product decision rather than a gap waiting to be filled. This app's job is to *supervise* the AI doing the editing — browse, launch, watch, review the diff. Adding a text editor would make it a worse version of two tools that already exist. If you want to change a file, ask Claude in the terminal tab that's already open on that folder.
 
 ## Safety
 
