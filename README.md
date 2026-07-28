@@ -38,6 +38,20 @@ If you live in Claude Code, you spend a lot of time `cd`-ing into project folder
 - **Navigation** — back / forward / refresh and an editable address bar.
 - **Retro Claude look** — warm paper, clay accents, serif chrome, mono data.
 
+## Safety
+
+Claude Explorer has two modes, toggled from the status bar (the current mode is always visible there):
+
+- **Explorer mode** (default) — behaves like File Explorer. Hidden files and Windows noise (`.git`, `$Recycle.Bin`, `System Volume Information`, …) stay out of the listing, and anything that would mutate a **system path** is refused outright with a plain-English reason.
+- **Developer mode** — unlocks the risky half:
+  - hidden files and dotfiles appear in the listing, dimmed;
+  - mutating a system path is allowed, but only behind a **typed confirmation** — you have to type the word `CONFIRM`;
+  - `Shift+Del` performs a **permanent delete** that skips the trash and cannot be undone with `Ctrl+Z` (also typed-confirmed). In Explorer mode this shortcut is refused.
+
+**Protected by default.** `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, and drive roots (`C:\`, `D:\`, …) are system paths — the rule matches the folder *and everything beneath it*, so `C:\Windows\System32\drivers` is protected too. The app's own `.claude-explorer-trash` staging folder is off-limits in **both** modes, because changing it would break pending undo. Browsing is never restricted; only mutation is.
+
+Every decision is made in the main process, not the UI, so no call site can forget to ask. This is a guardrail against mis-drags and mistaken deletes — yours or an AI's — not a security sandbox: the app runs a real shell for you on request.
+
 ## Updating
 
 **Installed from a release:** Claude Explorer checks GitHub Releases when it starts. When a new version is available it downloads in the background and asks you to restart — click **Restart now** and you're updated. (Choosing **Later** applies it the next time you quit.) No manual downloads needed.

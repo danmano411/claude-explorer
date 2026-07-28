@@ -1,0 +1,154 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import type { FileMode } from '../shared/types'
+
+export type Op = 'delete' | 'permanentDelete' | 'move' | 'copy' | 'rename' | 'mkdir' | 'newFile'
+export type PathClass = 'system' | 'driveRoot' | 'trash' | 'normal'
+
+export type Verdict =
+  | { kind: 'allow' }
+  | { kind: 'deny'; reason: string }
+  | { kind: 'confirm'; reason: string; typed: boolean }
+
+export const CONFIRM_WORD = 'CONFIRM'
+export const TRASH_DIR_NAME = '.claude-explorer-trash'
+
+export const DEFAULT_SYSTEM_ROOTS = [
+  'C:\\Windows',
+  'C:\\Program Files',
+  'C:\\Program Files (x86)',
+  'C:\\ProgramData',
+]
+
+/** Lower-case, backslash-only, no trailing separator. */
+function norm(p: string): string {
+  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+}
+
+/** True when `child` IS `parent` or sits beneath it. Segment-aware, so
+ *  "C:\WindowsBackup" is not treated as living under "C:\Windows". */
+function isUnder(child: string, parent: string): boolean {
+  const c = norm(child)
+  const p = norm(parent)
+  return c === p || c.startsWith(p + '\\')
+}
+
+/** `C:`, `\\server\share`, and their `\\?\` / `\\?\UNC\` spellings. */
+function isDriveRoot(n: string): boolean {
+  const s = n.replace(/^\\\\\?\\/, '').replace(/^unc\\/, '\\\\')
+  return /^[a-z]:$/.test(s) || /^\\\\[^\\]+\\[^\\]+$/.test(s)
+}
+
+export function classify(p: string, roots: string[] = DEFAULT_SYSTEM_ROOTS): PathClass {
+  const n = norm(p)
+  // Trash is checked first: it is denied in BOTH modes, so it must win over
+  // any other classification that might merely require confirmation.
+  if (n.split('\\').includes(TRASH_DIR_NAME)) return 'trash'
+  if (isDriveRoot(n)) return 'driveRoot'
+  for (const r of roots) if (isUnder(p, r)) return 'system'
+  return 'normal'
+}
+
+/** Resolve to the real on-disk path: expands 8.3 short names, `..`, symlinks
+ *  and junctions, and strips the `\\?\` prefix. For a target that does not
+ *  exist yet (mkdir/newFile) the nearest existing ancestor is resolved and the
+ *  remaining segments re-appended. Never throws. */
+export function canonicalize(p: string): string {
+  try {
+    return fs.realpathSync.native(p)
+  } catch {
+    /* falls through to the ancestor walk */
+  }
+  try {
+    const rest: string[] = []
+    let cur = path.resolve(p)
+    for (;;) {
+      const parent = path.dirname(cur)
+      if (parent === cur) return path.resolve(p)
+      rest.unshift(path.basename(cur))
+      cur = parent
+      try {
+        return path.join(fs.realpathSync.native(cur), ...rest)
+      } catch {
+        /* keep walking up */
+      }
+    }
+  } catch {
+    return p
+  }
+}
+
+export function check(
+  op: Op,
+  paths: string[],
+  mode: FileMode,
+  roots: string[] = DEFAULT_SYSTEM_ROOTS,
+): Verdict {
+  if (op === 'permanentDelete' && mode === 'explorer') {
+    return {
+      kind: 'deny',
+      reason:
+        'Permanent delete is a Developer mode operation. Switch modes in the status bar if you really need it.',
+    }
+  }
+
+  for (const p of paths) {
+    const cls = classify(p, roots)
+    if (cls === 'trash') {
+      return {
+        kind: 'deny',
+        reason:
+          "That's Claude Explorer's own undo staging folder — changing it would break pending undo.",
+      }
+    }
+    if (cls === 'system' || cls === 'driveRoot') {
+      const what = cls === 'system' ? 'A system folder' : 'A drive root'
+      if (mode === 'explorer') {
+        return { kind: 'deny', reason: `${what}. Switch to Developer mode if you really need this.` }
+      }
+      return {
+        kind: 'confirm',
+        reason: `${what} — this can break Windows. Type ${CONFIRM_WORD} to proceed.`,
+        typed: true,
+      }
+    }
+  }
+
+  if (op === 'permanentDelete') {
+    return {
+      kind: 'confirm',
+      reason: `Permanent delete skips the trash and cannot be undone with Ctrl+Z. Type ${CONFIRM_WORD} to proceed.`,
+      typed: true,
+    }
+  }
+
+  // Normal deletes are deliberately NOT confirmed: Windows 11 does not confirm
+  // Recycle Bin deletes, and trash staging + Ctrl+Z already cover this.
+  return { kind: 'allow' }
+}
+
+/** The chokepoint. Returns null when the operation may proceed, otherwise the
+ *  blocking verdict. Re-validates on every call — a caller that supplies a
+ *  confirm value is never trusted to have actually earned it.
+ *
+ *  Canonicalisation lives HERE, not in the handlers: `classify`/`check` stay
+ *  pure string matching, and no call site can forget to resolve first. */
+export function gate(
+  op: Op,
+  paths: string[],
+  mode: FileMode,
+  confirm?: string,
+  roots: string[] = DEFAULT_SYSTEM_ROOTS,
+  resolve: (p: string) => string = canonicalize,
+): Verdict | null {
+  const v = check(
+    op,
+    paths.map((p) => resolve(p)),
+    mode,
+    roots,
+  )
+  if (v.kind === 'allow') return null
+  if (v.kind === 'deny') return v
+  const satisfied = v.typed ? confirm === CONFIRM_WORD : confirm !== undefined
+  return satisfied ? null : v
+}

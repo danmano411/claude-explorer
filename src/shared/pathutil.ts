@@ -1,5 +1,15 @@
+/** Reduces a path to the volume it lives on: "c:" for local paths,
+ *  "\\\\server\\share" for UNC. The old implementation used slice(0,1), which
+ *  returned "\" for EVERY UNC path — making all network paths compare equal. */
+export function driveKey(p: string): string {
+  const s = p.replace(/^\\\\\?\\/, '') // strip \\?\ long-path prefix
+  const unc = /^\\\\([^\\]+)\\([^\\]+)/.exec(s)
+  if (unc) return `\\\\${unc[1]}\\${unc[2]}`.toLowerCase()
+  return s.slice(0, 2).toLowerCase()
+}
+
 export function sameDrive(a: string, b: string): boolean {
-  return a.slice(0, 1).toLowerCase() === b.slice(0, 1).toLowerCase()
+  return driveKey(a) === driveKey(b)
 }
 
 export function winBasename(p: string): string {

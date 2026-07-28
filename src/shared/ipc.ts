@@ -1,4 +1,11 @@
-import type { DirEntry, RecentFolder, ClaudeSession, TrashRecord, Settings } from './types'
+import type {
+  RecentFolder,
+  ClaudeSession,
+  TrashRecord,
+  Settings,
+  OpResult,
+  ListResult,
+} from './types'
 
 export const CH = {
   fsList: 'fs:list',
@@ -33,7 +40,7 @@ export const CH = {
 
 // invoke (renderer -> main -> Promise) signatures
 export interface Api {
-  fsList(path: string): Promise<DirEntry[]>
+  fsList(path: string): Promise<ListResult>
   fsHome(): Promise<string>
   recentsList(): Promise<RecentFolder[]>
   recentsAdd(path: string): Promise<void>
@@ -46,13 +53,19 @@ export interface Api {
   onPtyData(cb: (ptyId: string, data: string) => void): () => void // returns unsubscribe
   onPtyExit(cb: (ptyId: string, code: number) => void): () => void
   // --- v2 file operations ---
-  fsRename(from: string, to: string): Promise<void>
-  fsMkdir(path: string): Promise<string> // returns created dir path (collision-resolved)
-  fsNewFile(path: string): Promise<string> // returns created file path (collision-resolved)
-  fsCopy(src: string, destDir: string): Promise<string> // returns final path
-  fsMove(src: string, destDir: string): Promise<string> // returns final path
-  fsDelete(paths: string[]): Promise<TrashRecord[]>
-  fsRestore(records: TrashRecord[]): Promise<void>
+  // Mutating ops are policy-gated in main; `confirm` carries the typed word on retry.
+  fsRename(from: string, to: string, confirm?: string): Promise<OpResult<void>>
+  fsMkdir(path: string, confirm?: string): Promise<OpResult<string>> // created dir path (collision-resolved)
+  fsNewFile(path: string, confirm?: string): Promise<OpResult<string>> // created file path (collision-resolved)
+  fsCopy(src: string, destDir: string, confirm?: string): Promise<OpResult<string>> // final path
+  fsMove(src: string, destDir: string, confirm?: string): Promise<OpResult<string>> // final path
+  fsDelete(
+    paths: string[],
+    opts?: { permanent?: boolean; confirm?: string },
+  ): Promise<OpResult<TrashRecord[]>>
+  // Policy-gated like every other mutation: restore renames caller-supplied
+  // paths, so it is an arbitrary-move primitive if left ungated.
+  fsRestore(records: TrashRecord[], confirm?: string): Promise<OpResult<void>>
   fsExists(path: string): Promise<boolean>
   openPath(path: string): Promise<void>
   revealPath(path: string): Promise<void>

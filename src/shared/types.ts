@@ -2,6 +2,8 @@ export interface DirEntry {
   name: string
   path: string // absolute
   isDirectory: boolean
+  hidden: boolean // dotfile or known Windows noise
+  isSymlink: boolean // junction / symlink / reparse point
 }
 
 export interface RecentFolder {
@@ -25,8 +27,25 @@ export interface TrashRecord {
   name: string // basename, for display
 }
 
+export type FileMode = 'explorer' | 'developer'
+
 export interface Settings {
   ideCommand: string // e.g. "code"; launched as `<ideCommand> <folder>`
+  mode: FileMode // 'explorer' (default) hides risk; 'developer' unlocks it
 }
+
+/**
+ * Result of a policy-gated mutating operation. A union, not a thrown Error:
+ * ipcMain.handle serialises thrown Errors into a string-prefixed message, so
+ * structured data (which code? typed confirm?) does not survive a throw.
+ */
+export type OpResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: 'DENIED'; reason: string }
+  | { ok: false; code: 'NEEDS_CONFIRM'; reason: string; typed: boolean }
+  | { ok: false; code: 'ERROR'; reason: string }
+
+/** Directory listing: a folder that cannot be read reports why instead of throwing. */
+export type ListResult = { ok: true; entries: DirEntry[] } | { ok: false; reason: string }
 
 export type PtyStatus = 'running' | 'waiting' | 'stopped'
