@@ -24,12 +24,12 @@ const api: Api = {
     return () => ipcRenderer.off(CH.ptyExit, h);
   },
   // --- v2 file operations ---
-  fsRename: (from, to) => ipcRenderer.invoke(CH.fsRename, from, to),
-  fsMkdir: (p) => ipcRenderer.invoke(CH.fsMkdir, p),
-  fsNewFile: (p) => ipcRenderer.invoke(CH.fsNewFile, p),
-  fsCopy: (src, dst) => ipcRenderer.invoke(CH.fsCopy, src, dst),
-  fsMove: (src, dst) => ipcRenderer.invoke(CH.fsMove, src, dst),
-  fsDelete: (paths) => ipcRenderer.invoke(CH.fsDelete, paths),
+  fsRename: (from, to, confirm) => ipcRenderer.invoke(CH.fsRename, from, to, confirm),
+  fsMkdir: (p, confirm) => ipcRenderer.invoke(CH.fsMkdir, p, confirm),
+  fsNewFile: (p, confirm) => ipcRenderer.invoke(CH.fsNewFile, p, confirm),
+  fsCopy: (src, dst, confirm) => ipcRenderer.invoke(CH.fsCopy, src, dst, confirm),
+  fsMove: (src, dst, confirm) => ipcRenderer.invoke(CH.fsMove, src, dst, confirm),
+  fsDelete: (paths, opts) => ipcRenderer.invoke(CH.fsDelete, paths, opts),
   fsRestore: (records) => ipcRenderer.invoke(CH.fsRestore, records),
   fsExists: (p) => ipcRenderer.invoke(CH.fsExists, p),
   openPath: (p) => ipcRenderer.invoke(CH.openPath, p),
