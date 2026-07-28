@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest'
-import { classify, check, gate, CONFIRM_WORD } from '../src/main/policy'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { classify, check, gate, canonicalize, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
 
 const ROOTS = ['C:\\FakeWindows', 'C:\\Fake Program Files']
 
@@ -18,6 +22,16 @@ describe('classify', () => {
   it('flags drive roots', () => {
     expect(classify('C:\\', ROOTS)).toBe('driveRoot')
     expect(classify('D:\\', ROOTS)).toBe('driveRoot')
+  })
+  it('flags drive roots in \\\\?\\ and UNC spellings', () => {
+    expect(classify('\\\\?\\C:\\', ROOTS)).toBe('driveRoot')
+    expect(classify('\\\\?\\C:', ROOTS)).toBe('driveRoot')
+    expect(classify('\\\\server\\share', ROOTS)).toBe('driveRoot')
+    expect(classify('\\\\server\\share\\', ROOTS)).toBe('driveRoot')
+    expect(classify('\\\\?\\UNC\\server\\share', ROOTS)).toBe('driveRoot')
+  })
+  it('does not flag a folder inside a UNC share', () => {
+    expect(classify('\\\\server\\share\\proj', ROOTS)).toBe('normal')
   })
   it('flags the app trash dir at any depth', () => {
     expect(classify('C:\\.claude-explorer-trash', ROOTS)).toBe('trash')
@@ -76,5 +90,99 @@ describe('gate', () => {
   })
   it('passes with the exact confirm word', () => {
     expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', CONFIRM_WORD, ROOTS)).toBeNull()
+  })
+  it('leaves paths untouched when an identity resolver is injected', () => {
+    const id = (p: string) => p
+    expect(gate('delete', ['C:\\FakeWindows\\x'], 'explorer', undefined, ROOTS, id)).not.toBeNull()
+    expect(gate('delete', ['C:\\Users\\dan\\a'], 'explorer', undefined, ROOTS, id)).toBeNull()
+  })
+})
+
+// These run against the real filesystem: every input below is a different
+// spelling of a REAL protected target, and lexical matching misses all of them.
+describe('gate canonicalises before classifying', () => {
+  let base = ''
+  let junction = ''
+  let shortTrash = ''
+
+  beforeAll(() => {
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'policy-canon-')))
+    fs.mkdirSync(path.join(base, TRASH_DIR_NAME))
+    const listing = execFileSync('cmd', ['/c', 'dir', '/x', '/a', base], { encoding: 'latin1' })
+    const row = listing.split(/\r?\n/).find((l) => l.endsWith(TRASH_DIR_NAME))
+    const short = row?.match(/(\S*~\d\S*)/)?.[1]
+    if (short) shortTrash = path.join(base, short)
+    try {
+      const link = path.join(base, 'link')
+      execFileSync('cmd', ['/c', 'mklink', '/J', link, 'C:\\Windows\\System32'], { stdio: 'pipe' })
+      junction = link
+    } catch {
+      junction = '' // no privilege to create junctions — that test is skipped
+    }
+  })
+
+  afterAll(() => {
+    // Remove the junction FIRST and only recurse if it is gone: a recursive rm
+    // that followed it would be pointed at C:\Windows\System32.
+    try {
+      if (junction) fs.rmdirSync(junction)
+    } catch {
+      /* leave the temp dir behind rather than risk following the junction */
+    }
+    if (base && !fs.existsSync(path.join(base, 'link')))
+      fs.rmSync(base, { recursive: true, force: true })
+  })
+
+  const denied = (p: string) => gate('delete', [p], 'explorer')
+
+  it('catches an 8.3 short name for a system root', () => {
+    expect(classify('C:\\PROGRA~1')).toBe('normal') // lexically invisible
+    expect(canonicalize('C:\\PROGRA~1')).toBe('C:\\Program Files')
+    expect(denied('C:\\PROGRA~1')).not.toBeNull()
+  })
+
+  it('catches .. traversal into a system root', () => {
+    // NOT path.join — that would normalise the `..` away before classify sees it.
+    const p = os.homedir() + '\\..\\..\\Windows\\System32'
+    expect(classify(p)).toBe('normal')
+    expect(denied(p)).not.toBeNull()
+  })
+
+  it('catches the \\\\?\\ spelling of a system root', () => {
+    expect(classify('\\\\?\\C:\\Windows\\System32')).toBe('normal')
+    expect(denied('\\\\?\\C:\\Windows\\System32')).not.toBeNull()
+  })
+
+  it('catches an 8.3 short name for the trash dir, in both modes', () => {
+    if (!shortTrash) return // volume has 8.3 name creation disabled
+    expect(classify(shortTrash)).toBe('normal')
+    expect(gate('delete', [shortTrash], 'explorer')).not.toBeNull()
+    // Trash is denied outright, so even a typed confirm in developer mode fails.
+    expect(gate('delete', [shortTrash], 'developer', CONFIRM_WORD)).not.toBeNull()
+  })
+
+  it('catches a junction pointing into a system root', () => {
+    if (!junction) return
+    const p = path.join(junction, 'drivers')
+    expect(classify(p)).toBe('normal')
+    expect(denied(p)).not.toBeNull()
+  })
+
+  it('catches a not-yet-existing target under a junction (mkdir/newFile)', () => {
+    if (!junction) return
+    const p = path.join(junction, 'does-not-exist-yet', 'x.txt')
+    expect(canonicalize(p)).toBe(path.join('C:\\Windows\\System32', 'does-not-exist-yet', 'x.txt'))
+    expect(denied(p)).not.toBeNull()
+  })
+
+  it('leaves an ordinary temp path alone', () => {
+    expect(gate('delete', [path.join(base, 'ordinary.txt')], 'explorer')).toBeNull()
+  })
+})
+
+describe('canonicalize', () => {
+  it('never throws on garbage', () => {
+    expect(() => canonicalize('')).not.toThrow()
+    expect(() => canonicalize('Z:\\nope\\<>|')).not.toThrow()
   })
 })
