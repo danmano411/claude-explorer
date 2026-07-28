@@ -154,8 +154,15 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     setSelection(emptySelection()); load();
   };
 
-  const doUndo = async () => { await app.undo.undo(); load(); };
-  const doRedo = async () => { await app.undo.redo(); load(); };
+  // A rejected undo leaves the stack intact (see UndoStack) — surface it and
+  // still refresh, so the view never disagrees with disk.
+  const runUndoRedo = async (fn: () => Promise<void>) => {
+    try { await fn(); }
+    catch (err) { notify(err instanceof OpError ? err.result.reason : 'Could not undo that — try again.', 6000); }
+    load();
+  };
+  const doUndo = () => runUndoRedo(() => app.undo.undo());
+  const doRedo = () => runUndoRedo(() => app.undo.redo());
 
   // move-vs-copy drop, one command per path
   const runDrop = async (paths: string[], destFolder: string, ev: { ctrlKey: boolean; shiftKey: boolean }, forced?: 'move' | 'copy') => {

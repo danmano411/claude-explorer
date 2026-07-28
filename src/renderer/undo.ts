@@ -32,8 +32,10 @@ export class UndoStack {
     this.future = []
     while (this.past.length > this.capacity) this.onEvict?.(this.past.shift()!)
   }
-  async undo() { const c = this.past.pop(); if (!c) return; await c.undo(); this.future.unshift(c) }
-  async redo() { const c = this.future.shift(); if (!c) return; await c.do(); this.past.push(c) }
+  // Peek, await, then move: a rejected undo/redo must leave both stacks exactly
+  // as they were, or the next Ctrl+Z reverses an unrelated earlier operation.
+  async undo() { const c = this.past.at(-1); if (!c) return; await c.undo(); this.past.pop(); this.future.unshift(c) }
+  async redo() { const c = this.future[0]; if (!c) return; await c.do(); this.future.shift(); this.past.push(c) }
 }
 
 // --- factories (do() captures the actual result so undo() reverses reality) ---
@@ -83,6 +85,6 @@ export function deleteCmd(paths: string[], confirm?: string): Command {
   return {
     label: `Delete ${paths.length} item(s)`,
     do: async () => { records = await must(window.api.fsDelete(paths, { confirm })) },
-    undo: async () => { await window.api.fsRestore(records) },
+    undo: async () => { await must(window.api.fsRestore(records)) },
   }
 }
