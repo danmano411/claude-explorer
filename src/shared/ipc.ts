@@ -63,7 +63,9 @@ export interface Api {
     paths: string[],
     opts?: { permanent?: boolean; confirm?: string },
   ): Promise<OpResult<TrashRecord[]>>
-  fsRestore(records: TrashRecord[]): Promise<void>
+  // Policy-gated like every other mutation: restore renames caller-supplied
+  // paths, so it is an arbitrary-move primitive if left ungated.
+  fsRestore(records: TrashRecord[], confirm?: string): Promise<OpResult<void>>
   fsExists(path: string): Promise<boolean>
   openPath(path: string): Promise<void>
   revealPath(path: string): Promise<void>
