@@ -19,7 +19,7 @@ export interface ClaudeSession {
   updated: number // epoch ms of newest line's timestamp (fallback: file mtime)
 }
 
-export type TabView = 'files' | 'terminal'
+export type TabView = 'files' | 'terminal' | 'viewer'
 
 export interface TrashRecord {
   original: string // absolute path the item was deleted from
@@ -47,5 +47,28 @@ export type OpResult<T> =
 
 /** Directory listing: a folder that cannot be read reports why instead of throwing. */
 export type ListResult = { ok: true; entries: DirEntry[] } | { ok: false; reason: string }
+
+/**
+ * File text for the read-only viewer (also carries `git diff` output).
+ * `kind` is load-bearing: 'binary' and 'toolarge' are NORMAL outcomes with their
+ * own UI ("this is a PNG"), not failures — only 'error' is an actual fault.
+ */
+export type ReadResult =
+  | { ok: true; content: string; truncated: boolean; lines: number }
+  | { ok: false; reason: string; kind: 'binary' | 'toolarge' | 'error' }
+
+export interface GitFileStatus {
+  path: string // absolute
+  status: 'modified' | 'added' | 'deleted' | 'untracked' | 'renamed'
+}
+
+/**
+ * Working-tree status for a folder. Like ReadResult, the failure `kind`s are
+ * mostly normal: 'notrepo' (plain folder) and 'nogit' (git not installed) each
+ * want their own empty state, not an error toast.
+ */
+export type GitStatusResult =
+  | { ok: true; repoRoot: string; files: GitFileStatus[] }
+  | { ok: false; reason: string; kind: 'notrepo' | 'nogit' | 'error' }
 
 export type PtyStatus = 'running' | 'waiting' | 'stopped'

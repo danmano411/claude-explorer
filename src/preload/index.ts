@@ -44,6 +44,10 @@ const api: Api = {
     ipcRenderer.on(CH.menuCommand, h);
     return () => ipcRenderer.off(CH.menuCommand, h);
   },
+  // --- M2 viewer + diff (read-only) ---
+  fsRead: (p) => ipcRenderer.invoke(CH.fsRead, p),
+  gitStatus: (dir) => ipcRenderer.invoke(CH.gitStatus, dir),
+  gitDiff: (p) => ipcRenderer.invoke(CH.gitDiff, p),
 };
 
 contextBridge.exposeInMainWorld('api', api);

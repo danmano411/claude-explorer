@@ -5,6 +5,8 @@ import type {
   Settings,
   OpResult,
   ListResult,
+  ReadResult,
+  GitStatusResult,
 } from './types'
 
 export const CH = {
@@ -36,6 +38,10 @@ export const CH = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   menuCommand: 'menu:command', // main -> renderer event (File/Settings menu items)
+  // --- M2 viewer + diff (read-only) ---
+  fsRead: 'fs:read',
+  gitStatus: 'git:status',
+  gitDiff: 'git:diff',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -75,4 +81,9 @@ export interface Api {
   settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
   clipboardReadText(): string // sync; clipboard is reachable from the preload process
   onMenuCommand(cb: (cmd: string) => void): () => void // 'new-tab' | 'close-tab' | 'open-settings'
+  // --- M2 viewer + diff. Read-only: no policy gate, no OpResult, nothing throws;
+  // every refusal (binary / too large / not a repo / no git) is a typed union arm.
+  fsRead(path: string): Promise<ReadResult>
+  gitStatus(dir: string): Promise<GitStatusResult> // dir = any path inside the repo
+  gitDiff(path: string): Promise<ReadResult> // unified diff of one file, as text
 }
