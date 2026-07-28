@@ -1,6 +1,6 @@
 import { rename as fsRename, mkdir as fsMkdirp, writeFile, cp, rm, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { uniqueName, winBasename } from '../shared/pathutil'
+import { uniqueName, winBasename, winDirname } from '../shared/pathutil'
 
 async function dirNames(dir: string): Promise<string[]> {
   try { return await readdir(dir) } catch { return [] }
@@ -11,7 +11,7 @@ export async function rename(from: string, to: string): Promise<void> {
 }
 
 export async function mkdir(path: string): Promise<string> {
-  const dir = path.slice(0, path.lastIndexOf('\\'))
+  const dir = winDirname(path)
   const name = winBasename(path)
   const finalName = uniqueName(await dirNames(dir), name)
   const finalPath = join(dir, finalName)
@@ -20,7 +20,7 @@ export async function mkdir(path: string): Promise<string> {
 }
 
 export async function newFile(path: string): Promise<string> {
-  const dir = path.slice(0, path.lastIndexOf('\\'))
+  const dir = winDirname(path)
   const finalName = uniqueName(await dirNames(dir), winBasename(path))
   const finalPath = join(dir, finalName)
   await writeFile(finalPath, '', { flag: 'wx' })
