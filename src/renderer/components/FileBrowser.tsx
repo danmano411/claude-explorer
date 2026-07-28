@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DirEntry, FileMode } from '../../shared/types';
+import type { DirEntry, FileMode, GitStatusResult } from '../../shared/types';
 import { sameDrive, winBasename, winDirname } from '../../shared/pathutil';
 import { emptySelection, applyClick, type Selection } from '../selection';
 import { initHistory, canBack, canForward, navigate, goBack, goForward } from '../history';
 import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, OpError, type Command } from '../undo';
 import { unwrap, type ConfirmRequest } from '../opresult';
+import { gutterMarks, markKey, type GutterMark } from '../diffparse';
+import { IDLE_MS } from '../ptystatus';
 import { useAppState } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
@@ -15,12 +17,24 @@ import { ContextMenu, type MenuItem } from './ContextMenu';
  *  just "build the same command again, this time with the typed word". */
 type CommandFactory = (confirm?: string) => Command;
 
-export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExternal }: {
+/** Gutter marker: git's own letters, so the meaning transfers straight to the
+ *  terminal next door. '·' is a folder that merely contains changes. */
+const MARK: Record<GutterMark, [glyph: string, title: string]> = {
+  modified: ['M', 'Modified'],
+  added: ['A', 'Added (staged)'],
+  deleted: ['D', 'Deleted'],
+  untracked: ['U', 'New — not tracked by Git yet'],
+  renamed: ['R', 'Renamed'],
+  contains: ['·', 'Contains changes'],
+};
+
+export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExternal, onOpenFile }: {
   cwd: string;
   tabId: string;
   onNavigate: (p: string) => void;
   onOpenClaude: (p: string) => void;
   onOpenExternal: (p: string) => void;
+  onOpenFile: (p: string, mode?: 'file' | 'diff') => void;
 }) {
   const app = useAppState();
   const [history, setHistory] = useState(() => initHistory(cwd));
@@ -35,6 +49,8 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [toast, setToast] = useState('');
+  const [git, setGit] = useState<GitStatusResult | null>(null);
+  const noGit = useRef(false); // plain folder / git missing: stop asking
   const dragButton = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -68,8 +84,68 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     });
   };
 
+  // Git status drives the row gutter. A non-repo folder is a normal state: no
+  // gutter, no message, and (via noGit) no further spawns while we sit here.
+  const loadGit = () => {
+    window.api.gitStatus(dir)
+      .then((r) => {
+        setGit(r);
+        if (!r.ok && r.kind !== 'error') noGit.current = true;
+      })
+      .catch(() => setGit(null));
+  };
+
   // load list when directory changes
   useEffect(() => { load(); setSelection(emptySelection()); }, [dir]);
+  useEffect(() => { noGit.current = false; setGit(null); loadGit(); }, [dir]);
+
+  /**
+   * Freshness: Claude edits files WHILE you watch, so a gutter that only moves on
+   * F5 answers the wrong question. pty:data is broadcast for every terminal, so
+   * "the machine went quiet" is signal enough — re-read git status IDLE_MS after
+   * the last byte (the same debounce the tab status dots use). Deliberately not a
+   * timer: no output, no git spawn, forever.
+   *
+   * ponytail: ANY terminal's idle refreshes this tab, even one working in an
+   * unrelated folder — one cheap git call beats correlating pty cwds. Correlate
+   * if a busy session ever makes the listing feel jumpy.
+   */
+  // A file Claude CREATES has no row to mark until the listing is re-read, so
+  // the idle tick reloads that too — but only when nothing is in flight, since
+  // selection indices address `shown` and a reload would move them under a
+  // drag, a rename, or an open dialog. Read through a ref: the pty subscription
+  // is mounted per-directory and must not re-subscribe on every keystroke.
+  const idleReloadSafe = useRef(true);
+  idleReloadSafe.current =
+    !renaming && !menu && !confirmDel && !confirmRequest && !app.drag && selection.indices.size === 0;
+
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const off = window.api.onPtyData(() => {
+      if (noGit.current) return;
+      clearTimeout(t);
+      t = setTimeout(() => { loadGit(); if (idleReloadSafe.current) load(); }, IDLE_MS);
+    });
+    return () => { off(); clearTimeout(t); };
+  }, [dir]);
+
+  const marks = useMemo(
+    () => (git?.ok ? gutterMarks(git.files) : new Map<string, GutterMark>()),
+    [git]
+  );
+  // Deleted files have no row to mark — they are gone from disk — but "Claude
+  // deleted this" is the change you most want to see, so they get a ghost row.
+  const deletedHere = useMemo(
+    () => (git?.ok
+      ? git.files.filter((f) => f.status === 'deleted' && markKey(winDirname(f.path)) === markKey(dir))
+      : []),
+    [git, dir]
+  );
+  const gutter = (p: string) => {
+    if (!git?.ok) return null; // not a repo: no gutter at all
+    const m = marks.get(markKey(p));
+    return <span className={m ? `gutter g-${m}` : 'gutter'} title={m ? MARK[m][1] : undefined}>{m ? MARK[m][0] : ''}</span>;
+  };
   // sync from external cwd changes (App / spring-load)
   useEffect(() => { if (cwd !== dir) setHistory((h) => navigate(h, cwd)); }, [cwd]);
   // report effective dir upward
@@ -89,7 +165,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   );
 
   const nav = (p: string) => setHistory((h) => navigate(h, p));
-  const refresh = () => load();
+  const refresh = () => { load(); noGit.current = false; loadGit(); };
 
   /** Runs a command through the busy guard and the undo stack. Returns false
    *  (without pushing anything onto the stack) when main refused it. */
@@ -213,11 +289,19 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     }
     const isDir = entry.isDirectory;
     const items: MenuItem[] = [
-      { label: 'Open', onClick: () => (isDir ? nav(entry.path) : window.api.openPath(entry.path)) },
+      { label: 'Open', onClick: () => (isDir ? nav(entry.path) : onOpenFile(entry.path)) },
     ];
     if (isDir) {
       items.push({ label: 'Open in Claude', onClick: () => onOpenClaude(entry.path) });
       items.push({ label: 'Open in external terminal', onClick: () => onOpenExternal(entry.path) });
+    } else {
+      // Only offered when there is something to diff — a clean or untracked file
+      // would open a tab that says "no changes", which is a wasted click.
+      const m = marks.get(markKey(entry.path));
+      if (m && m !== 'untracked' && m !== 'contains') {
+        items.push({ label: 'Show changes', onClick: () => onOpenFile(entry.path, 'diff') });
+      }
+      items.push({ label: 'Open in default app', onClick: () => window.api.openPath(entry.path) });
     }
     items.push({ separator: true });
     items.push({ label: 'Cut', onClick: () => app.setClipboard({ mode: 'cut', paths }) });
@@ -309,7 +393,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
               style={e.hidden ? { opacity: 0.55 } : undefined}
               onMouseDown={(ev) => { dragButton.current = ev.button; }}
               onClick={(ev) => setSelection((s) => applyClick(s, i, { ctrl: ev.ctrlKey, shift: ev.shiftKey }))}
-              onDoubleClick={() => (e.isDirectory ? nav(e.path) : window.api.openPath(e.path))}
+              onDoubleClick={() => (e.isDirectory ? nav(e.path) : onOpenFile(e.path))}
               onContextMenu={(ev) => {
                 ev.preventDefault(); ev.stopPropagation();
                 const inSel = selection.indices.has(i);
@@ -345,9 +429,12 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
                   }}
                 />
               ) : (
-                <span className="entry-label" title={e.isSymlink ? 'Junction / symlink' : undefined}>
-                  {e.isDirectory ? '📁' : '📄'} {e.name}{e.isSymlink ? ' ↗' : ''}
-                </span>
+                <>
+                  {gutter(e.path)}
+                  <span className="entry-label" title={e.isSymlink ? 'Junction / symlink' : undefined}>
+                    {e.isDirectory ? '📁' : '📄'} {e.name}{e.isSymlink ? ' ↗' : ''}
+                  </span>
+                </>
               )}
               {e.isDirectory && !renaming && (
                 <button
@@ -361,6 +448,19 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
             </li>
           );
         })}
+        {/* Rendered AFTER the mapped list on purpose: selection indices address
+            `shown`, and a ghost row has no file on disk to act on. */}
+        {deletedHere.map((f) => (
+          <li
+            key={f.path}
+            className="entry ghost"
+            title="Deleted — no longer on disk. Double-click to see what was removed."
+            onDoubleClick={() => onOpenFile(f.path, 'diff')}
+          >
+            {gutter(f.path)}
+            <span className="entry-label">📄 <s>{winBasename(f.path)}</s></span>
+          </li>
+        ))}
       </ul>
       <StatusBar count={shown.length} selected={selection.indices.size} mode={mode} onToggleMode={toggleMode} />
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}

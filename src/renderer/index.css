@@ -283,3 +283,121 @@ body {
   background: var(--clay);
   color: var(--bg);
 }
+
+/* ================= M2: read-only viewer ================= */
+
+.viewer { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+/* The scroll container also owns the surface colour, so Shiki's <pre> can stay
+   transparent and never fight an inline background-color. */
+.viewer-code {
+  flex: 1; min-height: 0; overflow: auto;
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
+}
+.viewer-code pre.shiki { margin: 0; padding: 8px 0; background: transparent; }
+.viewer-code code { display: block; width: max-content; min-width: 100%; counter-reset: line; }
+.viewer-code .line { display: block; padding-right: 16px; }
+.viewer-code .line:hover { background: var(--sel); }
+
+/* Line numbers are a pure CSS counter — no JS, and they work on the plain-text
+   fallback and the highlighted upgrade alike. Sticky so they survive an
+   h-scroll through a long line. */
+.viewer-code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: sticky; left: 0;
+  display: inline-block; width: 4em; margin-right: 14px; padding-right: 8px;
+  text-align: right; color: var(--ink-soft); opacity: 0.5;
+  background: var(--bg); border-right: 1px solid var(--line);
+  user-select: none; /* keep numbers out of copied text */
+}
+
+/* Shiki runs with defaultColor:false, so every token carries BOTH themes as
+   custom properties and the mode picks one. Solarized is only the syntax
+   palette; all chrome still comes from the Retro Claude variables above.
+   The fallback keeps un-highlighted plain text readable. */
+.viewer-code .shiki, .viewer-code .shiki span { color: var(--shiki-light, var(--ink)); }
+@media (prefers-color-scheme: dark) {
+  .viewer-code .shiki, .viewer-code .shiki span { color: var(--shiki-dark, var(--ink)); }
+}
+
+/* Informative states (binary / too large / empty) — a plain sentence, not an error. */
+.viewer-note {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; height: 100%; padding: 24px; text-align: center;
+  font-family: var(--font-serif); font-size: 15px; color: var(--ink-soft);
+}
+.viewer-note p { margin: 0; }
+.viewer-open {
+  font-family: var(--font-serif); font-size: 13px; color: #fff;
+  background: var(--clay); border: 1px solid var(--clay);
+  padding: 5px 14px; border-radius: var(--radius); cursor: pointer;
+}
+.viewer-open:hover { filter: brightness(1.06); }
+
+.viewer-banner {
+  margin: 0; padding: 5px 12px;
+  background: var(--clay-soft); border-bottom: 1px solid var(--line);
+  font-family: var(--font-serif); font-size: 12px; color: var(--ink);
+}
+
+/* ================= M2: diff surface + git gutter ================= */
+
+/* Two semantic tokens, not a second palette: removed IS the clay accent, and
+   added reuses the one green already in the app (the running tab dot). */
+:root { --diff-add: #6a9a5b; --diff-del: var(--clay); }
+@media (prefers-color-scheme: dark) { :root { --diff-add: #7fb06d; } }
+
+.diff-head {
+  display: flex; align-items: baseline; gap: 12px; padding: 5px 12px;
+  background: var(--bg-sunken); border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft);
+}
+.diff-file { color: var(--ink); }
+.diff-stat { font-weight: bold; }
+.diff-stat.add { color: var(--diff-add); }
+.diff-stat.del { color: var(--diff-del); }
+.diff-hunks { margin-left: auto; }
+
+/* Reuses .viewer-code for the scroll surface and type; the rows replace the
+   CSS line counter, because a diff's numbers come from the hunk headers.
+
+   Long lines WRAP rather than scroll sideways. Sticky number columns were the
+   obvious alternative and they do not survive contact with Chromium: the
+   scrolling text paints straight over a sticky flex cell whatever its z-index
+   (verified in Chromium 145, the family Electron ships). Wrapping also means a
+   long changed line is fully readable at tab width, which is the point. */
+.diff-rows { padding: 6px 0; }
+.drow { display: flex; align-items: flex-start; }
+.drow .dn {
+  flex: none; width: 3.6em; padding-right: 8px;
+  text-align: right; color: var(--ink-soft); opacity: 0.55;
+  user-select: none; /* keep numbers out of copied text */
+}
+.drow .dn:nth-child(2) { border-right: 1px solid var(--line); }
+.drow .dt {
+  flex: 1; min-width: 0; padding: 0 16px 0 8px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.drow.add { background: color-mix(in srgb, var(--diff-add) 15%, transparent); }
+.drow.del { background: color-mix(in srgb, var(--diff-del) 14%, transparent); }
+.drow.hunk { background: var(--bg-sunken); color: var(--ink-soft); margin-top: 6px; }
+.drow.hunk .dt, .drow.meta .dt { color: var(--ink-soft); font-style: italic; }
+
+/* Per-row git marker in the file listing. Git's own letters; '·' = a folder
+   holding changes further down. */
+.gutter {
+  flex: none; width: 1ch; margin-right: 6px;
+  font-family: var(--font-mono); font-weight: bold; text-align: center;
+  user-select: none;
+}
+.g-modified, .g-renamed { color: var(--diff-del); }
+.g-added, .g-untracked { color: var(--diff-add); }
+.g-deleted { color: var(--ink-soft); }
+.g-contains { color: var(--ink-soft); opacity: 0.6; }
+
+/* Deleted file: a ghost row, because the change you most need to see is the
+   one with nothing left to click. */
+.entry.ghost { cursor: pointer; color: var(--ink-soft); }
+.entry.ghost .entry-label { opacity: 0.7; }

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { newFilesTab, newTerminalTab, type Tab } from './tabs';
+import { newFilesTab, newTerminalTab, newViewerTab, type Tab } from './tabs';
 import { reorder } from './tabreorder';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
+import { Viewer } from './components/Viewer';
+import { DiffView } from './components/DiffView';
 import { RecentMenu } from './components/RecentMenu';
 import { SettingsModal } from './components/SettingsModal';
 import { TabBar } from './TabBar';
@@ -50,6 +52,18 @@ export function App() {
 
   const openFolderTab = (p: string) => {
     const t = newFilesTab(p);
+    setTabs((ts) => [...ts, t]); selectTab(t.id);
+  };
+
+  // Opening a file gets its own first-class tab (never a split pane — a split
+  // could not live inside a future tab group). Re-opening the same file focuses
+  // the tab that already has it instead of piling up duplicates.
+  const openViewerTab = (filePath: string, mode: 'file' | 'diff' = 'file') => {
+    const open = tabs.find(
+      (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode,
+    );
+    if (open) { selectTab(open.id); return; }
+    const t = newViewerTab(filePath, mode);
     setTabs((ts) => [...ts, t]); selectTab(t.id);
   };
 
@@ -136,10 +150,16 @@ export function App() {
             }
             onOpenClaude={(p) => openClaude(activeTab.id, p)}
             onOpenExternal={(p) => window.api.externalOpen(p)}
+            onOpenFile={openViewerTab}
           />
         )}
         {activeTab?.view === 'terminal' && activeTab.ptyId && (
           <Terminal ptyId={activeTab.ptyId} />
+        )}
+        {activeTab?.view === 'viewer' && activeTab.filePath && (
+          activeTab.viewerMode === 'diff'
+            ? <DiffView filePath={activeTab.filePath} />
+            : <Viewer filePath={activeTab.filePath} />
         )}
       </div>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}

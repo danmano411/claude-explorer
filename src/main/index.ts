@@ -10,6 +10,7 @@ import { registerTrashHandlers } from './trash.handlers'
 import { registerOpenHandlers } from './open.handlers'
 import { registerSettingsHandlers } from './settings.handlers'
 import { registerIdeHandlers } from './ide.handlers'
+import { registerFileReadHandlers } from './fileread.handlers'
 import { buildMenu } from './menu'
 import { initUpdater } from './updater'
 import { flushAll } from './trash'
@@ -56,6 +57,7 @@ app.whenReady().then(() => {
   registerOpenHandlers()
   registerSettingsHandlers()
   registerIdeHandlers()
+  registerFileReadHandlers()
   buildMenu()
   createWindow()
   initUpdater()

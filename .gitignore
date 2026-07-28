@@ -6,3 +6,4 @@ dist/
 CLAUDE.md
 .private/
 .env
+.gstack/
