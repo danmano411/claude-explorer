@@ -78,6 +78,17 @@ parent("newfolder")  =  "newfolde"
 
 > All safety decisions are made in the main process. The renderer only *renders* verdicts; it never *makes* them.
 
+### What this layer is, and is not
+
+This layer is a **guardrail against user error and AI mistakes** — a mis-drag, a `Del` on the wrong selection, an agent that resolves a path wrongly. It is **not a security boundary against a compromised renderer.** It cannot be: the app deliberately exposes `ptySpawn({ shell: true })`, which is full arbitrary code execution on the user's account. Anything that reaches renderer JavaScript can already delete `C:\Windows` without ever calling `fsDelete`. Hardening file ops against that attacker would be theater — cost with no gain.
+
+Two consequences follow, and both are accepted rather than defects:
+
+- **`settings:set` can flip `mode` to `developer` without user interaction.** A renderer bug or a rogue script could unlock Developer mode silently. Given the shell is already exposed, gating the toggle behind a second confirmation buys nothing.
+- **`gate()` trusts a caller-supplied `confirm` string.** The typed word exists so a *human* has to stop and type `CONFIRM`; it is not a capability token. Re-validating on every call (§5) keeps an honest caller from skipping the check by accident — that is its whole job.
+
+"Main-side, not renderer-side" is still the right structure: it makes the rule impossible for an honest call site to *forget*, which is the failure mode that actually happens.
+
 ### New module: `src/main/policy.ts`
 
 Pure, with **zero Electron imports**, so it unit-tests without a harness — matching the existing `fs.ts` ↔ `fs.handlers.ts` split convention.
@@ -181,7 +192,7 @@ fsMove(src: string, destDir: string, confirm?: string): Promise<OpResult<string>
 fsDelete(paths: string[], opts?: { permanent?: boolean; confirm?: string }): Promise<OpResult<TrashRecord[]>>
 ```
 
-`fsList` keeps its signature; the richer `DirEntry` flows through unchanged. Read operations are not policy-gated — **browsing** `C:\Windows` is always allowed in both modes. Only mutation is gated.
+`fsList` returns `ListResult` — a folder that cannot be read reports why instead of throwing (**D4**). The richer `DirEntry` flows through inside it. Read operations are not policy-gated — **browsing** `C:\Windows` is always allowed in both modes. Only mutation is gated.
 
 ### Hidden-file detection
 
