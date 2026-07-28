@@ -1,9 +1,10 @@
-import { rename, mkdir, readdir } from 'node:fs/promises'
+import { rename, mkdir, readdir, cp, rm } from 'node:fs/promises'
+import { accessSync, constants } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { app, shell } from 'electron'
 import type { TrashRecord } from '../shared/types'
-import { uniqueName, winBasename, winDirname } from '../shared/pathutil'
+import { driveKey, uniqueName, winBasename, winDirname } from '../shared/pathutil'
 
 // Test-friendly core: stage into an explicit root (no Electron dependency).
 export async function stageInto(trashRoot: string, paths: string[]): Promise<TrashRecord[]> {
@@ -13,7 +14,13 @@ export async function stageInto(trashRoot: string, paths: string[]): Promise<Tra
     await mkdir(bucket, { recursive: true })
     const name = winBasename(original)
     const staged = join(bucket, name)
-    await rename(original, staged)
+    try {
+      await rename(original, staged)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+      await cp(original, staged, { recursive: true })
+      await rm(original, { recursive: true, force: true })
+    }
     records.push({ original, staged, name })
   }
   return records
@@ -30,10 +37,23 @@ export async function restore(records: TrashRecord[]): Promise<void> {
 }
 
 // Electron-facing wrappers (not unit-tested; verified at e2e).
-function driveRoot(p: string): string { return p.slice(0, 2) + '\\' } // "C:\"
+/** Exported for tests. "C:\" for local, "\\\\server\\share" for UNC. */
+export function driveRootOf(p: string): string {
+  const key = driveKey(p)
+  return key.startsWith('\\\\') ? key : key.toUpperCase() + '\\'
+}
+
 function trashRootFor(p: string): string {
-  try { return join(driveRoot(p), '.claude-explorer-trash') }
-  catch { return join(app.getPath('userData'), 'trash') }
+  try {
+    const root = driveRootOf(p)
+    accessSync(root, constants.W_OK)
+    return join(root, '.claude-explorer-trash')
+  } catch {
+    // ponytail: falls back to userData when the volume root is unwritable
+    // (read-only share, locked-down drive). This can be a different volume,
+    // which is why stageInto handles EXDEV above.
+    return join(app.getPath('userData'), 'trash')
+  }
 }
 
 // Module registry of still-staged records so main can flush on quit without an

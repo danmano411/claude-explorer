@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stageInto, restore } from '../src/main/trash'
+import { stageInto, restore, driveRootOf } from '../src/main/trash'
 
 let work: string
 beforeEach(() => { work = mkdtempSync(join(tmpdir(), 'ce-trash-')) })
@@ -28,5 +28,17 @@ describe('stageInto + restore', () => {
     // both survive: original + a " (2)" sibling
     const { readdirSync } = await import('node:fs')
     expect(readdirSync(work).filter((n) => n.startsWith('a')).length).toBe(2)
+  })
+})
+
+describe('driveRootOf', () => {
+  it('returns the drive root for a local path', () => {
+    expect(driveRootOf('C:\\Users\\dan\\f.txt')).toBe('C:\\')
+  })
+  it('returns the share root for a UNC path', () => {
+    expect(driveRootOf('\\\\server\\share\\proj\\f.txt')).toBe('\\\\server\\share')
+  })
+  it('handles \\\\?\\ long paths', () => {
+    expect(driveRootOf('\\\\?\\C:\\deep\\f.txt')).toBe('C:\\')
   })
 })
