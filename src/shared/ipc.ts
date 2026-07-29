@@ -10,6 +10,7 @@ import type {
   SearchHit,
   SearchQuery,
   SearchDone,
+  Workspace,
 } from './types'
 
 export const CH = {
@@ -53,6 +54,12 @@ export const CH = {
   searchCancel: 'search:cancel',
   searchHits: 'search:hits', // main -> renderer event (batched)
   searchDone: 'search:done', // main -> renderer event
+  // --- M5 workspace: spaces, tab folders, split layouts. Whole-document
+  // read/write like settings, not per-entity CRUD — the renderer already holds
+  // the authoritative tree in React state, and a document write cannot leave
+  // groups referencing tabs that no longer exist.
+  workspaceGet: 'workspace:get',
+  workspaceSet: 'workspace:set',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -104,4 +111,8 @@ export interface Api {
   searchCancel(searchId: string): void
   onSearchHits(cb: (searchId: string, hits: SearchHit[]) => void): () => void
   onSearchDone(cb: (searchId: string, done: SearchDone) => void): () => void
+  // --- M5 workspace. Returns a valid empty workspace rather than null when
+  // there is nothing saved, so the renderer never branches on "first run".
+  workspaceGet(): Promise<Workspace>
+  workspaceSet(w: Workspace): Promise<void>
 }

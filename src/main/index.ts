@@ -14,6 +14,7 @@ import { registerFileReadHandlers } from './fileread.handlers'
 import { buildMenu } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
+import { registerWorkspaceHandlers } from './workspace.handlers'
 import { flushAll, sweep } from './trash'
 
 let mainWindow: BrowserWindow | null = null
@@ -65,6 +66,7 @@ app.whenReady().then(() => {
   registerIdeHandlers()
   registerFileReadHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
+  registerWorkspaceHandlers()
   buildMenu()
   createWindow()
   initUpdater()
