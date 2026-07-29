@@ -17,6 +17,11 @@ import { ContextMenu, type MenuItem } from './ContextMenu';
  *  just "build the same command again, this time with the typed word". */
 type CommandFactory = (confirm?: string) => Command;
 
+/** Per-(tab, folder) scroll offsets, outliving the component so a remount or a
+ *  tab switch can restore them. ponytail: unbounded map — a session would have to
+ *  visit ~100k distinct folders to matter; add an LRU cap if that ever changes. */
+const scrollOffsets = new Map<string, number>();
+
 /** Gutter marker: git's own letters, so the meaning transfers straight to the
  *  terminal next door. '·' is a folder that merely contains changes. */
 const MARK: Record<GutterMark, [glyph: string, title: string]> = {
@@ -53,6 +58,17 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const noGit = useRef(false); // plain folder / git missing: stop asking
   const dragButton = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // Scroll offset belongs to the tab, not to the <ul>. React reuses that DOM node
+  // between two file tabs, so without this the newly activated tab inherits the
+  // other tab's scrollTop. Keyed by tab AND folder, so walking into a subfolder
+  // starts at the top while walking back restores where you were. KAN-25.
+  const listRef = useRef<HTMLUListElement>(null);
+  const scrollKey = `${tabId}\0${dir}`;
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = scrollOffsets.get(scrollKey) ?? 0;
+  }, [scrollKey]);
 
   // Policy refusals are longer than "busy" chatter, so they get more time on screen.
   const notify = (m: string, ms = 2500) => {
@@ -376,7 +392,9 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
         onNavigate={nav}
       />
       <ul
+        ref={listRef}
         className={['entries', app.drag && dropTarget === dir ? 'dir-drop' : ''].join(' ').trim()}
+        onScroll={(ev) => scrollOffsets.set(scrollKey, ev.currentTarget.scrollTop)}
         onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, items: buildMenu(undefined, []) }); }}
         onDragOver={(ev) => { if (app.drag) { ev.preventDefault(); setDropTarget(dir); } }}
         onDragLeave={(ev) => { if (ev.currentTarget === ev.target) setDropTarget((t) => (t === dir ? null : t)); }}

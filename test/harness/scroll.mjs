@@ -58,7 +58,8 @@ await wheelOver('.entries', 150);
 await win.click('.tab.add');                       // new file tab, switches to it
 await win.waitForTimeout(500);
 const leaked = await listTop();
-check('new file tab starts at the top', leaked === 0, `scrollTop=${leaked} (inherited from the other tab)`);
+check('new file tab starts at the top', leaked === 0,
+  leaked === 0 ? '' : `scrollTop=${leaked} — inherited from the other tab`);
 
 await win.locator('.tab:not(.add)').first().click();
 await win.waitForTimeout(400);

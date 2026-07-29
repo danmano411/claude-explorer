@@ -87,7 +87,9 @@ body {
 }
 .toolbar button:hover { filter: brightness(1.06); }
 
-.breadcrumb { display: flex; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); }
+/* Sized to its content, so the rest of .address stays empty and clickable —
+   that gap is what opens the editable path input (NavBar). KAN-24. */
+.breadcrumb { display: flex; flex-wrap: wrap; width: max-content; max-width: 100%; font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); }
 .crumb { cursor: pointer; }
 .crumb:hover { color: var(--clay); text-decoration: underline; }
 
@@ -189,7 +191,9 @@ body {
 }
 .nav-btn:hover:not(:disabled) { border-color: var(--clay); color: var(--clay); }
 .nav-btn:disabled { opacity: 0.35; cursor: default; }
-.address { flex: 1; min-width: 0; }
+/* Fills the row so the empty space beside the breadcrumb is a real click target
+   for the path input, and shows a text caret there the way Explorer does. */
+.address { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: center; cursor: text; }
 .address-input {
   width: 100%; font-family: var(--font-mono); font-size: 12px; padding: 3px 7px;
   border: 1px solid var(--clay); border-radius: var(--radius); background: var(--bg); color: var(--ink);
