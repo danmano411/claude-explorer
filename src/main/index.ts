@@ -13,10 +13,12 @@ import { registerIdeHandlers } from './ide.handlers'
 import { registerFileReadHandlers } from './fileread.handlers'
 import { buildMenu } from './menu'
 import { initUpdater } from './updater'
+import { registerSearchHandlers } from './search.handlers'
 import { flushAll } from './trash'
 
 let mainWindow: BrowserWindow | null = null
 let flushed = false
+let stopSearch: () => void = () => {}
 
 const iconPath = app.isPackaged
   ? join(process.resourcesPath, 'icon.png')
@@ -58,6 +60,7 @@ app.whenReady().then(() => {
   registerSettingsHandlers()
   registerIdeHandlers()
   registerFileReadHandlers()
+  stopSearch = registerSearchHandlers(() => mainWindow)
   buildMenu()
   createWindow()
   initUpdater()
@@ -72,6 +75,7 @@ app.on('window-all-closed', () => {
 
 // Flush any still-staged deleted items to the OS Recycle Bin before exit.
 app.on('will-quit', (e) => {
+  stopSearch() // a ripgrep child must not outlive the window that asked for it
   if (flushed) return
   e.preventDefault()
   flushed = true

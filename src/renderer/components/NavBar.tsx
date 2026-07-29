@@ -15,7 +15,11 @@ export function NavBar({ cwd, canBack, canForward, onBack, onForward, onRefresh,
   const commit = async () => {
     const p = (editing ?? '').trim();
     setEditing(null);
-    if (p && p !== cwd && (await window.api.fsExists(p))) onNavigate(p);
+    if (!p || p === cwd) return;
+    // A rejected probe used to escape as an unhandled rejection and silently
+    // abort navigation with nothing shown to the user; treat it as "no".
+    const exists = await window.api.fsExists(p).catch(() => false);
+    if (exists) onNavigate(p);
   };
 
   return (

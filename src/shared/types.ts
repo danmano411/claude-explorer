@@ -72,3 +72,38 @@ export type GitStatusResult =
   | { ok: false; reason: string; kind: 'notrepo' | 'nogit' | 'error' }
 
 export type PtyStatus = 'running' | 'waiting' | 'stopped'
+
+// --- M3 search -------------------------------------------------------------
+
+/**
+ * One match. `line`/`column`/`preview` are absent for a filename-only hit —
+ * that is the difference between "this file is called foo" and "this file
+ * contains foo on line 12", and the overlay renders the two differently.
+ */
+export interface SearchHit {
+  path: string // absolute
+  name: string // basename, for display
+  isDirectory: boolean
+  line?: number // 1-based
+  column?: number // 1-based, byte offset within the line as ripgrep reports it
+  preview?: string // the matching line, trimmed and length-capped
+}
+
+export interface SearchQuery {
+  root: string // folder to search under
+  query: string
+  content: boolean // false = match names only, true = search inside files
+  regex: boolean // false = literal (rg --fixed-strings)
+  caseSensitive: boolean // false = rg --ignore-case
+  /** Developer mode searches everything (rg -uu); Explorer mode honours
+   *  .gitignore and skips hidden files, which is ripgrep's default. */
+  includeIgnored: boolean
+}
+
+/**
+ * Why a search stopped. 'cancelled' is the common case — every keystroke
+ * supersedes the previous search — and must never surface as an error.
+ */
+export type SearchDone =
+  | { ok: true; count: number; truncated: boolean }
+  | { ok: false; reason: string; kind: 'cancelled' | 'norg' | 'badpattern' | 'error' }

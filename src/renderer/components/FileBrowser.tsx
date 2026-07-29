@@ -12,6 +12,7 @@ import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ContextMenu, type MenuItem } from './ContextMenu';
+import { SearchOverlay } from './SearchOverlay';
 
 /** A command factory: the confirm word is baked in at build time, so a retry is
  *  just "build the same command again, this time with the typed word". */
@@ -54,6 +55,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [toast, setToast] = useState('');
+  const [searching, setSearching] = useState(false);
   const [git, setGit] = useState<GitStatusResult | null>(null);
   const noGit = useRef(false); // plain folder / git missing: stop asking
   const dragButton = useRef(0);
@@ -342,6 +344,9 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
       if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
+      // Above the `typing` guard on purpose: Ctrl+F must reach the search box
+      // even when a field already has focus, the way every other app behaves.
+      if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); setSearching(true); return; }
       if (typing) return;
       if (e.key === 'Backspace') { e.preventDefault(); nav(winDirname(dir)); return; }
       if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
@@ -391,6 +396,19 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
         onRefresh={refresh}
         onNavigate={nav}
       />
+      {searching && (
+        <SearchOverlay
+          dir={dir}
+          entries={shown}
+          mode={mode}
+          onClose={() => setSearching(false)}
+          onOpen={(hit) => {
+            setSearching(false);
+            if (hit.isDirectory) nav(hit.path);
+            else onOpenFile(hit.path);
+          }}
+        />
+      )}
       <ul
         ref={listRef}
         className={['entries', app.drag && dropTarget === dir ? 'dir-drop' : ''].join(' ').trim()}
