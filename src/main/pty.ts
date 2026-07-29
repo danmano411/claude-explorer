@@ -25,11 +25,50 @@ function resolveClaude(): string {
 
 const CLAUDE = resolveClaude()
 
+/**
+ * Claude Code marks its own environment so a `claude` it spawns knows it is a
+ * nested session — and a nested session **does not save a transcript**. If
+ * Claude Explorer is itself launched from a Claude session (running `npm run
+ * dev` from a Claude terminal, or opening the app from one), that marker is
+ * inherited, every session spawned from the app silently stops persisting, and
+ * both Open Recent and restore-on-restart quietly find nothing. The symptom is
+ * a one-line warning inside the pane that nobody reads.
+ *
+ * Claude Explorer is a launcher: a session it starts is top-level, whatever
+ * started Claude Explorer. So drop the parent's session identity.
+ *
+ * ponytail: a named list, not a `CLAUDE_CODE_*` prefix sweep — the prefix also
+ * covers deliberate user configuration (CLAUDE_CODE_USE_BEDROCK,
+ * CLAUDE_CODE_MAX_OUTPUT_TOKENS, …) which must pass through untouched. Ceiling:
+ * if Claude Code renames its marker, this list needs the new name. The
+ * env-scrub test is what would notice.
+ */
+const INHERITED_SESSION_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_PID',
+]
+
+export function launchEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) continue
+    if (INHERITED_SESSION_VARS.includes(k)) continue
+    env[k] = v
+  }
+  return env
+}
+
 export class PtyManager {
   private handles = new Map<string, Handle>()
 
   spawn(
-    opts: { path: string; resumeId?: string; shell?: boolean },
+    opts: { path: string; resumeId?: string; shell?: boolean; sessionId?: string },
     onData: (id: string, d: string) => void,
     onExit: (id: string, code: number) => void,
   ): string {
@@ -41,7 +80,7 @@ export class PtyManager {
       try {
         proc = pty.spawn('powershell.exe', ['-NoLogo'], {
           name: 'xterm-color', cwd: opts.path, cols: 80, rows: 24,
-          env: process.env as Record<string, string>,
+          env: launchEnv(),
         })
       } catch (err) {
         const msg = `\r\n\x1b[31mFailed to launch shell: ${(err as Error).message}\x1b[0m\r\n`
@@ -54,7 +93,16 @@ export class PtyManager {
       return id
     }
 
-    const claudeArgs = opts.resumeId ? ['--resume', opts.resumeId] : []
+    // resumeId picks up an existing conversation; sessionId *names* a new one so
+    // the tab that owns it can resume that exact conversation after a restart.
+    // They are mutually exclusive — claude rejects --session-id for an id that
+    // already has a transcript, which is precisely when --resume is the right
+    // flag. The caller decides by checking whether the session exists on disk.
+    const claudeArgs = opts.resumeId
+      ? ['--resume', opts.resumeId]
+      : opts.sessionId
+        ? ['--session-id', opts.sessionId]
+        : []
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)
     const file = isBatch ? process.env.COMSPEC || 'cmd.exe' : CLAUDE
@@ -67,7 +115,7 @@ export class PtyManager {
         cwd: opts.path,
         cols: 80,
         rows: 24,
-        env: process.env as Record<string, string>,
+        env: launchEnv(),
       })
     } catch (err) {
       // Surface the failure inside the terminal tab instead of rejecting the IPC call

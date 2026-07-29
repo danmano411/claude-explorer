@@ -20,11 +20,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 /**
  * Launch the built app. Returns { app, win, close } — `win` is the renderer
  * Page, so everything Playwright can do to a web page works on it.
+ *
+ * `userDataDir` points the app at a throwaway profile. Pass it for anything that
+ * asserts on persisted state: the app now restores the previous workspace, so a
+ * test sharing the real profile both accumulates other runs' tabs (a stale tab
+ * gets measured instead of the fresh one) and does not start at home. Leaving it
+ * unset keeps the real profile, which is what an inspection run wants.
  */
-export async function launchApp({ timeout = 30_000 } = {}) {
+export async function launchApp({ timeout = 30_000, userDataDir } = {}) {
   const app = await pw._electron.launch({
     executablePath: require('electron'), // outside Electron this export IS the exe path
-    args: [path.join(root, 'out/main/index.js')],
+    args: [
+      ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : []),
+      path.join(root, 'out/main/index.js'),
+    ],
     cwd: root,
     timeout,
   });

@@ -8,6 +8,14 @@ export interface Tab {
   ptyId?: string
   title: string
   terminalKind?: 'claude' | 'shell' // set when view === 'terminal'
+  /**
+   * The Claude conversation this tab owns, for `--resume` after a restart.
+   * We generate it and hand it to the CLI via `--session-id` rather than
+   * reading back whichever jsonl appeared afterwards, so two tabs on the same
+   * folder can never be confused for one another. Set when terminalKind ===
+   * 'claude'.
+   */
+  sessionId?: string
   filePath?: string // absolute file being viewed; set when view === 'viewer'
   viewerMode?: 'file' | 'diff' // 'file' -> fsRead, 'diff' -> gitDiff; set when view === 'viewer'
   renamed?: boolean // user set a custom title; suppress auto-title-on-navigate
@@ -21,23 +29,37 @@ export function toPersisted(t: Tab): PersistedTab {
     title: t.title,
     renamed: t.renamed,
     terminalKind: t.terminalKind,
+    resumeSessionId: t.sessionId,
     filePath: t.filePath,
     viewerMode: t.viewerMode,
   }
 }
 
 /**
- * null when the tab cannot be brought back.
+ * null when the tab cannot be brought back at all.
  *
- * A terminal tab's ptyId is a handle to a process that died with the last run,
- * so restoring one would put a dead pane on screen. Claude tabs could instead
- * resume their session (sessions.ts already has the ids), but whether that
- * should happen automatically at launch — spawning N claude processes before
- * the user asks — is a product decision, not a technical one. Skipped until
- * that is answered rather than guessed at.
+ * A terminal tab comes back **without a ptyId**, which is the load-bearing
+ * detail: the old pty died with the last run, and a Tab whose view is
+ * 'terminal' but whose ptyId is absent means "this pane still needs a process".
+ * App spawns it on first activation rather than all at once at launch — six
+ * restored sessions should not mean six Claude processes competing for the CPU
+ * before the window is even usable.
  */
 export function fromPersisted(p: PersistedTab): Tab | null {
-  if (p.view === 'terminal') return null
+  if (p.view === 'terminal') {
+    // A terminal tab with no cwd could only spawn somewhere arbitrary.
+    if (!p.cwd) return null
+    return {
+      id: p.id,
+      view: 'terminal',
+      cwd: p.cwd,
+      title: p.title,
+      renamed: p.renamed,
+      terminalKind: p.terminalKind ?? 'claude',
+      sessionId: p.resumeSessionId,
+    }
+  }
+  if (p.view === 'viewer' && !p.filePath) return null // nothing to show
   return {
     id: p.id,
     view: p.view,
@@ -49,14 +71,19 @@ export function fromPersisted(p: PersistedTab): Tab | null {
   }
 }
 
+/** A restored terminal tab that has not been given a process yet. */
+export function needsSpawn(t: Tab): boolean {
+  return t.view === 'terminal' && !t.ptyId
+}
+
 export function newFilesTab(cwd: string): Tab {
   return { id: crypto.randomUUID(), view: 'files', cwd, title: winBasename(cwd) }
 }
 
 export function newTerminalTab(
-  cwd: string, kind: 'claude' | 'shell', ptyId: string, title: string,
+  cwd: string, kind: 'claude' | 'shell', ptyId: string, title: string, sessionId?: string,
 ): Tab {
-  return { id: crypto.randomUUID(), view: 'terminal', cwd, ptyId, terminalKind: kind, title }
+  return { id: crypto.randomUUID(), view: 'terminal', cwd, ptyId, terminalKind: kind, title, sessionId }
 }
 
 /** Read-only viewer tab. cwd is the containing folder so the tab context menu

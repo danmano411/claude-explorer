@@ -72,7 +72,12 @@ export interface Api {
   recentsAdd(path: string): Promise<void>
   sessionsList(path: string): Promise<ClaudeSession[]>
   externalOpen(path: string): Promise<void>
-  ptySpawn(opts: { path: string; resumeId?: string; shell?: boolean }): Promise<string> // returns ptyId
+  // `sessionId` NAMES a new Claude conversation (`--session-id`) so the tab that
+  // owns it can `--resume` that exact conversation after a restart; `resumeId`
+  // picks up one that already has a transcript. Mutually exclusive.
+  ptySpawn(opts: {
+    path: string; resumeId?: string; shell?: boolean; sessionId?: string
+  }): Promise<string> // returns ptyId
   ptyWrite(ptyId: string, data: string): void
   ptyResize(ptyId: string, cols: number, rows: number): void
   ptyKill(ptyId: string): void
