@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  newFilesTab, newTerminalTab, newViewerTab, toPersisted, fromPersisted, type Tab,
+  newFilesTab, newTerminalTab, newViewerTab, toPersisted, fromPersisted, needsSpawn, type Tab,
 } from './tabs';
 import { reorder } from './tabreorder';
 import { usePtyStatus } from './ptystatus';
@@ -20,6 +20,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const status = usePtyStatus();
   const lastActivated = useRef<Map<string, number>>(new Map());
+  const spawning = useRef<Set<string>>(new Set());
 
   const selectTab = (id: string) => {
     lastActivated.current.set(id, Date.now());
@@ -36,6 +37,38 @@ export function App() {
       setTabs([t]); selectTab(t.id);
     })();
   }, []);
+
+  // Give a restored terminal tab its process. Whether the conversation can be
+  // resumed depends on something only the disk knows: `--resume` needs a
+  // transcript, and a tab closed before its first message has an id but no
+  // file, which claude rejects. Passing the same id as `--session-id` instead
+  // means the tab keeps its identity either way, so the *next* restart resumes
+  // it properly.
+  const spawnFor = async (t: Tab): Promise<string> => {
+    if (t.terminalKind === 'shell') return window.api.ptySpawn({ path: t.cwd, shell: true });
+    const known = t.sessionId
+      ? (await window.api.sessionsList(t.cwd)).some((s) => s.id === t.sessionId)
+      : false;
+    return window.api.ptySpawn({
+      path: t.cwd,
+      resumeId: known ? t.sessionId : undefined,
+      sessionId: known ? undefined : t.sessionId,
+    });
+  };
+
+  // Restored terminal tabs are spawned on first activation, not all at once at
+  // launch — coming back to six Claude sessions should not mean six CLIs racing
+  // for the CPU before the window is usable. A failed spawn paints its own error
+  // inside the pane (see PtyManager), so a folder that has since been deleted
+  // explains itself rather than silently doing nothing.
+  useEffect(() => {
+    const t = tabs.find((x) => x.id === active);
+    if (!t || !needsSpawn(t) || spawning.current.has(t.id)) return;
+    spawning.current.add(t.id);
+    spawnFor(t)
+      .then((ptyId) => update(t.id, { ptyId }))
+      .finally(() => spawning.current.delete(t.id));
+  }, [active, tabs]);
 
   // Persist the tab set so a restart puts you back where you were. Debounced:
   // navigating a folder retitles its tab, and writing the whole document on
@@ -107,18 +140,32 @@ export function App() {
   const reorderTabs = (from: number, insert: number) =>
     setTabs((ts) => reorder(ts, from, insert));
 
+  // A new conversation gets its id assigned here rather than discovered later:
+  // reading back "whichever jsonl appeared in this folder" cannot tell two tabs
+  // on the same repo apart, and getting that wrong would resume the wrong
+  // conversation. Resuming an existing one keeps its id, since that is the
+  // transcript it goes on writing to.
+  const claudeSpawn = async (cwd: string, resumeId?: string) => {
+    await window.api.recentsAdd(cwd);
+    const sessionId = resumeId ?? crypto.randomUUID();
+    const ptyId = await window.api.ptySpawn({
+      path: cwd, resumeId, sessionId: resumeId ? undefined : sessionId,
+    });
+    return { ptyId, sessionId };
+  };
+
   // Orange-arrow / in-place: converts the current files tab into a Claude terminal.
   const openClaude = async (id: string, cwd: string, resumeId?: string) => {
-    await window.api.recentsAdd(cwd);
-    const ptyId = await window.api.ptySpawn({ path: cwd, resumeId });
-    update(id, { view: 'terminal', cwd, ptyId, terminalKind: 'claude', title: basename(cwd) });
+    const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
+    update(id, {
+      view: 'terminal', cwd, ptyId, terminalKind: 'claude', sessionId, title: basename(cwd),
+    });
   };
 
   // Feature 1: Open Recent launches Claude in a NEW tab (never overrides current).
   const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
-    await window.api.recentsAdd(cwd);
-    const ptyId = await window.api.ptySpawn({ path: cwd, resumeId });
-    const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd));
+    const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
+    const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd), sessionId);
     setTabs((ts) => [...ts, t]); selectTab(t.id);
   };
 
