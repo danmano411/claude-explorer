@@ -27,6 +27,15 @@ export interface TrashRecord {
   name: string // basename, for display
 }
 
+/** A batch of staged items that could not be handed to the Recycle Bin (no
+ *  Recycle Bin on that volume — network share, removable media). Not data
+ *  loss: the items stay staged on disk and a later sweep retries them.
+ *  `volume` is null when the batch spans more than one drive/share. */
+export interface TrashWarn {
+  count: number
+  volume: string | null
+}
+
 export type FileMode = 'explorer' | 'developer'
 
 export interface Settings {

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
-import type { SearchHit, SearchDone } from '../shared/types';
+import type { SearchHit, SearchDone, TrashWarn } from '../shared/types';
 
 const api: Api = {
   fsList: (p) => ipcRenderer.invoke(CH.fsList, p),
@@ -32,6 +32,11 @@ const api: Api = {
   fsMove: (src, dst, confirm) => ipcRenderer.invoke(CH.fsMove, src, dst, confirm),
   fsDelete: (paths, opts) => ipcRenderer.invoke(CH.fsDelete, paths, opts),
   fsRestore: (records, confirm) => ipcRenderer.invoke(CH.fsRestore, records, confirm),
+  onTrashWarn: (cb) => {
+    const h = (_e: unknown, warn: TrashWarn) => cb(warn);
+    ipcRenderer.on(CH.trashWarn, h);
+    return () => ipcRenderer.off(CH.trashWarn, h);
+  },
   fsExists: (p) => ipcRenderer.invoke(CH.fsExists, p),
   openPath: (p) => ipcRenderer.invoke(CH.openPath, p),
   revealPath: (p) => ipcRenderer.invoke(CH.revealPath, p),

@@ -15,11 +15,24 @@ import { buildMenu } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
-import { flushAll, sweep } from './trash'
+import { flushAll, sweep, takePendingTrashWarn } from './trash'
+import { CH } from '../shared/ipc'
 
 let mainWindow: BrowserWindow | null = null
 let flushed = false
 let stopSearch: () => void = () => {}
+// KAN-32: sweep() (below) runs before this window exists, so a warning from
+// that startup retry has nobody to send to yet. Gate delivery on the window
+// actually being loaded rather than just created; whichever of
+// did-finish-load / sweep() finishes second is the one that finds something
+// to send — no queue, just this flag plus trash.ts's own pending value.
+let windowReady = false
+
+function sendPendingTrashWarn(): void {
+  if (!windowReady) return
+  const warn = takePendingTrashWarn()
+  if (warn) mainWindow?.webContents.send(CH.trashWarn, warn)
+}
 
 const iconPath = app.isPackaged
   ? join(process.resourcesPath, 'icon.png')
@@ -41,6 +54,10 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.webContents.once('did-finish-load', () => {
+    windowReady = true
+    sendPendingTrashWarn()
+  })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -53,7 +70,7 @@ app.whenReady().then(() => {
   // Before anything can delete: flush staging buckets orphaned by an unclean
   // exit to the Recycle Bin. Running this later would trash items that are
   // still on THIS run's undo stack. D-1.
-  void sweep()
+  void sweep().then(sendPendingTrashWarn)
   registerFsHandlers()
   registerRecentsHandlers()
   registerSessionsHandlers()
