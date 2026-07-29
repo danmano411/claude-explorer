@@ -153,13 +153,24 @@ export function App() {
             onOpenFile={openViewerTab}
           />
         )}
-        {activeTab?.view === 'terminal' && activeTab.ptyId && (
-          <Terminal ptyId={activeTab.ptyId} />
-        )}
         {activeTab?.view === 'viewer' && activeTab.filePath && (
           activeTab.viewerMode === 'diff'
             ? <DiffView filePath={activeTab.filePath} />
             : <Viewer filePath={activeTab.filePath} />
+        )}
+        {/* Terminals stay mounted for every terminal tab and are merely hidden
+            when inactive. Unmounting disposes the xterm, and a rebuilt instance
+            only ever receives *new* pty bytes — it never sees the escape
+            sequences that put the terminal in alt-screen / application-cursor
+            mode. A Claude session then silently stops scrolling, because the
+            wheel is no longer translated into anything its TUI understands.
+            Scrollback is lost with it. KAN-23. */}
+        {tabs.map((t) =>
+          t.view === 'terminal' && t.ptyId ? (
+            <div key={t.id} className="pane" hidden={t.id !== active}>
+              <Terminal ptyId={t.ptyId} />
+            </div>
+          ) : null,
         )}
       </div>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}

@@ -70,6 +70,10 @@ body {
 /* ===== Content region ===== */
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--bg-panel); }
 
+/* Terminal tabs stay mounted and are hidden when inactive (see App.tsx). */
+.pane { position: absolute; inset: 0; }
+.pane[hidden] { display: none; }
+
 /* ===== File browser ===== */
 .filebrowser { display: flex; flex-direction: column; height: 100%; }
 .toolbar {
