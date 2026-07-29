@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { newFilesTab, newTerminalTab, newViewerTab, type Tab } from './tabs';
+import {
+  newFilesTab, newTerminalTab, newViewerTab, toPersisted, fromPersisted, type Tab,
+} from './tabs';
 import { reorder } from './tabreorder';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
@@ -25,11 +27,32 @@ export function App() {
   };
 
   useEffect(() => {
-    window.api.fsHome().then((home) => {
+    (async () => {
+      const w = await window.api.workspaceGet();
+      const restored = w.tabs.map(fromPersisted).filter((t): t is Tab => t !== null);
+      if (restored.length) { setTabs(restored); selectTab(restored[0].id); return; }
+      const home = await window.api.fsHome();
       const t = newFilesTab(home);
       setTabs([t]); selectTab(t.id);
-    });
+    })();
   }, []);
+
+  // Persist the tab set so a restart puts you back where you were. Debounced:
+  // navigating a folder retitles its tab, and writing the whole document on
+  // every keystroke-fast state change is pointless churn.
+  useEffect(() => {
+    if (!tabs.length) return;
+    const timer = setTimeout(() => {
+      window.api.workspaceGet().then((w) =>
+        window.api.workspaceSet({
+          ...w,
+          tabs: tabs.map(toPersisted),
+          spaces: w.spaces.map((s, i) =>
+            i === 0 ? { ...s, tabIds: tabs.map((t) => t.id) } : s),
+        }));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [tabs]);
 
   // Application menu (File/Settings) posts commands; dispatch through a ref so
   // the subscription (mounted once) always calls the latest closures.

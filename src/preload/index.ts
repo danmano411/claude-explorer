@@ -62,6 +62,9 @@ const api: Api = {
     ipcRenderer.on(CH.searchDone, h);
     return () => ipcRenderer.off(CH.searchDone, h);
   },
+  // --- M5 workspace ---
+  workspaceGet: () => ipcRenderer.invoke(CH.workspaceGet),
+  workspaceSet: (w) => ipcRenderer.invoke(CH.workspaceSet, w),
 };
 
 contextBridge.exposeInMainWorld('api', api);
