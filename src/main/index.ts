@@ -11,6 +11,7 @@ import { registerOpenHandlers } from './open.handlers'
 import { registerSettingsHandlers } from './settings.handlers'
 import { registerIdeHandlers } from './ide.handlers'
 import { registerFileReadHandlers } from './fileread.handlers'
+import { registerGitHandlers } from './git.handlers'
 import { buildMenu } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
@@ -82,6 +83,11 @@ app.whenReady().then(() => {
   registerSettingsHandlers()
   registerIdeHandlers()
   registerFileReadHandlers()
+  // Was never called: git:status and git:diff had a CH entry, an Api method and
+  // a preload binding, but no live handler — so the whole M2 diff surface did
+  // nothing in a real build. Same class as fs:exists (KAN-30), and found by the
+  // parity test below on its first run.
+  registerGitHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
   buildMenu()
