@@ -7,6 +7,9 @@ import type {
   ListResult,
   ReadResult,
   GitStatusResult,
+  SearchHit,
+  SearchQuery,
+  SearchDone,
 } from './types'
 
 export const CH = {
@@ -42,6 +45,14 @@ export const CH = {
   fsRead: 'fs:read',
   gitStatus: 'git:status',
   gitDiff: 'git:diff',
+  // --- M3 search. A stream, not a request/response: ripgrep emits matches
+  // progressively over seconds on a large tree, and the overlay shows them as
+  // they land. Cancellation is part of the contract, not an afterthought —
+  // every keystroke supersedes a child process that may still be walking.
+  searchStart: 'search:start',
+  searchCancel: 'search:cancel',
+  searchHits: 'search:hits', // main -> renderer event (batched)
+  searchDone: 'search:done', // main -> renderer event
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -86,4 +97,11 @@ export interface Api {
   fsRead(path: string): Promise<ReadResult>
   gitStatus(dir: string): Promise<GitStatusResult> // dir = any path inside the repo
   gitDiff(path: string): Promise<ReadResult> // unified diff of one file, as text
+  // --- M3 search. Read-only, so no policy gate. searchStart resolves with the
+  // id of the run; hits arrive on the event channels until searchDone fires.
+  // Starting a search supersedes any earlier one from the same window.
+  searchStart(q: SearchQuery): Promise<string> // returns searchId
+  searchCancel(searchId: string): void
+  onSearchHits(cb: (searchId: string, hits: SearchHit[]) => void): () => void
+  onSearchDone(cb: (searchId: string, done: SearchDone) => void): () => void
 }

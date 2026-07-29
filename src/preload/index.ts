@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
+import type { SearchHit, SearchDone } from '../shared/types';
 
 const api: Api = {
   fsList: (p) => ipcRenderer.invoke(CH.fsList, p),
@@ -48,6 +49,19 @@ const api: Api = {
   fsRead: (p) => ipcRenderer.invoke(CH.fsRead, p),
   gitStatus: (dir) => ipcRenderer.invoke(CH.gitStatus, dir),
   gitDiff: (p) => ipcRenderer.invoke(CH.gitDiff, p),
+  // --- M3 search ---
+  searchStart: (q) => ipcRenderer.invoke(CH.searchStart, q),
+  searchCancel: (id) => ipcRenderer.send(CH.searchCancel, id),
+  onSearchHits: (cb) => {
+    const h = (_e: unknown, id: string, hits: SearchHit[]) => cb(id, hits);
+    ipcRenderer.on(CH.searchHits, h);
+    return () => ipcRenderer.off(CH.searchHits, h);
+  },
+  onSearchDone: (cb) => {
+    const h = (_e: unknown, id: string, done: SearchDone) => cb(id, done);
+    ipcRenderer.on(CH.searchDone, h);
+    return () => ipcRenderer.off(CH.searchDone, h);
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

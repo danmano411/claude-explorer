@@ -75,7 +75,43 @@ body {
 .pane[hidden] { display: none; }
 
 /* ===== File browser ===== */
-.filebrowser { display: flex; flex-direction: column; height: 100%; }
+.filebrowser { display: flex; flex-direction: column; height: 100%; position: relative; }
+
+/* ===== Search overlay (M3) =====
+   Floats over the list rather than replacing it, so closing it puts you back
+   exactly where you were. Same hard drop shadow as .ctx-menu / .recent-list. */
+.search-overlay { position: absolute; top: 6px; right: 10px; z-index: 40; width: 420px; max-width: calc(100% - 20px); }
+.search-box {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px;
+  background: var(--bg-panel); border: 1px solid var(--clay);
+  border-radius: var(--radius); box-shadow: 3px 3px 0 var(--line);
+}
+.search-input {
+  flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  font-family: var(--font-mono); font-size: 13px; color: var(--ink);
+}
+.search-status { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); white-space: nowrap; }
+.search-close {
+  border: none; background: transparent; cursor: pointer; padding: 0 4px;
+  color: var(--ink-soft); font-size: 16px; line-height: 1; border-radius: 2px;
+}
+.search-close:hover { color: #fff; background: var(--clay); }
+
+.search-results {
+  list-style: none; margin: 4px 0 0; padding: 4px 0; max-height: 60vh; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 3px 3px 0 var(--line);
+}
+.search-row {
+  display: flex; flex-direction: column; gap: 1px; padding: 4px 10px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 12px;
+}
+.search-row.active { background: var(--sel); box-shadow: inset 2px 0 0 var(--clay); }
+.search-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-line { color: var(--clay); }
+.search-path, .search-preview {
+  color: var(--ink-soft); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .toolbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 8px 12px; background: var(--bg-panel); border-bottom: 1px solid var(--line);
