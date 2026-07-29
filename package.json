@@ -31,6 +31,7 @@
     "electron": "^41.7.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^3.1.0",
+    "playwright-core": "^1.62.0",
     "typescript": "^7.0.2",
     "vite": "^6.4.3",
     "vitest": "^4.1.10"
@@ -49,7 +50,11 @@
     "productName": "Claude Explorer",
     "npmRebuild": false,
     "publish": [
-      { "provider": "github", "owner": "danmano411", "repo": "claude-explorer" }
+      {
+        "provider": "github",
+        "owner": "danmano411",
+        "repo": "claude-explorer"
+      }
     ],
     "directories": {
       "output": "dist"

@@ -7,3 +7,4 @@ CLAUDE.md
 .private/
 .env
 .gstack/
+test/harness/*.png

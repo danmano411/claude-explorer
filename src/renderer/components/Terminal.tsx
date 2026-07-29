@@ -17,7 +17,6 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(ref.current);
-    fit.fit();
 
     const offData = window.api.onPtyData((id, d) => { if (id === ptyId) term.write(d); });
     const offExit = window.api.onPtyExit((id) => { if (id === ptyId) term.write('\r\n[session ended]\r\n'); });
@@ -43,7 +42,14 @@ export function Terminal({ ptyId }: { ptyId: string }) {
       return true;
     });
 
-    const resize = () => { fit.fit(); window.api.ptyResize(ptyId, term.cols, term.rows); };
+    // A hidden tab has no layout box; fitting to it would compute nonsense
+    // cols/rows and resize the pty to match. The ResizeObserver fires again
+    // when the tab is shown, so skipping here loses nothing.
+    const resize = () => {
+      if (!ref.current?.clientHeight) return;
+      fit.fit();
+      window.api.ptyResize(ptyId, term.cols, term.rows);
+    };
     const ro = new ResizeObserver(resize);
     ro.observe(ref.current);
     resize();
