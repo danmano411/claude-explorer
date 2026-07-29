@@ -3,7 +3,7 @@ import { accessSync, constants, readFileSync, writeFileSync, type Dirent } from 
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { app, shell } from 'electron'
-import type { TrashRecord } from '../shared/types'
+import type { TrashRecord, TrashWarn } from '../shared/types'
 import { driveKey, uniqueName, winBasename, winDirname } from '../shared/pathutil'
 
 /** rename, with a copy+delete fallback when src and dst sit on different volumes.
@@ -160,6 +160,35 @@ function untrack(records: TrashRecord[]): void {
   }
 }
 
+// KAN-32: the data side (keep the record so a later sweep retries it) was
+// fixed by D-2 above; this is the user-facing side. Held here rather than
+// passed back through flush()'s return value because sweep() runs at startup,
+// before any window (or renderer listener) exists — main/index.ts reads and
+// clears this once it is actually safe to send. One value, not a queue: a
+// second failure before the first is read simply overwrites it (coalesced,
+// not accumulated) — the user only needs "your stuff is still safe", not a
+// running tally of every retry.
+let pendingTrashWarn: TrashWarn | null = null
+
+/** Pure: what to tell the user about a batch of staged items that would not
+ *  go to the Recycle Bin. `volume` is the drive/share the items were
+ *  originally deleted FROM (not the internal staging path) — that is what the
+ *  user recognises. Omitted when the batch spans more than one volume. */
+function describeStuck(stuck: TrashRecord[]): TrashWarn | null {
+  if (!stuck.length) return null
+  const volumes = new Set(stuck.map((r) => driveRootOf(r.original)))
+  return { count: stuck.length, volume: volumes.size === 1 ? [...volumes][0] : null }
+}
+
+/** main/index.ts calls this once the renderer is confirmed listening
+ *  (webContents 'did-finish-load'). Returns null, and clears, on every call
+ *  after the first — so a slow renderer can poll it harmlessly. */
+export function takePendingTrashWarn(): TrashWarn | null {
+  const w = pendingTrashWarn
+  pendingTrashWarn = null
+  return w
+}
+
 /** Hand staged items to the Recycle Bin. Returns the ones that would not go —
  *  a volume with no Recycle Bin (network share, removable) rejects trashItem.
  *  Those keep BOTH their record and their manifest: dropping the record anyway
@@ -180,6 +209,7 @@ export async function flush(records: TrashRecord[]): Promise<TrashRecord[]> {
     await discard(bucketOf(r.staged)).catch(() => {})
   }
   untrack(done)
+  pendingTrashWarn = describeStuck(stuck)
   if (stuck.length) {
     console.warn(
       `[trash] ${stuck.length} item(s) could not reach the Recycle Bin and are still staged; the next startup sweep retries them:`,
@@ -208,6 +238,9 @@ async function listDirents(dir: string): Promise<Dirent[]> {
  *  trash items still sitting on the undo stack. */
 export async function sweep(roots: string[] = knownRoots()): Promise<string[]> {
   const recovered: string[] = []
+  // Startup is the one moment the failure actually needs surfacing (see
+  // pendingTrashWarn above): this retry has nothing else to fall back on.
+  const stuck: TrashRecord[] = []
   for (const root of roots) {
     for (const entry of await listDirents(root)) {
       if (!entry.isDirectory()) continue // manifests are files; discard() pairs them
@@ -218,7 +251,12 @@ export async function sweep(roots: string[] = knownRoots()): Promise<string[]> {
       for (const item of items) {
         try { await shell.trashItem(join(bucket, item)) } catch { ok = false }
       }
-      if (!ok) continue // leave it staged; the manifest keeps it retriable
+      if (!ok) {
+        // No manifest (older build orphan) still gets a usable fallback: the
+        // bucket path is on the same volume as the item it holds.
+        if (items.length) stuck.push(rec ?? { original: bucket, staged: bucket, name: entry.name })
+        continue // leave it staged; the manifest keeps it retriable
+      }
       await discard(bucket).catch(() => {}) // one stuck bucket must not abort the sweep
       if (items.length) recovered.push(rec?.original ?? bucket)
     }
@@ -226,6 +264,7 @@ export async function sweep(roots: string[] = knownRoots()): Promise<string[]> {
   if (recovered.length) {
     console.log(`[trash] swept ${recovered.length} orphaned item(s) to the Recycle Bin:`, recovered)
   }
+  pendingTrashWarn = describeStuck(stuck)
   return recovered
 }
 

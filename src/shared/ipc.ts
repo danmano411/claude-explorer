@@ -11,6 +11,7 @@ import type {
   SearchQuery,
   SearchDone,
   Workspace,
+  TrashWarn,
 } from './types'
 
 export const CH = {
@@ -34,6 +35,7 @@ export const CH = {
   fsMove: 'fs:move', // returns final dest path
   fsDelete: 'fs:delete', // -> TrashRecord[]
   fsRestore: 'fs:restore', // TrashRecord[] -> void
+  trashWarn: 'trash:warn', // main -> renderer event: a flush (startup sweep or quit) couldn't reach the Recycle Bin
   fsExists: 'fs:exists',
   openPath: 'shell:openPath',
   revealPath: 'shell:reveal',
@@ -90,6 +92,10 @@ export interface Api {
   // Policy-gated like every other mutation: restore renames caller-supplied
   // paths, so it is an arbitrary-move primitive if left ungated.
   fsRestore(records: TrashRecord[], confirm?: string): Promise<OpResult<void>>
+  // Fires when staged items could not reach the Recycle Bin — startup retry is
+  // the common case, since that is the one point main can be sure a window is
+  // listening (see sendPendingTrashWarn in main/index.ts).
+  onTrashWarn(cb: (warn: TrashWarn) => void): () => void
   fsExists(path: string): Promise<boolean>
   openPath(path: string): Promise<void>
   revealPath(path: string): Promise<void>

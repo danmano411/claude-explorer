@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DirEntry, FileMode, GitStatusResult } from '../../shared/types';
+import type { DirEntry, FileMode, GitStatusResult, TrashWarn } from '../../shared/types';
 import { sameDrive, winBasename, winDirname } from '../../shared/pathutil';
 import { emptySelection, applyClick, type Selection } from '../selection';
 import { initHistory, canBack, canForward, navigate, goBack, goForward } from '../history';
@@ -25,6 +25,11 @@ const scrollOffsets = new Map<string, number>();
 
 /** Gutter marker: git's own letters, so the meaning transfers straight to the
  *  terminal next door. '·' is a folder that merely contains changes. */
+// KAN-32: worded so it does not read as data loss — it is not. The items are
+// still on disk, staged, and main retries them automatically.
+const trashWarnMessage = (w: TrashWarn): string =>
+  `${w.count} item${w.count === 1 ? '' : 's'}${w.volume ? ` on ${w.volume}` : ''} could not be moved to the Recycle Bin — they will be retried next launch.`;
+
 const MARK: Record<GutterMark, [glyph: string, title: string]> = {
   modified: ['M', 'Modified'],
   added: ['A', 'Added (staged)'],
@@ -181,6 +186,10 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     () => window.api.onMenuCommand((cmd) => { if (cmd === 'toggle-mode') toggleMode(); }),
     [mode]
   );
+
+  // Startup retry (or a quit-time flush) couldn't reach the Recycle Bin. Not
+  // data loss — say so — the items are staged on disk and main retries them.
+  useEffect(() => window.api.onTrashWarn((warn) => notify(trashWarnMessage(warn), 6000)), []);
 
   const nav = (p: string) => setHistory((h) => navigate(h, p));
   const refresh = () => { load(); noGit.current = false; loadGit(); };
