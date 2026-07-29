@@ -1,12 +1,35 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import {
+  mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, readFileSync, utimesSync, statSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdir, newFile, rename, copy, move } from '../src/main/fsmutate'
+
+// A real cross-volume move needs a second writable volume, which CI does not
+// have — rename is mocked to raise EXDEV so the copy+delete fallback itself is
+// what gets exercised. Off by default, so every other test uses the real fs.
+const io = vi.hoisted(() => ({ exdev: false }))
+vi.mock('node:fs/promises', async (orig) => {
+  const real = await orig<typeof import('node:fs/promises')>()
+  return {
+    ...real,
+    default: real,
+    rename: async (a: string, b: string) => {
+      if (io.exdev) throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' })
+      return real.rename(a, b)
+    },
+  }
+})
+
+const { mkdir, newFile, rename, copy, move } = await import('../src/main/fsmutate')
+const { moveCmd } = await import('../src/renderer/undo')
 
 let base: string
 
-beforeEach(() => { base = mkdtempSync(join(tmpdir(), 'ce-fsmutate-')) })
+beforeEach(() => {
+  base = mkdtempSync(join(tmpdir(), 'ce-fsmutate-'))
+  io.exdev = false
+})
 afterEach(() => rmSync(base, { recursive: true, force: true }))
 
 // D3: parent-path computation must use winDirname, not
@@ -29,6 +52,78 @@ describe('D3 — parent path uses winDirname', () => {
   it('mkdir still works with backslash separators', async () => {
     const created = await mkdir(join(base, 'backslash'))
     expect(existsSync(created)).toBe(true)
+  })
+
+  // D6: the second D3 call site. moveCmd's undo() moves the item back to
+  // winDirname(src); the old `src.slice(0, src.lastIndexOf('\\'))` returns -1
+  // for a forward-slash path and silently truncates the last character, so undo
+  // would target a directory that does not exist. Lives here because this is
+  // the D3 regression suite — the code under test is src/renderer/undo.ts.
+  it('moveCmd undoes back to the real parent of a forward-slash path', async () => {
+    const calls: Array<[string, string]> = []
+    ;(globalThis as Record<string, unknown>).window = {
+      api: {
+        fsMove: async (src: string, destDir: string) => {
+          calls.push([src, destDir])
+          return { ok: true, value: `${destDir}\\f.txt` }
+        },
+      },
+    }
+    try {
+      const cmd = moveCmd('C:/Users/dan/proj/f.txt', 'C:\\Users\\dan\\other')
+      await cmd.do()
+      await cmd.undo()
+      expect(calls[1]).toEqual(['C:\\Users\\dan\\other\\f.txt', 'C:/Users/dan/proj'])
+    } finally {
+      delete (globalThis as Record<string, unknown>).window
+    }
+  })
+})
+
+// D3 (deferred): a same-volume move is a rename and preserves everything; the
+// EXDEV fallback is an fs.cp, which without preserveTimestamps leaves the copy
+// with a fresh access time. (Measured: on Windows CopyFileW carries the LAST
+// WRITE time across on its own, so mtime survives either way — atime is the
+// half the flag actually buys, and asserting only mtime here would be a test
+// that can never go red.)
+describe('D3 — cross-volume fallbacks preserve timestamps', () => {
+  const OLD = new Date('2019-03-04T05:06:07.000Z')
+  const times = (p: string) => {
+    const s = statSync(p)
+    return [s.atime.getTime(), s.mtime.getTime()]
+  }
+  const aged = (name: string) => {
+    const p = join(base, name)
+    writeFileSync(p, 'x')
+    utimesSync(p, OLD, OLD)
+    return p
+  }
+
+  it('copy keeps the source timestamps', async () => {
+    const src = aged('old.txt')
+    mkdirSync(join(base, 'dest'))
+    const out = await copy(src, join(base, 'dest'))
+    expect(times(out)).toEqual([OLD.getTime(), OLD.getTime()])
+  })
+
+  it('move keeps the source timestamps when rename reports EXDEV', async () => {
+    const src = aged('old.txt')
+    mkdirSync(join(base, 'dest'))
+    io.exdev = true
+    const out = await move(src, join(base, 'dest'))
+    expect(existsSync(src)).toBe(false)
+    expect(times(out)).toEqual([OLD.getTime(), OLD.getTime()])
+  })
+
+  it('move keeps timestamps of files inside a copied directory', async () => {
+    mkdirSync(join(base, 'tree'))
+    const inner = join(base, 'tree', 'old.txt')
+    writeFileSync(inner, 'x')
+    utimesSync(inner, OLD, OLD)
+    mkdirSync(join(base, 'dest'))
+    io.exdev = true
+    const out = await move(join(base, 'tree'), join(base, 'dest'))
+    expect(times(join(out, 'old.txt'))).toEqual([OLD.getTime(), OLD.getTime()])
   })
 })
 

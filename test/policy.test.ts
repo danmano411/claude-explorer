@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { classify, check, gate, canonicalize, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
+import type { Op } from '../src/main/policy'
 
 const ROOTS = ['C:\\FakeWindows', 'C:\\Fake Program Files']
 
@@ -177,6 +178,61 @@ describe('gate canonicalises before classifying', () => {
 
   it('leaves an ordinary temp path alone', () => {
     expect(gate('delete', [path.join(base, 'ordinary.txt')], 'explorer')).toBeNull()
+  })
+})
+
+// D4: check() returns on the FIRST protected path, so a twenty-item selection
+// with one bad entry used to yield a reason naming the class but not the path.
+// The renderer prints the reason verbatim; without the path the user cannot
+// tell which item to deselect.
+describe('D4 — a refusal names the offending path', () => {
+  it('names the system path that blocked an explorer-mode multi-select', () => {
+    const v = check('delete', ['C:\\Users\\dan\\ok', 'C:\\FakeWindows\\bad'], 'explorer', ROOTS)
+    expect(v.kind).toBe('deny')
+    if (v.kind === 'deny') expect(v.reason).toContain('C:\\FakeWindows\\bad')
+  })
+  it('names the system path in the developer-mode confirm prompt', () => {
+    const v = check('delete', ['C:\\Users\\dan\\ok', 'C:\\FakeWindows\\bad'], 'developer', ROOTS)
+    expect(v.kind).toBe('confirm')
+    if (v.kind === 'confirm') expect(v.reason).toContain('C:\\FakeWindows\\bad')
+  })
+  it('names the drive root', () => {
+    const v = check('delete', ['C:\\Users\\dan\\ok', 'D:\\'], 'explorer', ROOTS)
+    expect(v.kind).toBe('deny')
+    if (v.kind === 'deny') expect(v.reason).toContain('D:\\')
+  })
+  it('names the trash path', () => {
+    const bad = `C:\\${TRASH_DIR_NAME}\\abc\\f.txt`
+    const v = check('move', ['C:\\Users\\dan\\ok', bad], 'explorer', ROOTS)
+    expect(v.kind).toBe('deny')
+    if (v.kind === 'deny') expect(v.reason).toContain(bad)
+  })
+  it('still keeps the class in the reason', () => {
+    const v = check('delete', ['C:\\FakeWindows\\bad'], 'explorer', ROOTS)
+    if (v.kind === 'deny') expect(v.reason).toMatch(/system folder/i)
+  })
+})
+
+// D5: gate() carried `v.typed ? confirm === CONFIRM_WORD : confirm !== undefined`.
+// The untyped half was unreachable, and would have accepted ANY defined string
+// including ''. The branch is gone; these pin both halves of why that is safe.
+describe('D5 — confirmation requires the exact word', () => {
+  it('check() never emits an untyped confirm verdict', () => {
+    const ops: Op[] = ['delete', 'permanentDelete', 'move', 'copy', 'rename', 'mkdir', 'newFile']
+    const paths = ['C:\\Users\\dan\\ok', 'C:\\FakeWindows\\bad', 'C:\\', `C:\\${TRASH_DIR_NAME}\\x`]
+    for (const op of ops) {
+      for (const p of paths) {
+        for (const mode of ['explorer', 'developer'] as const) {
+          const v = check(op, [p], mode, ROOTS)
+          if (v.kind === 'confirm') expect(v.typed).toBe(true)
+        }
+      }
+    }
+  })
+  it('rejects empty and whitespace-only confirmations', () => {
+    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '', ROOTS)).not.toBeNull()
+    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '   ', ROOTS)).not.toBeNull()
+    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '\t\n', ROOTS)).not.toBeNull()
   })
 })
 

@@ -1,5 +1,5 @@
-import { rename, mkdir, readdir, cp, rm } from 'node:fs/promises'
-import { accessSync, constants } from 'node:fs'
+import { rename, mkdir, readdir, readFile, writeFile, cp, rm } from 'node:fs/promises'
+import { accessSync, constants, readFileSync, writeFileSync, type Dirent } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { app, shell } from 'electron'
@@ -8,15 +8,42 @@ import { driveKey, uniqueName, winBasename, winDirname } from '../shared/pathuti
 
 /** rename, with a copy+delete fallback when src and dst sit on different volumes.
  *  Staging and restoring MUST use the same move, or we can create deletes we are
- *  structurally unable to undo. */
+ *  structurally unable to undo.
+ *  preserveTimestamps keeps a cross-volume delete+undo round trip from rewriting
+ *  metadata that a same-volume rename leaves alone.
+ *  ponytail: fs.cp still drops alternate data streams, ACLs and directory
+ *  timestamps — inherent to a read+write copy. Upgrade path if that ever
+ *  matters: `robocopy /COPYALL /DCOPY:DAT`, the only no-new-dependency way. */
 async function move(from: string, to: string): Promise<void> {
   try {
     await rename(from, to)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
-    await cp(from, to, { recursive: true })
+    await cp(from, to, { recursive: true, preserveTimestamps: true })
     await rm(from, { recursive: true, force: true })
   }
+}
+
+// A bucket is <trashRoot>/<uuid>/ holding exactly the staged item; its manifest
+// is the sibling file <trashRoot>/<uuid>.json. Beside the bucket rather than
+// inside it so the bucket stays single-item and flush can hand THAT item — not
+// an opaque uuid folder — to the Recycle Bin.
+const manifestOf = (bucket: string) => bucket + '.json'
+const bucketOf = (staged: string) => winDirname(staged)
+
+async function readManifest(bucket: string): Promise<TrashRecord | null> {
+  try {
+    return JSON.parse(await readFile(manifestOf(bucket), 'utf8')) as TrashRecord
+  } catch {
+    return null // older build, or a manifest we failed to write
+  }
+}
+
+/** Remove an emptied bucket and its manifest. Only ever called once the staged
+ *  item has been restored or accepted by the Recycle Bin. */
+async function discard(bucket: string): Promise<void> {
+  await rm(bucket, { recursive: true, force: true })
+  await rm(manifestOf(bucket), { force: true })
 }
 
 // Test-friendly core: stage into an explicit root (no Electron dependency).
@@ -28,7 +55,11 @@ export async function stageInto(trashRoot: string, paths: string[]): Promise<Tra
     const name = winBasename(original)
     const staged = join(bucket, name)
     await move(original, staged)
-    records.push({ original, staged, name })
+    const record = { original, staged, name }
+    // The in-memory registry dies with the process; this does not. Best effort:
+    // a delete that worked must not fail because the manifest would not write.
+    try { await writeFile(manifestOf(bucket), JSON.stringify(record), 'utf8') } catch { /* sweep still finds the bucket, just not where it came from */ }
+    records.push(record)
   }
   return records
 }
@@ -47,6 +78,7 @@ export async function restore(records: TrashRecord[]): Promise<void> {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
     await move(r.staged, join(dir, uniqueName(names, r.name)))
+    await discard(bucketOf(r.staged))
   }
 }
 
@@ -57,16 +89,40 @@ export function driveRootOf(p: string): string {
   return key.startsWith('\\\\') ? key : key.toUpperCase() + '\\'
 }
 
+// A bucket lives at the root of whichever volume the deleted file was on, so a
+// fresh process has nothing to derive that from. Record the roots we use.
+// (Not a drive-letter probe: stat'ing a disconnected mapped drive can stall the
+// libuv threadpool for the whole SMB timeout.) Losing a write here only delays
+// a sweep to the next delete on that volume, so it is best effort throughout.
+const rootsIndex = () => join(app.getPath('userData'), 'trash-roots.json')
+
+function knownRoots(): string[] {
+  try {
+    const v: unknown = JSON.parse(readFileSync(rootsIndex(), 'utf8'))
+    return Array.isArray(v) ? (v as string[]) : []
+  } catch {
+    return []
+  }
+}
+
+function rememberRoot(root: string): string {
+  const roots = knownRoots()
+  if (!roots.includes(root)) {
+    try { writeFileSync(rootsIndex(), JSON.stringify([...roots, root])) } catch { /* best effort */ }
+  }
+  return root
+}
+
 function trashRootFor(p: string): string {
   try {
     const root = driveRootOf(p)
     accessSync(root, constants.W_OK)
-    return join(root, '.claude-explorer-trash')
+    return rememberRoot(join(root, '.claude-explorer-trash'))
   } catch {
     // ponytail: falls back to userData when the volume root is unwritable
     // (read-only share, locked-down drive). This can be a different volume,
     // which is why move() handles EXDEV above.
-    return join(app.getPath('userData'), 'trash')
+    return rememberRoot(join(app.getPath('userData'), 'trash'))
   }
 }
 
@@ -104,14 +160,74 @@ function untrack(records: TrashRecord[]): void {
   }
 }
 
-export async function flush(records: TrashRecord[]): Promise<void> {
+/** Hand staged items to the Recycle Bin. Returns the ones that would not go —
+ *  a volume with no Recycle Bin (network share, removable) rejects trashItem.
+ *  Those keep BOTH their record and their manifest: dropping the record anyway
+ *  is what leaked one staging bucket per delete, forever, unannounced. */
+export async function flush(records: TrashRecord[]): Promise<TrashRecord[]> {
+  const stuck: TrashRecord[] = []
+  const done: TrashRecord[] = []
   for (const r of records) {
-    try { await shell.trashItem(r.staged) } catch { /* best effort */ }
+    try {
+      await shell.trashItem(r.staged)
+    } catch {
+      stuck.push(r)
+      continue
+    }
+    done.push(r)
+    // Separate: the item IS in the Recycle Bin now, so a bucket we cannot
+    // remove is a leftover for the next sweep, not a failed flush.
+    await discard(bucketOf(r.staged)).catch(() => {})
   }
-  untrack(records)
+  untrack(done)
+  if (stuck.length) {
+    console.warn(
+      `[trash] ${stuck.length} item(s) could not reach the Recycle Bin and are still staged; the next startup sweep retries them:`,
+      stuck.map((r) => r.staged),
+    )
+  }
+  return stuck
 }
 
-export async function flushAll(): Promise<void> { await flush([...live]) }
+export async function flushAll(): Promise<TrashRecord[]> { return flush([...live]) }
+
+async function listDir(dir: string): Promise<string[]> {
+  try { return await readdir(dir) } catch { return [] }
+}
+
+async function listDirents(dir: string): Promise<Dirent[]> {
+  try { return await readdir(dir, { withFileTypes: true }) } catch { return [] }
+}
+
+/** Startup sweep. Anything still staged when the process starts was orphaned by
+ *  an unclean exit: its undo entry died with that process, so the Recycle Bin is
+ *  the only place left to put it — leaving it is worse, because policy.classify
+ *  refuses to let the user move it back out through the app. Returns the
+ *  original paths recovered (the bucket path when there is no manifest).
+ *  ponytail: startup ONLY. Calling this after the first delete of a run would
+ *  trash items still sitting on the undo stack. */
+export async function sweep(roots: string[] = knownRoots()): Promise<string[]> {
+  const recovered: string[] = []
+  for (const root of roots) {
+    for (const entry of await listDirents(root)) {
+      if (!entry.isDirectory()) continue // manifests are files; discard() pairs them
+      const bucket = join(root, entry.name)
+      const items = await listDir(bucket)
+      const rec = await readManifest(bucket)
+      let ok = true
+      for (const item of items) {
+        try { await shell.trashItem(join(bucket, item)) } catch { ok = false }
+      }
+      if (!ok) continue // leave it staged; the manifest keeps it retriable
+      await discard(bucket).catch(() => {}) // one stuck bucket must not abort the sweep
+      if (items.length) recovered.push(rec?.original ?? bucket)
+    }
+  }
+  if (recovered.length) {
+    console.log(`[trash] swept ${recovered.length} orphaned item(s) to the Recycle Bin:`, recovered)
+  }
+  return recovered
+}
 
 // Thin wrapper the handler uses so restored items leave the registry.
 export async function restoreAndUntrack(records: TrashRecord[]): Promise<void> {
