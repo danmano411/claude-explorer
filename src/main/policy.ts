@@ -94,21 +94,25 @@ export function check(
 
   for (const p of paths) {
     const cls = classify(p, roots)
+    // Name the path, not just the class: a refusal on one item of a twenty-item
+    // selection is useless if the user cannot tell which one to deselect.
     if (cls === 'trash') {
       return {
         kind: 'deny',
-        reason:
-          "That's Claude Explorer's own undo staging folder — changing it would break pending undo.",
+        reason: `${p} is Claude Explorer's own undo staging folder — changing it would break pending undo.`,
       }
     }
     if (cls === 'system' || cls === 'driveRoot') {
       const what = cls === 'system' ? 'A system folder' : 'A drive root'
       if (mode === 'explorer') {
-        return { kind: 'deny', reason: `${what}. Switch to Developer mode if you really need this.` }
+        return {
+          kind: 'deny',
+          reason: `${what}: ${p}. Switch to Developer mode if you really need this.`,
+        }
       }
       return {
         kind: 'confirm',
-        reason: `${what} — this can break Windows. Type ${CONFIRM_WORD} to proceed.`,
+        reason: `${what}: ${p} — this can break Windows. Type ${CONFIRM_WORD} to proceed.`,
         typed: true,
       }
     }
@@ -149,6 +153,9 @@ export function gate(
   )
   if (v.kind === 'allow') return null
   if (v.kind === 'deny') return v
-  const satisfied = v.typed ? confirm === CONFIRM_WORD : confirm !== undefined
-  return satisfied ? null : v
+  // Every confirm verdict check() produces is `typed`, so there is one rule:
+  // the exact word. A simple-confirm verdict added later fails closed here
+  // (it would demand the word) rather than accepting any defined string, ''
+  // included — which is what the branch that used to live here did.
+  return confirm === CONFIRM_WORD ? null : v
 }

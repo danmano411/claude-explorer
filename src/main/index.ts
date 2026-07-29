@@ -14,7 +14,7 @@ import { registerFileReadHandlers } from './fileread.handlers'
 import { buildMenu } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
-import { flushAll } from './trash'
+import { flushAll, sweep } from './trash'
 
 let mainWindow: BrowserWindow | null = null
 let flushed = false
@@ -49,6 +49,10 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // Before anything can delete: flush staging buckets orphaned by an unclean
+  // exit to the Recycle Bin. Running this later would trash items that are
+  // still on THIS run's undo stack. D-1.
+  void sweep()
   registerFsHandlers()
   registerRecentsHandlers()
   registerSessionsHandlers()

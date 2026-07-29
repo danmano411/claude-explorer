@@ -59,10 +59,19 @@ export async function newFile(path: string): Promise<string> {
   return finalPath
 }
 
+/** A same-volume move is a rename and keeps everything, so the copy paths have
+ *  to try: preserveTimestamps carries atime/mtime across (Windows' CopyFileW
+ *  already carries the last-write time, so this is mostly the access time).
+ *  ponytail: fs.cp still drops alternate data streams, ACLs and directory
+ *  timestamps — inherent to a read+write copy. Upgrade path if that ever
+ *  matters: shell out to `robocopy /COPYALL /DCOPY:DAT`, which is the only
+ *  no-new-dependency way to get them. */
+const CP = { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true } as const
+
 export async function copy(src: string, destDir: string): Promise<string> {
   const finalName = uniqueName(await dirNames(destDir), destName(src))
   const finalPath = join(destDir, finalName)
-  await cp(src, finalPath, { recursive: true, errorOnExist: true, force: false })
+  await cp(src, finalPath, CP)
   return finalPath
 }
 
@@ -73,7 +82,7 @@ export async function move(src: string, destDir: string): Promise<string> {
     await fsRename(src, finalPath)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-      await cp(src, finalPath, { recursive: true, errorOnExist: true, force: false })
+      await cp(src, finalPath, CP)
       await rm(src, { recursive: true, force: true })
     } else {
       throw err
