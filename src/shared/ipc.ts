@@ -44,6 +44,17 @@ export const CH = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   menuCommand: 'menu:command', // main -> renderer event (File/Settings menu items)
+  // KAN-55 "Open Recent" rows in the native File menu. A SEPARATE channel from
+  // menuCommand on purpose, and it is not an arbitrary refactor: menu:command
+  // is reachable from argv — main/index.ts sendPendingCli() forwards a
+  // CLI-supplied path down it, and any local process can say
+  // `"Claude Explorer.exe" --open <path>` with no authentication whatsoever.
+  // menu:session DOES spawn Claude Code in the named folder, which inherits the
+  // user's own config (hooks, .mcp.json, CLAUDE.md) at the user's privilege.
+  // Keeping it on its own channel — sent ONLY from src/main/menu.ts, never from
+  // the CLI path — keeps "no spawn from argv" structural rather than a check
+  // someone can delete. See main/cli.ts:81-110 and applyCli in App.tsx.
+  menuSession: 'menu:session', // main -> renderer event (Open Recent rows)
   // --- M2 viewer + diff (read-only) ---
   fsRead: 'fs:read',
   gitStatus: 'git:status',
@@ -113,6 +124,11 @@ export interface Api {
   // 'open-file'); the menu-click commands never set it.
   onMenuCommand(cb: (cmd: string, arg?: string) => void): () => void
   // 'new-tab' | 'close-tab' | 'open-settings' | 'toggle-mode' | 'open-path' | 'open-file'
+  // KAN-55: an "Open Recent" row was clicked — open a terminal tab on `path`,
+  // resuming `resumeId` when present and starting a fresh session when it is
+  // omitted. Separate from onMenuCommand because this one spawns; only
+  // src/main/menu.ts may send it (see the CH.menuSession comment).
+  onMenuSession(cb: (path: string, resumeId?: string) => void): () => void
   // --- M2 viewer + diff. Read-only: no policy gate, no OpResult, nothing throws;
   // every refusal (binary / too large / not a repo / no git) is a typed union arm.
   fsRead(path: string): Promise<ReadResult>

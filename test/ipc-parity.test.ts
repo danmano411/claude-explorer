@@ -121,6 +121,7 @@ const EVENT_CHANNELS = new Set<string>([
   CH.searchHits, // main -> renderer: streamed search results
   CH.searchDone, // main -> renderer: search finished
   CH.menuCommand, // main -> renderer: File/Settings menu clicks
+  CH.menuSession, // main -> renderer: native File > Open Recent rows (KAN-55)
   CH.trashWarn, // main -> renderer: a flush couldn't reach the Recycle Bin (KAN-32)
 ])
 

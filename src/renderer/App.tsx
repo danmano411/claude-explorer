@@ -23,7 +23,6 @@ import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
-import { FileMenu } from './components/FileMenu';
 import { SettingsModal } from './components/SettingsModal';
 import { SpaceMenu } from './components/SpaceMenu';
 import { TabBar, type GroupActions, type SplitActions } from './TabBar';
@@ -64,6 +63,12 @@ export function App() {
   // would be silently destroyed. Held here until restore has committed.
   const restoreDone = useRef(false);
   const pendingCli = useRef<[string, string] | null>(null); // [cmd, path]
+  // Same race, separate queue (KAN-55): the native File > Open Recent menu's
+  // `menu:session` rows also append a tab before restore may have committed,
+  // but they carry a resumeId that pendingCli's [cmd, path] shape has no room
+  // for and applyCli must never grow a spawning arm to hold. See the flush
+  // next to pendingCli's below, and the onMenuSession subscription further down.
+  const pendingSession = useRef<[string, string | undefined] | null>(null);
 
   /**
    * `activeSpaceId` as of RIGHT NOW, for callbacks that write `spaces`.
@@ -265,6 +270,9 @@ export function App() {
       const p = pendingCli.current;
       pendingCli.current = null;
       if (p) applyCli(p[0], p[1]);
+      const ps = pendingSession.current;
+      pendingSession.current = null;
+      if (ps) openClaudeNewTab(ps[0], ps[1]);
     })();
   }, []);
 
@@ -401,6 +409,23 @@ export function App() {
     }
   };
   useEffect(() => window.api.onMenuCommand((cmd, arg) => menuHandler.current(cmd, arg)), []);
+
+  // Native File > Open Recent rows (KAN-55) ride `menu:session`, a SEPARATE
+  // channel from `menu:command` sent only from src/main/menu.ts — not because
+  // this needs its own plumbing for its own sake, but because a resumeId is a
+  // spawn instruction, and menu:command/applyCli must stay something an
+  // unauthenticated CLI caller could also send (see the comment above
+  // applyCli). Same mount-once + ref-to-latest-closure shape as onMenuCommand,
+  // and the same restore race applies: openClaudeNewTab appends to `tabs`,
+  // but the restore effect above ends in a REPLACING setTabs(restored), so a
+  // session opened before that commits would be wiped out a moment later.
+  // Queued in `pendingSession` and flushed right where pendingCli is.
+  const sessionHandler = useRef<(path: string, resumeId?: string) => void>(() => {});
+  sessionHandler.current = (path, resumeId) => {
+    if (!restoreDone.current) { pendingSession.current = [path, resumeId]; return; }
+    openClaudeNewTab(path, resumeId);
+  };
+  useEffect(() => window.api.onMenuSession((path, resumeId) => sessionHandler.current(path, resumeId)), []);
 
   const update = (id: string, patch: Partial<Tab>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -881,13 +906,6 @@ export function App() {
             onCreate={onCreateSpace}
             onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
             onDelete={onDeleteSpace}
-          />
-        }
-        fileMenu={
-          <FileMenu
-            onNewTab={addTab}
-            onOpenFolder={openFolderTab}
-            onOpenSession={(p, resumeId) => openClaudeNewTab(p, resumeId)}
           />
         }
       />
