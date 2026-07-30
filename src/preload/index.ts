@@ -50,6 +50,11 @@ const api: Api = {
     ipcRenderer.on(CH.menuCommand, h);
     return () => ipcRenderer.off(CH.menuCommand, h);
   },
+  onMenuSession: (cb) => {
+    const h = (_e: unknown, path: string, resumeId?: string) => cb(path, resumeId);
+    ipcRenderer.on(CH.menuSession, h);
+    return () => ipcRenderer.off(CH.menuSession, h);
+  },
   // --- M2 viewer + diff (read-only) ---
   fsRead: (p) => ipcRenderer.invoke(CH.fsRead, p),
   gitStatus: (dir) => ipcRenderer.invoke(CH.gitStatus, dir),

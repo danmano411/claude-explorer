@@ -153,7 +153,7 @@ body {
 
 /* ===== Search overlay (M3) =====
    Floats over the list rather than replacing it, so closing it puts you back
-   exactly where you were. Same hard drop shadow as .ctx-menu / .filemenu-flyout. */
+   exactly where you were. Same hard drop shadow as .ctx-menu. */
 .search-overlay { position: absolute; top: 6px; right: 10px; z-index: 40; width: 420px; max-width: calc(100% - 20px); }
 .search-box {
   display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px;
@@ -232,10 +232,10 @@ body {
 .ctx-menu li:hover { background: var(--clay-soft); }
 
 /* ===== Space menu (left edge of the tab strip, KAN-45) ===== */
-/* Mirrors .filemenu below — same trigger-button treatment, same hard-drop
-   dropdown as .ctx-menu / .filemenu-flyout. No new palette: every value here is an
-   existing Retro Claude custom property, so it repaints under the dark-mode
-   media query at the top of this file for free. */
+/* Same trigger-button treatment and hard-drop dropdown as .ctx-menu. No new
+   palette: every value here is an existing Retro Claude custom property, so
+   it repaints under the dark-mode media query at the top of this file for
+   free. */
 .spacemenu { position: relative; margin-right: 8px; align-self: center; }
 
 .spacemenu-btn {
@@ -290,80 +290,6 @@ body {
   font: inherit; color: var(--ink); background: var(--bg);
   border: 1px solid var(--clay); border-radius: 3px;
   padding: 5px 12px; width: calc(100% - 24px); margin: 0 12px;
-}
-
-/* ===== File menu (left edge of the tab strip, beside the spaces switcher, KAN-54) ===== */
-/* Sibling of .spacemenu by design — the two buttons must read as a pair, so the
-   trigger repeats .spacemenu-btn's treatment exactly and the panels repeat
-   .spacemenu-dropdown's. No new palette: every value is an existing Retro
-   Claude custom property, so it repaints under the dark-mode media query for
-   free. */
-.filemenu { position: relative; margin-right: 8px; align-self: center; }
-
-.filemenu-btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-family: var(--font-serif); font-size: 14px; color: var(--ink);
-  background: var(--bg-panel); border: 1px solid var(--line);
-  padding: 5px 12px; border-radius: var(--radius); cursor: pointer;
-}
-.filemenu-btn:hover { border-color: var(--clay); color: var(--clay); }
-.filemenu-btn:focus-visible { outline: 2px solid var(--clay); outline-offset: 1px; }
-
-.filemenu-dropdown {
-  position: absolute; top: 100%; left: 0; z-index: 60;
-  min-width: 180px;
-  background: var(--bg-panel); border: 1px solid var(--line);
-  box-shadow: 3px 3px 0 var(--line);
-  padding: 4px 0;
-}
-
-/* Fixed, positioned from JS (FileMenu's Flyout): it flips leftward near the
-   window edge, and stays unclipped by the parent panel's scroll box. */
-.filemenu-flyout {
-  position: fixed; z-index: 61;
-  min-width: 240px; max-width: 380px;
-  max-height: 70vh; overflow-y: auto;
-  background: var(--bg-panel); border: 1px solid var(--line);
-  box-shadow: 3px 3px 0 var(--line);
-  padding: 4px 0;
-}
-
-.filemenu-list { list-style: none; margin: 0; padding: 0; }
-.filemenu-row { position: relative; display: flex; align-items: center; }
-
-.filemenu-item {
-  display: flex; align-items: center; gap: 10px;
-  flex: 1 1 auto; min-width: 0;
-  font-family: var(--font-serif); font-size: 14px; color: var(--ink);
-  background: transparent; border: none; text-align: left;
-  padding: 6px 14px; cursor: pointer;
-}
-.filemenu-item:hover, .filemenu-item:focus-visible { background: var(--clay-soft); outline: none; }
-
-/* Long session titles and long paths ellipsize — a flyout must never widen the
-   window (same fix KAN-33 applied to tab titles). */
-.filemenu-label {
-  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.filemenu-arrow { flex: none; color: var(--ink-soft); font-size: 11px; }
-.filemenu-time { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); }
-
-.filemenu-project, .filemenu-session { font-family: var(--font-mono); font-size: 12px; }
-.filemenu-project { padding-right: 4px; }
-
-/* New session row (KAN-54 review): first row of a project's sessions flyout,
-   ahead of the separator — same treatment as .ctx-sep/.filemenu-item, no new
-   palette. */
-.filemenu-sep { height: 1px; margin: 4px 0; background: var(--line); }
-
-.filemenu-x {
-  flex: none; font-family: var(--font-serif); font-size: 12px; color: var(--ink-soft);
-  background: transparent; border: none; padding: 4px 10px 4px 4px; cursor: pointer;
-}
-.filemenu-x:hover { color: var(--clay); }
-
-.filemenu-empty {
-  padding: 6px 14px; color: var(--ink-soft); font-family: var(--font-mono); font-size: 12px;
 }
 
 /* Shared placeholder row — also used by the file list and the search overlay. */

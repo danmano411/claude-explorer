@@ -12,7 +12,7 @@ import { registerSettingsHandlers } from './settings.handlers'
 import { registerIdeHandlers } from './ide.handlers'
 import { registerFileReadHandlers } from './fileread.handlers'
 import { registerGitHandlers } from './git.handlers'
-import { buildMenu } from './menu'
+import { buildMenu, buildMenuThrottled } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
@@ -166,7 +166,15 @@ app.whenReady().then(() => {
   registerGitHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
-  buildMenu()
+  // Async since KAN-55 — File > Open Recent now lists each recent folder's
+  // Claude sessions, and a native menu template is built ahead of the click.
+  // Not awaited: the window must not wait on a session-directory scan, and
+  // Electron shows no menu at all until this resolves (a few ms later).
+  void buildMenu()
+  // Sessions grow while the app runs and nothing tells us; a window taking
+  // focus is the one signal that the user may have been elsewhere. Throttled
+  // inside menu.ts because this fires on every alt-tab.
+  app.on('browser-window-focus', () => buildMenuThrottled())
   // Parsed here, but sweep() above is fire-and-forget (`void sweep().then(...)`)
   // and did-finish-load routinely fires before it settles, so this can in fact
   // land before sweep() finishes. That is harmless: opening a tab pushes

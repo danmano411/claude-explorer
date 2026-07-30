@@ -1,28 +1,39 @@
-// KAN-54: the File menu, and the three-level cascade that replaced the
-// standalone Open Recent button.
+// KAN-55: Open Recent lives in the NATIVE application menu now, not a renderer
+// dropdown.
 //   npm run build && node test/harness/filemenu.mjs
 //
-// There are two load-bearing claims, both about the third level, both proven
-// the same two-sided way: "a terminal tab appeared" is not evidence of either
-// — the first version of test/harness/resume.mjs asserted exactly that and
-// reported PASS while resume was completely broken.
+// Native menu items are not in the DOM, so this drives them from the MAIN
+// process — read the installed template back with electronApp.evaluate, then
+// fire a row by its stable id:
 //
-//   1. clicking a SESSION must RESUME THAT SESSION (section 10):
-//      * every session row in ~/claudetest carries a distinct marker in its
-//        title (each transcript's first user prompt), and each marker string
-//        exists in exactly ONE jsonl on disk — checked, not assumed;
-//      * we click a session that is NOT the newest, and require its marker to
-//        come back on screen while the newest session's marker does not.
-//   2. clicking NEW SESSION (KAN-54 review — dropped, then restored) must
-//      start a FRESH conversation, never resume one (section 11):
-//      * a transcript id appears on disk that was not there before the click;
-//      * the pane never shows any pre-existing session's marker.
+//   Menu.getApplicationMenu().getMenuItemById('recent:0:session:7').click()
 //
-// A fresh session shows no pre-existing marker; resuming the wrong one shows
-// it anyway. Both failure modes are caught in both directions.
+// (getMenuItemById searches nested submenus, so the ids are flat strings even
+// though the tree is three deep.) Everything the click CAUSES is still
+// observable in the DOM, and that is where the load-bearing assertions are.
 //
-// Everything else (the cascade, laziness, the disabled row, the flip, the
-// keyboard chain) is cheap and runs in the same window before the slow parts.
+// Two claims cost a real Claude spawn each, and both are proved two-sided
+// because "a terminal tab appeared" proves neither — the first version of
+// test/harness/resume.mjs asserted exactly that and reported PASS while resume
+// was completely broken:
+//
+//   1. clicking a SESSION row must RESUME THAT SESSION (section 8):
+//      we click a row that is NOT the newest and require its marker to come
+//      back on screen while the newest session's marker does not.
+//   2. clicking + NEW SESSION must start a FRESH conversation (section 9):
+//      a transcript id appears on disk that was not there before the click,
+//      and the pane never shows any pre-existing session's marker.
+//
+// IDENTIFYING A ROW IS THE HARD PART, and it is why this file computes an
+// ordering oracle from disk. The old harness read a marker straight out of the
+// row's text; the native label is ellipsized at 48 chars and every transcript
+// resume.mjs writes begins "Reply with exactly this and nothing else: RESUM…",
+// so the labels are now IDENTICAL and carry no identity at all. What a row
+// still means to a user is its POSITION: "the j-th most recently active session
+// in this folder". That is a property of the transcripts, not of our code, so
+// the oracle below re-derives it from the jsonl timestamps and clicks that
+// rank. If the menu ordered rows any other way, the wrong conversation comes
+// back and section 8 fails.
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -31,15 +42,29 @@ import { launchApp } from './app.mjs';
 const CLAUDE_DIR = path.join(os.homedir(), 'claudetest');
 fs.mkdirSync(CLAUDE_DIR, { recursive: true });
 
-// A folder Claude has never run in, so sessions:list returns [] — the disabled
+// A folder Claude has never run in, so listSessions returns [] — the disabled
 // "No sessions" row is a real state, not a mocked one.
 const EMPTY_DIR = path.join(os.tmpdir(), `ce-filemenu-empty-${process.pid}`);
 fs.rmSync(EMPTY_DIR, { recursive: true, force: true });
 fs.mkdirSync(EMPTY_DIR, { recursive: true });
 
+// An explicit throwaway profile. Recents ARE the Open Recent menu, and they are
+// persisted under userData — starting from the real profile would mean this
+// file asserts on whatever folders the developer happened to open last, and the
+// "no recent folders" empty state (section 2) could never be reached at all.
+// Pid-suffixed because the single-instance lock is keyed on userData: two
+// concurrent runs from two worktrees would otherwise silently forward into each
+// other's window.
+const PROFILE = path.join(os.tmpdir(), `claude-explorer-filemenu-${process.pid}`);
+fs.rmSync(PROFILE, { recursive: true, force: true });
+
+const CAP = 20; // src/main/sessions.ts listSessions' default
+const MARKER_RE = /RESUME-OK-\d{6}|PROBE-OK-\d{6}/;
+
 const slugFor = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
 const projectDir = (p) => path.join(os.homedir(), '.claude', 'projects', slugFor(p));
-const sessionFile = (dir, id) => path.join(projectDir(dir), `${id}.jsonl`);
+/** Windows menu labels double a literal `&`; main/menu.ts's amp() does this. */
+const amp = (s) => s.replace(/&/g, '&&');
 
 const results = [];
 const check = (name, pass, detail = '') => {
@@ -48,268 +73,279 @@ const check = (name, pass, detail = '') => {
 };
 
 const VIS = '.pane:not([hidden]) ';
-/** Windows paths are full of backslashes; JSON.stringify produces exactly the
- *  double-quoted, backslash-escaped form a CSS attribute selector wants. */
-const byPath = (p) => `[data-path=${JSON.stringify(p)}]`;
-const rectOf = (win, sel) =>
-  win.locator(sel).first().evaluate((el) => {
-    const r = el.getBoundingClientRect();
-    return { left: r.left, right: r.right, width: r.width, innerWidth: window.innerWidth };
-  });
-const focused = (win) =>
-  win.evaluate(() => {
-    const el = document.activeElement;
-    return { lvl: el?.dataset?.lvl ?? '0', text: (el?.textContent ?? '').trim(), cls: el?.className ?? '' };
-  });
+const tabCount = (win) => win.locator('.tab:not(.add)').count();
+/** Visible terminal text, '' when the visible pane is not a terminal at all — so
+ *  a spawn that never happened reports the FAILs below instead of throwing out
+ *  of the run and swallowing every assertion after it. */
+const paneText = (win) => win.$eval(VIS + '.xterm-rows', (el) => el.textContent).catch(() => '');
 
-// --- pre-flight: this needs real transcripts to resume ---------------------
+// --- the ordering oracle ---------------------------------------------------
+// Independent of src/main/sessions.ts: "when was this conversation last active"
+// is the newest timestamp in its transcript, and "which twenty" is the newest
+// twenty. Deriving it here rather than asking the app is the whole point — an
+// oracle that called listSessions() would agree with any ordering bug.
 const dir = projectDir(CLAUDE_DIR);
-const onDisk = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')) : [];
-if (onDisk.length < 2) {
+const jsonls = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')) : [];
+if (jsonls.length < 2) {
   console.log(`  SKIP  need ≥2 Claude transcripts in ${dir} (run test/harness/resume.mjs first)`);
   process.exit(0);
 }
 
-const openMenu = async (win) => {
-  await win.click('.filemenu-btn');
-  await win.waitForSelector('.filemenu-dropdown');
-  await win.waitForTimeout(150);
-};
-const hoverRecent = async (win) => {
-  await win.locator('[data-sub="recent"]').hover();
-  await win.waitForSelector('.filemenu-project');
-  await win.waitForTimeout(150);
+const meta = jsonls.map((f) => {
+  const full = path.join(dir, f);
+  const text = fs.readFileSync(full, 'utf8');
+  let updated = 0;
+  let title = '';
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const ts = o.timestamp ? Date.parse(o.timestamp) : NaN;
+    if (!Number.isNaN(ts)) updated = Math.max(updated, ts);
+    if (!title && o.type === 'user' && o.message?.role === 'user') {
+      const c = o.message?.content;
+      const t = (typeof c === 'string' ? c
+        : Array.isArray(c) ? (c.find((b) => b?.type === 'text')?.text ?? '') : '').trim();
+      if (t && !t.startsWith('<')) title = t.slice(0, 80);
+    }
+  }
+  const mtimeMs = fs.statSync(full).mtimeMs;
+  return { id: f.replace(/\.jsonl$/, ''), file: f, text, mtimeMs, updated: updated || mtimeMs,
+    marker: (title.match(MARKER_RE) ?? [])[0] ?? null };
+});
+
+const ranked = meta
+  .slice().sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, CAP)   // which twenty
+  .sort((a, b) => b.updated - a.updated)                          // in what order
+  .map((m, rank) => ({ ...m, rank }));
+
+const marked = ranked.filter((m) => m.marker);
+const decoy = marked[0];
+// Never the newest row, and never near the cap boundary either: mtime and the
+// in-file timestamp agree except when something touches a jsonl without
+// appending, and a target at rank 15+ could sit either side of the twenty-row
+// slice for that reason. Deep enough to disprove "it just resumes the newest",
+// shallow enough that neither ordering is in question.
+const target = !decoy ? undefined
+  : [...marked].reverse().find((m) => m.rank <= 14 && m.rank > decoy.rank && m.marker !== decoy.marker);
+if (!decoy || !target) {
+  console.log(`  SKIP  need ≥2 distinctly-marked transcripts inside the top ${CAP} of ${dir}`);
+  process.exit(0);
+}
+
+console.log('\nFile ▸ Open Recent — the NATIVE application menu (KAN-55)');
+const { app, win, close } = await launchApp({ userDataDir: PROFILE });
+
+/** The whole installed application menu, as plain data. */
+const menuTree = () => app.evaluate(({ Menu }) => {
+  const walk = (items) => items.map((it) => ({
+    id: it.id || null,
+    label: it.label,
+    type: it.type,
+    role: it.role ?? null,
+    enabled: it.enabled,
+    accelerator: it.accelerator ?? null,
+    submenu: it.submenu ? walk(it.submenu.items) : null,
+  }));
+  const m = Menu.getApplicationMenu();
+  return m ? walk(m.items) : null;
+});
+
+/** Fire a menu row by id. Returns false if no such row is installed. */
+const clickItem = (id) => app.evaluate(({ Menu }, wanted) => {
+  const item = Menu.getApplicationMenu()?.getMenuItemById(wanted);
+  if (!item) return false;
+  item.click();
+  return true;
+}, id);
+
+/** buildMenu() is async and fire-and-forget from its triggers; poll for it. */
+const menuWhere = async (pred, ms = 10_000) => {
+  let tree = null;
+  for (let i = 0; i * 250 < ms; i++) {
+    tree = await menuTree();
+    if (tree && pred(tree)) return tree;
+    await win.waitForTimeout(250);
+  }
+  return tree;
 };
 
-console.log('\nFile menu — structure, laziness, and the three-level cascade');
-const { app, win, close } = await launchApp();
+const fileSub = (tree) => tree?.find((i) => i.label === 'File')?.submenu ?? [];
+const recentSub = (tree) => fileSub(tree).find((i) => i.label === 'Open Recent')?.submenu ?? [];
+const folderIndex = (tree, p) => recentSub(tree).findIndex((i) => i.label === amp(p));
+const sessionRows = (tree, i) =>
+  (recentSub(tree)[i]?.submenu ?? []).filter((r) => /^recent:\d+:session:\d+$/.test(r.id ?? ''));
 
-// Seed the recent list through the same IPC the app writes it with. This is
-// setup, not the thing under test — the menu still has to READ it.
+// --- 1. the tab-strip button is gone --------------------------------------
+{
+  const strip = await win.evaluate(() =>
+    Array.from(document.querySelectorAll('.tabbar > *'))
+      .filter((el) => el.className.includes('menu'))
+      .map((el) => el.className));
+  // The Space menu is the control: if the selector strategy stopped matching
+  // anything at all, this check would be the one that notices.
+  check('the Space menu is the only dropdown left at the strip’s left edge',
+    strip.length === 1 && strip[0] === 'spacemenu', strip.join(' | ') || '(nothing matched)');
+  const dead = await win.evaluate(() =>
+    ['.filemenu', '.filemenu-btn', '.filemenu-dropdown', '.recentmenu']
+      .map((s) => `${s}:${document.querySelectorAll(s).length}`)
+      .filter((s) => !s.endsWith(':0')));
+  check('no renderer File button, dropdown or flyout is mounted', dead.length === 0, dead.join(' '));
+}
+
+// --- 2. the native File menu, on a profile with no recents ----------------
+{
+  const tree = await menuWhere((t) => t.some((i) => i.label === 'File'));
+  check('an application menu is installed', Array.isArray(tree) && tree.length > 0,
+    (tree ?? []).map((i) => i.label).join(' | ') || 'Menu.getApplicationMenu() is null');
+
+  const rows = fileSub(tree).map((r) =>
+    r.type === 'separator' ? '---' : r.role ? `role:${r.role}` : r.label);
+  check('File is New Tab, Close Tab, Open Recent, Quit — Open Recent beside the tab commands',
+    rows.join(' / ') === 'New Tab / Close Tab / --- / Open Recent / --- / role:quit',
+    rows.join(' / '));
+
+  const byId = Object.fromEntries(fileSub(tree).filter((r) => r.id).map((r) => [r.id, r]));
+  check('the tab commands carry stable ids and their accelerators',
+    /(CmdOrCtrl|Ctrl|Control)\+T$/i.test(byId['file:new-tab']?.accelerator ?? '')
+    && /(CmdOrCtrl|Ctrl|Control)\+W$/i.test(byId['file:close-tab']?.accelerator ?? ''),
+    `new-tab ${byId['file:new-tab']?.accelerator} / close-tab ${byId['file:close-tab']?.accelerator}`);
+
+  // Reachable only from a fresh profile, which is why this file insists on one.
+  const empty = recentSub(tree);
+  check('with no recents, Open Recent holds one DISABLED placeholder and no folder rows',
+    empty.length === 1 && empty[0].label === 'No recent folders' && empty[0].enabled === false
+    && !empty.some((r) => (r.id ?? '').startsWith('recent:')),
+    empty.map((r) => `${r.label}${r.enabled ? '' : ' (disabled)'}`).join(' | '));
+}
+
+// --- 3. the rebuild trigger: a folder opened THIS RUN ---------------------
+// recents:add is the same IPC the app writes a recent with, and its handler is
+// what asks for a rebuild. Nothing here reloads or reopens the menu — if the
+// rebuild did not fire, the rows below never appear.
 await win.evaluate(
   async (ps) => { for (const p of ps) await window.api.recentsAdd(p); },
   [EMPTY_DIR, CLAUDE_DIR],
 );
-await win.waitForTimeout(200);
-
-// --- 1. the strip's left edge ---------------------------------------------
+let tree = await menuWhere((t) => folderIndex(t, CLAUDE_DIR) >= 0 && folderIndex(t, EMPTY_DIR) >= 0);
+let ci = folderIndex(tree, CLAUDE_DIR);
+let ei = folderIndex(tree, EMPTY_DIR);
 {
-  const gone = await win.locator('.recentmenu').count();
-  check('the standalone Open Recent button is gone', gone === 0, gone ? `${gone} left` : '');
-  const edge = await win.evaluate(() =>
-    Array.from(document.querySelectorAll('.tabbar > *'))
-      .filter((el) => el.className.includes('menu'))
-      .map((el) => el.className));
-  check('spaces + File are the only dropdowns at the left edge',
-    edge.length === 2 && edge[0] === 'spacemenu' && edge[1] === 'filemenu', edge.join(' | '));
-  check('the File button is there', await win.locator('.filemenu-btn').count() === 1);
+  check('opening folders rebuilds the native menu and lists them under Open Recent',
+    ci >= 0 && ei >= 0, recentSub(tree).map((r) => r.label).join(' | '));
+  check('folder rows are most-recent-first and labelled with the absolute path',
+    ci === 0 && ei === 1 && recentSub(tree)[0].label === amp(CLAUDE_DIR)
+    && recentSub(tree)[0].id === 'recent:0',
+    `${CLAUDE_DIR} at ${ci}, ${EMPTY_DIR} at ${ei}`);
 }
 
-// --- 2. level 1, and nothing loaded yet -----------------------------------
-await openMenu(win);
+// --- 4. inside a folder row ----------------------------------------------
 {
-  const items = (await win.locator('.filemenu-dropdown [data-lvl="1"]').allTextContents())
-    .map((t) => t.replace(/[▸\s]+/g, ' ').trim());
-  check('File holds exactly New Tab and Open Recent',
-    items.length === 2 && items[0] === 'New Tab' && items[1] === 'Open Recent', items.join(' | '));
-  const projects = await win.locator('.filemenu-project').count();
-  check('no recents flyout until Open Recent is entered', projects === 0, `${projects} rows`);
+  const kids = recentSub(tree)[ci]?.submenu ?? [];
+  check('+ New session leads the folder’s submenu, then a separator, then sessions',
+    kids[0]?.label === '+ New session' && kids[0]?.id === `recent:${ci}:new`
+    && kids[1]?.type === 'separator',
+    kids.slice(0, 3).map((k) => k.label || k.type).join(' | '));
+
+  const rows = sessionRows(tree, ci);
+  check('the folder lists its sessions, ids contiguous from 0',
+    rows.length > 0 && rows.every((r, j) => r.id === `recent:${ci}:session:${j}`),
+    `${rows.length} rows`);
+  // `rows.length > 0 &&` is load-bearing: [].every() is true, so without it this
+  // reports PASS for a menu with no session rows at all.
+  check('every session row is a title plus a relative time',
+    rows.length > 0 && rows.every((r) => /\S/.test(r.label.split('   ')[0] ?? '')
+      && /(ago|just now|yesterday|\d)/.test(r.label.split('   ').pop() ?? '')),
+    rows[0]?.label ?? '(no rows)');
+  // The cap has to BITE for this to mean anything: say so in the detail.
+  check(`the list is capped at ${CAP}`,
+    rows.length === Math.min(CAP, jsonls.length) && rows.length === ranked.length,
+    `${rows.length} rows from ${jsonls.length} transcripts on disk`);
+
+  const empties = recentSub(tree)[ei]?.submenu ?? [];
+  check('a folder with no sessions gets a DISABLED "No sessions" row, not an empty submenu',
+    empties.filter((r) => r.id).length === 1
+    && empties.some((r) => r.label === 'No sessions' && r.enabled === false),
+    empties.map((r) => r.label || r.type).join(' | '));
+  check('…and it still leads with + New session — "no sessions" is about the list, not the action',
+    empties[0]?.label === '+ New session' && empties[0]?.id === `recent:${ei}:new`,
+    empties[0]?.label ?? '(none)');
 }
 
-// --- 3. level 2, and the lazy-load claim ----------------------------------
-await hoverRecent(win);
+// --- 5. clicking a folder row opens a files tab --------------------------
 {
-  const paths = await win.locator('.filemenu-project').evaluateAll((els) =>
-    els.map((e) => e.dataset.path));
-  check('Open Recent lists the recent projects',
-    paths.includes(CLAUDE_DIR) && paths.includes(EMPTY_DIR), paths.join(' | '));
-  // THE laziness assertion: the project list is up, so if sessions were fetched
-  // on menu-open the rows would exist by now. They must not.
-  const sessions = await win.locator('.filemenu-session').count();
-  check('sessions are NOT fetched for every project when the menu opens',
-    sessions === 0, `${sessions} session rows already rendered`);
+  const before = await tabCount(win);
+  const fired = await clickItem(`recent:${ei}`);
+  await win.waitForTimeout(1200);
+  const after = await tabCount(win);
+  const crumbs = (await win.locator(VIS + '.breadcrumb').first().textContent().catch(() => '')) ?? '';
+  check('clicking a folder row opens a FILE tab on that folder', fired && after === before + 1
+    && crumbs.includes(path.basename(EMPTY_DIR)),
+    `${before}→${after} tabs, crumbs "${crumbs.trim()}"`);
 }
 
-// --- 4. the flip, before anything slow ------------------------------------
+// --- 6. New Tab / Close Tab still work from the native menu --------------
 {
-  const wide = await rectOf(win, '.filemenu-flyout');
-  const row = await rectOf(win, '[data-sub="recent"]');
-  check('a flyout with room opens rightward and stays on screen',
-    wide.left >= row.right - 2 && wide.right <= wide.innerWidth,
-    `flyout ${Math.round(wide.left)}..${Math.round(wide.right)} of ${wide.innerWidth}`);
-
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(520, 760));
-  await win.waitForTimeout(400);
-  const narrow = await rectOf(win, '.filemenu-flyout');
-  const narrowRow = await rectOf(win, '[data-sub="recent"]');
-  check('near the right edge it flips leftward instead of clipping',
-    narrow.right <= narrow.innerWidth && narrow.left >= 0 && narrow.left < narrowRow.right - 2,
-    `flyout ${Math.round(narrow.left)}..${Math.round(narrow.right)} of ${narrow.innerWidth}`);
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1280, 820));
-  await win.waitForTimeout(400);
+  const before = await tabCount(win);
+  await clickItem('file:new-tab');
+  await win.waitForTimeout(800);
+  const opened = await tabCount(win);
+  check('File ▸ New Tab opens a tab', opened === before + 1, `${before}→${opened}`);
+  await clickItem('file:close-tab');
+  await win.waitForTimeout(800);
+  const closed = await tabCount(win);
+  // NOT `closed === before` alone: if New Tab is broken, `before` and `opened`
+  // are the same number and a Close Tab that does nothing satisfies it too.
+  // The claim is a DROP from whatever New Tab actually produced.
+  check('File ▸ Close Tab closes the active one',
+    opened === before + 1 && closed === opened - 1, `${opened}→${closed}`);
 }
 
-// --- 5. level 3 -----------------------------------------------------------
-let markers = [];           // [{ id, marker }] newest-first, as the menu lists them
-await hoverRecent(win);
-await win.locator(byPath(CLAUDE_DIR)).hover();
-await win.waitForSelector('.filemenu-session');
-await win.waitForTimeout(400);
+// --- 7. the other rebuild trigger: recents:remove ------------------------
 {
-  const rows = await win.locator('.filemenu-session').evaluateAll((els) =>
-    els.map((e) => ({
-      id: e.dataset.session,
-      title: e.querySelector('.filemenu-label')?.textContent ?? '',
-      time: e.querySelector('.filemenu-time')?.textContent ?? '',
-    })));
-  check('hovering a project lists its sessions', rows.length > 0, `${rows.length} sessions`);
-  check('every session row carries a title and a relative time',
-    rows.every((r) => r.title.length > 0 && /ago|just now|yesterday|\d/.test(r.time)),
-    rows[0] ? `${rows[0].title} — ${rows[0].time}` : '');
-  check('the list is capped at 20', rows.length <= 20, `${rows.length}`);
-
-  markers = rows
-    .map((r) => ({ id: r.id, marker: (r.title.match(/RESUME-OK-\d{6}|PROBE-OK-\d{6}/) ?? [])[0] }))
-    .filter((m) => m.marker);
-  check('the session titles carry distinguishable markers', markers.length >= 2,
-    markers.map((m) => m.marker).join(', '));
-
-  // KAN-54 review: New session leads every project's flyout, ahead of a
-  // separator, regardless of what's below it.
-  const kids = await win.locator('.filemenu-sessions').first()
-    .evaluate((ul) => Array.from(ul.children).slice(0, 2).map((li) => li.className));
-  check('New session leads the flyout, then a separator, then the sessions',
-    kids[0] === 'filemenu-row' && kids[1] === 'filemenu-sep', kids.join(' | '));
-  const newRow = await win.locator('.filemenu-newsession').first().textContent().catch(() => null);
-  check('the New session row is labeled', /new session/i.test(newRow ?? ''), newRow ?? '(row not found)');
+  await win.evaluate((p) => window.api.recentsRemove(p), EMPTY_DIR);
+  tree = await menuWhere((t) => folderIndex(t, EMPTY_DIR) === -1);
+  ci = folderIndex(tree, CLAUDE_DIR);
+  check('forgetting a recent rebuilds the menu without it',
+    folderIndex(tree, EMPTY_DIR) === -1 && ci >= 0,
+    recentSub(tree).map((r) => r.label).join(' | '));
 }
 
-// --- 6. the empty project -------------------------------------------------
-await win.locator(byPath(EMPTY_DIR)).hover();
-await win.waitForTimeout(600);
+// --- 8. THE ONE THAT MATTERS: a session row resumes THAT session ---------
 {
-  const empty = await win.locator('.filemenu-sessions .filemenu-empty').allTextContents();
-  const rows = await win.locator('.filemenu-session').count();
-  check('a project with no sessions shows a disabled row, not an empty flyout',
-    empty.some((t) => /no sessions/i.test(t)) && rows === 0, `${empty.join('|')} / ${rows} rows`);
-  // KAN-54 review: "no sessions" describes the EXISTING-session list, not
-  // whether you can start one — New session must still lead the flyout here.
-  const newRowOnEmpty = await win.locator('.filemenu-newsession').count();
-  check('New session, separator, disabled row — even with zero sessions',
-    newRowOnEmpty === 1, `${newRowOnEmpty} New session rows`);
-}
-
-// --- 7. clicking the project row itself -----------------------------------
-{
-  const before = await win.locator('.tab:not(.add)').count();
-  await win.locator(byPath(EMPTY_DIR)).click();
-  await win.waitForTimeout(900);
-  const after = await win.locator('.tab:not(.add)').count();
-  const crumbs = await win.locator(VIS + '.breadcrumb').first().textContent().catch(() => '');
-  check('clicking a project row opens a FILE tab on that folder',
-    after === before + 1 && (crumbs ?? '').includes(path.basename(EMPTY_DIR)),
-    `${before}→${after} tabs, crumbs "${(crumbs ?? '').trim()}"`);
-  check('the menu closed behind it', await win.locator('.filemenu-dropdown').count() === 0);
-}
-
-// --- 8. dismissal ---------------------------------------------------------
-{
-  await openMenu(win);
-  await hoverRecent(win);
-  await win.mouse.click(900, 20); // empty tab-strip, outside the whole chain
-  await win.waitForTimeout(250);
-  const chrome = await win.locator('.filemenu-dropdown').count()
-    + await win.locator('.filemenu-flyout').count();
-  check('an outside click closes the whole chain, flyouts included', chrome === 0, `${chrome} left open`);
-}
-
-// --- 9. the keyboard chain ------------------------------------------------
-{
-  await openMenu(win);
-  await win.keyboard.press('ArrowDown');
-  const a = await focused(win);
-  await win.keyboard.press('ArrowDown');
-  const b = await focused(win);
-  await win.waitForSelector('.filemenu-project');
-  check('ArrowDown walks level 1 and focus alone opens Open Recent',
-    a.text === 'New Tab' && a.lvl === '1' && b.text.startsWith('Open Recent') && b.lvl === '1',
-    `${a.text} → ${b.text}`);
-
-  await win.keyboard.press('ArrowRight');
-  const c = await focused(win);
-  await win.waitForSelector('.filemenu-session');
-  await win.waitForTimeout(400);
-  check('ArrowRight steps into the project list', c.lvl === '2', `lvl ${c.lvl}: ${c.text}`);
-
-  await win.keyboard.press('ArrowRight');
-  const d = await focused(win);
-  check('ArrowRight again steps into that project’s sessions, landing on New session first',
-    d.lvl === '3' && /new session/i.test(d.text), `lvl ${d.lvl}: ${d.text}`);
-
-  await win.keyboard.press('ArrowDown');
-  const e = await focused(win);
-  check('ArrowDown moves within the session list, off New session and onto a real one',
-    e.lvl === '3' && e.text !== d.text && !/new session/i.test(e.text), e.text);
-
-  await win.keyboard.press('ArrowLeft');
-  const f = await focused(win);
-  check('ArrowLeft goes back to the project row and closes its flyout',
-    f.lvl === '2' && await win.locator('.filemenu-session').count() === 0, `lvl ${f.lvl}`);
-
-  await win.keyboard.press('Escape');
-  const g = await focused(win);
-  check('Escape goes back to level 1', g.lvl === '1' && await win.locator('.filemenu-project').count() === 0,
-    `lvl ${g.lvl}: ${g.text}`);
-
-  await win.keyboard.press('Escape');
-  await win.waitForTimeout(150);
-  const h = await focused(win);
-  check('Escape again closes the menu and returns focus to the File button',
-    await win.locator('.filemenu-dropdown').count() === 0 && h.cls.includes('filemenu-btn'),
-    h.cls);
-}
-
-// --- 10. THE ONE THAT MATTERS: clicking a session resumes THAT session -----
-//
-// Pick the OLDEST marked session, never the newest: a resume that quietly falls
-// back to "the most recent conversation in this folder" would still look right
-// if we always clicked row 1.
-const target = markers[markers.length - 1];
-const decoy = markers[0];
-{
-  const targetFile = sessionFile(CLAUDE_DIR, target.id);
-  const has = (f, m) => fs.readFileSync(f, 'utf8').includes(m);
-  check('the chosen session’s transcript is on disk under its id', fs.existsSync(targetFile),
-    path.basename(targetFile));
+  check('the target row’s transcript is on disk under its id',
+    fs.existsSync(path.join(dir, target.file)), target.file);
   // The marker is only evidence if it identifies ONE transcript. Verified, not
   // assumed — two runs of resume.mjs in the same second could collide.
-  const owners = onDisk.filter((f) => has(path.join(dir, f), target.marker));
+  const owners = meta.filter((m) => m.text.includes(target.marker)).map((m) => m.file);
   check('its marker appears in exactly one transcript on disk',
-    owners.length === 1 && owners[0] === `${target.id}.jsonl`, owners.join(', '));
-  check('the decoy (newest) session is a different conversation',
-    decoy.id !== target.id && decoy.marker !== target.marker,
-    `newest ${decoy.marker} vs clicked ${target.marker}`);
+    owners.length === 1 && owners[0] === target.file, owners.join(', '));
+  check('the decoy is a strictly newer, different conversation',
+    decoy.rank < target.rank && decoy.marker !== target.marker,
+    `rank ${decoy.rank} ${decoy.marker} vs clicked rank ${target.rank} ${target.marker}`);
+
+  const rows = sessionRows(tree, ci);
+  check('the menu still offers that rank as a clickable row',
+    rows[target.rank]?.id === `recent:${ci}:session:${target.rank}`,
+    `${rows.length} rows, want rank ${target.rank}`);
 }
 
-console.log(`\nresuming ${target.marker} (${target.id}) — the OLDEST session, not the newest`);
+console.log(`\nresuming rank ${target.rank} — ${target.marker} (${target.id}), NOT the newest`);
 {
-  const before = await win.locator('.tab:not(.add)').count();
-  await openMenu(win);
-  await hoverRecent(win);
-  await win.locator(byPath(CLAUDE_DIR)).hover();
-  await win.waitForSelector('.filemenu-session');
-  await win.waitForTimeout(400);
-  await win.locator(`[data-session="${target.id}"]`).click();
+  const before = await tabCount(win);
+  const fired = await clickItem(`recent:${ci}:session:${target.rank}`);
+  // Caught, not awaited bare: if the row is missing or the click spawned
+  // nothing, this file must report a FAIL for it and keep going, not die with a
+  // Playwright timeout and swallow every assertion below.
+  await win.waitForSelector(VIS + '.xterm', { timeout: 30_000 }).catch(() => {});
+  check('a terminal tab opened', fired && (await tabCount(win)) === before + 1);
 
-  await win.waitForSelector(VIS + '.xterm', { timeout: 30_000 });
-  check('a terminal tab opened', await win.locator('.tab:not(.add)').count() === before + 1);
-
-  // Poll rather than sleep a flat 25s: claude prints the replayed conversation
+  // Poll rather than sleep a flat 40s: claude prints the replayed conversation
   // as soon as it has read the transcript.
   let rows = '';
   for (let i = 0; i < 40; i++) {
     await win.waitForTimeout(1000);
-    rows = await win.$eval(VIS + '.xterm-rows', (el) => el.textContent);
+    rows = await paneText(win);
     if (rows.includes(target.marker)) break;
     if (/trust/i.test(rows) && i === 8) {
       await win.locator(VIS + '.xterm-screen').click();
@@ -318,10 +354,14 @@ console.log(`\nresuming ${target.marker} (${target.id}) — the OLDEST session, 
   }
 
   const resumed = rows.includes(target.marker);
-  check('the CLICKED session’s conversation came back on screen', resumed,
+  check('the CLICKED row’s conversation came back on screen', resumed,
     resumed ? target.marker : 'its history never appeared — fresh session, or the wrong one');
-  check('and it is not some other session’s history', !rows.includes(decoy.marker),
-    rows.includes(decoy.marker) ? `${decoy.marker} is on screen — resumed the newest, not the clicked one` : '');
+  // Guarded on a non-empty pane: "the decoy's marker is absent" is trivially
+  // true of a terminal that never opened.
+  check('and it is not the newest session’s history',
+    rows.length > 0 && !rows.includes(decoy.marker),
+    rows.length === 0 ? 'nothing on screen to judge'
+      : rows.includes(decoy.marker) ? `${decoy.marker} is on screen — resumed the newest, not the clicked row` : '');
 
   if (!resumed) {
     const dump = path.join(os.tmpdir(), 'filemenu-resume.txt');
@@ -330,67 +370,47 @@ console.log(`\nresuming ${target.marker} (${target.id}) — the OLDEST session, 
   }
 }
 
-// --- 11. New session (KAN-54 review): a FRESH session, not a resume --------
+// --- 9. + New session: a FRESH session, never a resume -------------------
 //
-// The action this file exists to guard: New session was dropped from the old
-// three-action RecentMenu when it became this two-action File menu, and "a
-// terminal tab appeared" is exactly the false-positive this file's own header
-// comment warns about — it would pass whether New session spawned a fresh
+// "A terminal tab appeared" would pass whether this spawned a fresh
 // conversation, silently resumed the newest one, or resumed nothing at all.
-// Two-sided proof, same shape as section 10:
+// Two-sided, same shape as section 8:
 //   * a NEW transcript id appears on disk that was NOT there before the click
 //   * the pane shows NONE of the pre-existing sessions' markers
-//
-// Reached and activated by keyboard alone (ArrowRight, Enter) off a mouse
-// hover on the project row — proving "reachable by arrows, activated by
-// Enter" IS the click that produces the evidence below, rather than a second,
-// separate spawn just to check the keyboard path.
-console.log('\nNew session — must be a fresh conversation, never a resume');
+console.log('\n+ New session — must be a fresh conversation, never a resume');
 const beforeFiles = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')));
-const knownMarkers = markers.map((m) => m.marker);
+const knownMarkers = [...new Set(meta.map((m) => m.marker).filter(Boolean))];
 {
-  const beforeTabs = await win.locator('.tab:not(.add)').count();
-  await openMenu(win);
-  await hoverRecent(win);
-  await win.locator(byPath(CLAUDE_DIR)).hover();
-  await win.waitForSelector('.filemenu-session');
-  await win.waitForTimeout(400);
+  const beforeTabs = await tabCount(win);
+  const fired = await clickItem(`recent:${ci}:new`);
 
-  await win.keyboard.press('ArrowRight'); // project row (focused by hover) -> its sessions
-  const landed = await focused(win);
-  check('ArrowRight from the project row lands on New session',
-    landed.lvl === '3' && /new session/i.test(landed.text), `lvl ${landed.lvl}: ${landed.text}`);
-
-  await win.keyboard.press('Enter'); // native button activation — no special-case code
-
-  // Poll the tab COUNT rather than wait for '.xterm': unlike section 10, the
-  // ACTIVE tab here is already a terminal (last section's resumed session), so
-  // waiting for '.xterm' to merely exist resolves instantly on that stale pane
-  // instead of the new one — and openClaudeNewTab is async (two IPC round
-  // trips, recentsAdd then ptySpawn, before setTabs fires), so the count check
-  // has to survive that gap rather than race it.
+  // Poll the tab COUNT rather than wait for '.xterm': the ACTIVE tab here is
+  // already a terminal (section 8's resumed session), so waiting for '.xterm'
+  // to merely exist resolves instantly on that stale pane instead of the new
+  // one — and openClaudeNewTab is async (two IPC round trips, recentsAdd then
+  // ptySpawn, before setTabs fires), so the count check has to survive that gap
+  // rather than race it.
   let afterTabs = beforeTabs;
   for (let i = 0; i < 30 && afterTabs !== beforeTabs + 1; i++) {
     await win.waitForTimeout(300);
-    afterTabs = await win.locator('.tab:not(.add)').count();
+    afterTabs = await tabCount(win);
   }
-  check('Enter on New session opened a terminal tab', afterTabs === beforeTabs + 1,
+  check('+ New session opened a terminal tab', fired && afterTabs === beforeTabs + 1,
     `${beforeTabs} → ${afterTabs}`);
-  await win.waitForSelector(VIS + '.xterm', { timeout: 30_000 });
-  check('the menu closed behind it', await win.locator('.filemenu-dropdown').count() === 0);
+  await win.waitForSelector(VIS + '.xterm', { timeout: 30_000 }).catch(() => {});
 
   // Evidence #1: before typing anything, the pane must not be replaying ANY
   // pre-existing conversation. A resume prints history within a second or two
-  // of the transcript loading (section 10 above), so this window is enough to
+  // of the transcript loading (section 8 above), so this window is enough to
   // catch a silent fallback to "resume the newest" without waiting a full turn.
   await win.waitForTimeout(5000);
-  let rows = await win.$eval(VIS + '.xterm-rows', (el) => el.textContent);
+  let rows = await paneText(win);
   const leaked = knownMarkers.filter((m) => rows.includes(m));
   check('the new pane shows none of the pre-existing sessions’ markers',
-    leaked.length === 0, leaked.length ? `leaked: ${leaked.join(', ')}` : '');
+    rows.length > 0 && leaked.length === 0,
+    rows.length === 0 ? 'nothing on screen to judge' : leaked.length ? `leaked: ${leaked.join(', ')}` : '');
 
-  // Defensive, same as resume.mjs: first run in a folder can ask to trust it.
-  // Unlikely here (CLAUDE_DIR already has a dozen sessions), but cheap to guard.
+  // Defensive, same as resume.mjs: a first run in a folder can ask to trust it.
   if (/trust/i.test(rows)) {
     await win.locator(VIS + '.xterm-screen').click();
     await win.keyboard.press('Enter');
@@ -409,16 +429,14 @@ const knownMarkers = markers.map((m) => m.marker);
   let newFile = null;
   for (let i = 0; i < 30 && !newFile; i++) {
     await win.waitForTimeout(1000);
-    const now = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-    newFile = now.find((f) => !beforeFiles.has(f));
+    newFile = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).find((f) => !beforeFiles.has(f));
   }
   check('a NEW transcript id appeared on disk that was not there before the click',
     !!newFile, newFile ?? `no new file among ${fs.readdirSync(dir).length} on disk`);
-  check('the new transcript is neither of the two sessions clicked earlier in this run',
-    !newFile || (newFile !== `${target.id}.jsonl` && newFile !== `${decoy.id}.jsonl`),
-    newFile ?? '');
+  check('the new transcript is not the session resumed a moment ago',
+    !!newFile && newFile !== target.file, newFile ?? '');
 
-  rows = await win.$eval(VIS + '.xterm-rows', (el) => el.textContent);
+  rows = await paneText(win);
   const stillClean = knownMarkers.every((m) => !rows.includes(m));
   check('and still no pre-existing marker leaked in after the reply', stillClean,
     stillClean ? '' : knownMarkers.filter((m) => rows.includes(m)).join(', '));
