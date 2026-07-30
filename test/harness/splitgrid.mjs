@@ -1,14 +1,17 @@
-// KAN-46: SplitGrid real-geometry harness.
+// KAN-46: split-view real-geometry harness.
 //   node test/harness/splitgrid.mjs            (no npm run build needed)
 //   node test/harness/splitgrid.mjs --show     leave the window open to look at it
 //
-// SplitGrid is deliberately NOT wired into App.tsx yet (three other M5 tickets
+// Split view is deliberately NOT wired into App.tsx yet (three other M5 tickets
 // own App.tsx/index.css this milestone), so this cannot drive the real app the
 // way test/harness/tabvisuals.mjs does. Instead it bundles the component with
-// esbuild (already a vite dependency — no new devDependency, no React test
-// runner) and renders it in a bare Electron BrowserWindow: the same Chromium
+// esbuild and renders it in a bare Electron BrowserWindow: the same Chromium
 // that ships the app, so CSS Grid, ResizeObserver and pointer capture all
 // behave exactly as they will in production.
+//
+// splitgrid.entry.tsx reproduces App.tsx's real DOM shape — one flat container,
+// every tab mounted once forever as an absolutely positioned `.pane` sibling —
+// so what is measured here is the production structure, not a friendlier one.
 //
 // Everything asserted here is measured with getBoundingClientRect() against a
 // fixed 800x600 stage. No assertion inspects React internals.
@@ -33,7 +36,8 @@ fs.mkdirSync(PROFILE, { recursive: true });
 
 const STAGE_W = 800;
 const STAGE_H = 600;
-const EPS = 0.6; // sub-pixel: Chromium rounds fr tracks to device pixels
+const EPS = 0.6;  // sub-pixel: Chromium rounds fr tracks to device pixels
+const SEAM = 1;   // splitgrid.ts SEAM_PX — the grid gap that paints the seam
 
 const results = [];
 const check = (name, pass, detail = '') => {
@@ -54,7 +58,7 @@ await build({
 });
 
 fs.writeFileSync(path.join(TMP, 'index.html'), `<!doctype html>
-<meta charset="utf-8"><title>SplitGrid harness</title>
+<meta charset="utf-8"><title>split view harness</title>
 <link rel="stylesheet" href="./bundle.css">
 <div id="root"></div>
 <script src="./bundle.js"></script>
@@ -78,7 +82,7 @@ const app = await pw._electron.launch({
   timeout: 30_000,
 });
 const win = await app.firstWindow({ timeout: 30_000 });
-await win.waitForSelector('.split-pane', { timeout: 15_000 });
+await win.waitForSelector('.pane:not([hidden])', { timeout: 15_000 });
 
 const setLayout = async (name) => {
   await win.evaluate((n) => window.__setLayout(n), name);
@@ -87,7 +91,10 @@ const setLayout = async (name) => {
 
 /** Pane + stand-in geometry, relative to the stage's own top-left. */
 const geometry = () => win.evaluate(() => {
-  const stage = document.getElementById('stage').getBoundingClientRect();
+  const el = document.getElementById('stage');
+  const stage = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  const tracks = (v) => (!v || v === 'none' ? 1 : v.trim().split(/\s+/).length);
   const rel = (r) => ({
     left: r.left - stage.left, top: r.top - stage.top,
     right: r.right - stage.left, bottom: r.bottom - stage.top,
@@ -95,9 +102,11 @@ const geometry = () => win.evaluate(() => {
   });
   return {
     stage: { width: stage.width, height: stage.height },
-    panes: [...document.querySelectorAll('.split-pane')].map((p) => ({
+    cols: tracks(cs.gridTemplateColumns), rows: tracks(cs.gridTemplateRows),
+    display: cs.display,
+    panes: [...document.querySelectorAll('.pane:not([hidden])')].map((p) => ({
       id: p.dataset.pane,
-      focused: p.classList.contains('focused'),
+      focused: p.classList.contains('pane-focused'),
       ...rel(p.getBoundingClientRect()),
       // The stand-in is height:100% of the pane — a percentage that only
       // resolves if the pane got a DEFINITE box from the grid. This is exactly
@@ -110,9 +119,16 @@ const geometry = () => win.evaluate(() => {
   };
 });
 
-/** No gaps, no overlaps, exact cover of the stage. */
+/**
+ * No overlaps anywhere, and no hole wider than the 1px seam.
+ *
+ * Sampled rather than computed from areas, because a spanning cell reclaims the
+ * gutters it crosses and no closed-form area identity survives that. Inflating
+ * every pane by exactly one seam and demanding total coverage is precisely the
+ * claim "these rectangles tile the stage, with gaps of at most SEAM": too big a
+ * gap leaves an uncovered sample, and an overlap is caught on the raw rects.
+ */
 function tiling(g) {
-  const area = g.panes.reduce((a, p) => a + p.width * p.height, 0);
   let overlap = 0;
   for (let i = 0; i < g.panes.length; i++)
     for (let j = i + 1; j < g.panes.length; j++) {
@@ -121,17 +137,23 @@ function tiling(g) {
       const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
       if (w > EPS && h > EPS) overlap += w * h;
     }
+  const pad = SEAM + EPS;
+  let uncovered = 0, samples = 0;
+  for (let x = 0.5; x < g.stage.width; x += 4)
+    for (let y = 0.5; y < g.stage.height; y += 4) {
+      samples++;
+      if (!g.panes.some((p) => x >= p.left - pad && x <= p.right + pad
+        && y >= p.top - pad && y <= p.bottom + pad)) uncovered++;
+    }
   const union = {
     left: Math.min(...g.panes.map((p) => p.left)), top: Math.min(...g.panes.map((p) => p.top)),
     right: Math.max(...g.panes.map((p) => p.right)), bottom: Math.max(...g.panes.map((p) => p.bottom)),
   };
   return {
-    area, overlap, union,
+    overlap, uncovered, samples, union,
     coversStage: Math.abs(union.left) < EPS && Math.abs(union.top) < EPS
       && Math.abs(union.right - g.stage.width) < EPS && Math.abs(union.bottom - g.stage.height) < EPS,
-    // Exact cover: area of the parts equals area of the whole AND nothing
-    // double-counted. Together those two rule out both a gap and an overlap.
-    exact: Math.abs(area - g.stage.width * g.stage.height) < g.stage.width + g.stage.height,
+    exact: uncovered === 0 && overlap < 1,
   };
 }
 
@@ -144,11 +166,17 @@ function tiling(g) {
  * is what a user does anyway. An earlier version of this harness grabbed the
  * centre and reported a silent no-op as a resize-notification failure.
  */
-const dragTo = async (dividerId, dx, dy, mid, along = 0.25) => {
+const grabPoint = async (dividerId, along = 0.25) => {
   const box = await win.locator(`[data-divider="${dividerId}"]`).boundingBox();
   const long = box.width > box.height;
-  const x = box.x + (long ? box.width * along : box.width / 2);
-  const y = box.y + (long ? box.height / 2 : box.height * along);
+  return {
+    x: box.x + (long ? box.width * along : box.width / 2),
+    y: box.y + (long ? box.height / 2 : box.height * along),
+  };
+};
+
+const dragTo = async (dividerId, dx, dy, mid, along = 0.25) => {
+  const { x, y } = await grabPoint(dividerId, along);
   await win.mouse.move(x, y);
   await win.mouse.down();
   await win.mouse.move(x + dx, y + dy, { steps: 8 });
@@ -160,25 +188,42 @@ const dragTo = async (dividerId, dx, dy, mid, along = 0.25) => {
 };
 
 // ============================================================================
-// 1. Tiling at 1x2, 2x1, 2x2, 3x3 (+ a spanned layout).
+// 1. Tiling at 1x2, 2x1, 2x2, 3x3 (+ a spanned layout), and the null path.
 // ============================================================================
 console.log('\n--- tiling ---');
-for (const [name, expected] of [['1x1', 1], ['1x2', 2], ['2x1', 2], ['2x2', 4], ['3x3', 9], ['span', 3]]) {
+for (const [name, expected, seams] of [
+  ['1x1', 1, 0], ['1x2', 2, 1], ['2x1', 2, 1], ['2x2', 4, 2], ['3x3', 9, 4], ['span', 3, 2],
+]) {
   await setLayout(name);
   const g = await geometry();
   const t = tiling(g);
-  console.log(`  ${name}: stage=${g.stage.width}x${g.stage.height} panes=` +
+  console.log(`  ${name}: stage=${g.stage.width}x${g.stage.height} tracks=${g.cols}x${g.rows} panes=` +
     g.panes.map((p) => `${p.id}[${p.left.toFixed(1)},${p.top.toFixed(1)} ${p.width.toFixed(1)}x${p.height.toFixed(1)}]`).join(' '));
-  check(`${name}: one pane per cell`, g.panes.length === expected, `${g.panes.length} of ${expected}`);
+  check(`${name}: one pane per cell, and no pane for a tab not in the layout`,
+    g.panes.length === expected, `${g.panes.length} of ${expected}`);
   check(`${name}: panes do not overlap`, t.overlap < 1, `overlap=${t.overlap.toFixed(2)}px2`);
-  check(`${name}: panes leave no gap (parts sum to the whole)`, t.exact,
-    `sum=${t.area.toFixed(0)} stage=${(g.stage.width * g.stage.height).toFixed(0)}`);
+  check(`${name}: panes tile the stage with no hole wider than the ${SEAM}px seam`,
+    t.uncovered === 0, `${t.uncovered}/${t.samples} sample points uncovered`);
   check(`${name}: the tiling fills the stage exactly`, t.coversStage, JSON.stringify(t.union));
   check(`${name}: every pane gave its 100%-height child a real box (Terminal's precondition)`,
     g.panes.every((p) => Math.abs(p.stand.width - p.width) < EPS && Math.abs(p.stand.height - p.height) < EPS),
     g.panes.map((p) => `${p.id}:${p.stand.width.toFixed(1)}x${p.stand.height.toFixed(1)}`).join(' '));
-  const seams = (name === 'span' ? 3 - 1 + 2 - 1 : 0);
-  if (name === 'span') check('span: 3x2 exposes 2 col + 1 row seams', g.dividers.length === seams, `${g.dividers.length}`);
+  check(`${name}: exposes exactly ${seams} draggable seam(s)`, g.dividers.length === seams,
+    g.dividers.map((d) => d.id).join(',') || '(none)');
+}
+
+// The classic single-pane path: no grid at all, one full-bleed pane, no handles.
+await setLayout('null');
+{
+  const g = await geometry();
+  console.log(`  null: display=${g.display} panes=${g.panes.length} dividers=${g.dividers.length}`);
+  check('layout null leaves the container a plain block — no grid, no special case',
+    g.display !== 'grid', g.display);
+  check('layout null shows exactly one pane, filling the container',
+    g.panes.length === 1 && Math.abs(g.panes[0].width - STAGE_W) < EPS
+    && Math.abs(g.panes[0].height - STAGE_H) < EPS,
+    JSON.stringify(g.panes.map((p) => [p.id, p.width, p.height])));
+  check('layout null has no draggable handles', g.dividers.length === 0);
 }
 
 // ============================================================================
@@ -195,7 +240,7 @@ await setLayout('3x3');
     await win.locator(`[data-stand="${p.id}"]`).click({ position: { x: 10, y: 10 } });
     await win.waitForTimeout(60);
     const state = await win.evaluate(() => {
-      const f = [...document.querySelectorAll('.split-pane.focused')];
+      const f = [...document.querySelectorAll('.pane.pane-focused:not([hidden])')];
       return {
         ids: f.map((e) => e.dataset.pane),
         ring: f[0] ? getComputedStyle(f[0]).boxShadow : null,
@@ -223,7 +268,7 @@ console.log('\n--- divider drag: locality ---');
 await setLayout('3x3');
 {
   const before = await geometry();
-  const { during, after } = await dragTo('col0', 120, 0, true);
+  const { during, after } = await dragTo('col0-0', 120, 0, true);
   const w = (g, id) => g.panes.find((p) => p.id === id).width;
   const h = (g, id) => g.panes.find((p) => p.id === id).height;
   console.log('  before:', 'abc'.split('').map((i) => `${i}=${w(before, i).toFixed(1)}`).join(' '));
@@ -241,10 +286,10 @@ await setLayout('3x3');
   check('no row height changed (a column drag is one-axis)',
     'adg'.split('').every((i) => Math.abs(h(after, i) - h(before, i)) < EPS),
     'adg'.split('').map((i) => `${i}:${h(before, i).toFixed(1)}->${h(after, i).toFixed(1)}`).join(' '));
-  check('still an exact tiling after the drag', tiling(after).exact && tiling(after).coversStage && tiling(after).overlap < 1);
+  check('still an exact tiling after the drag', tiling(after).exact && tiling(after).coversStage);
   check('the divider handle followed the seam it was dragged to',
-    Math.abs(after.dividers.find((d) => d.id === 'col0').left + 4.5 - w(after, 'a')) < 2,
-    JSON.stringify(after.dividers.find((d) => d.id === 'col0')));
+    Math.abs(after.dividers.find((d) => d.id === 'col0-0').left + 4.5 - w(after, 'a')) < 3,
+    JSON.stringify(after.dividers.find((d) => d.id === 'col0-0')));
 
   const reported = await win.evaluate(() => window.__lastResize);
   console.log('  onResize reported:', JSON.stringify(reported));
@@ -260,7 +305,7 @@ console.log('\n--- divider drag: row axis ---');
 await setLayout('1x2');
 {
   const before = await geometry();
-  const { after } = await dragTo('row0', 0, -90, false);
+  const { after } = await dragTo('row0-0', 0, -90, false);
   const h = (g, id) => g.panes.find((p) => p.id === id).height;
   console.log(`  a: ${h(before, 'a').toFixed(1)} -> ${h(after, 'a').toFixed(1)}   b: ${h(before, 'b').toFixed(1)} -> ${h(after, 'b').toFixed(1)}`);
   check('row 0 shrank by the drag distance', Math.abs(h(after, 'a') - h(before, 'a') + 90) < 2);
@@ -274,15 +319,15 @@ await setLayout('1x2');
 console.log('\n--- clamp ---');
 await setLayout('2x1');
 {
-  // 500px overshoots the 320px of slack the 80px floor leaves, while keeping the
-  // pointer inside the 1000px window.
-  const { after } = await dragTo('col0', 500, 0, false);
+  // 500px overshoots the ~320px of slack the 80px floor leaves, while keeping
+  // the pointer inside the 1000px window.
+  const { after } = await dragTo('col0-0', 500, 0, false);
   const b = after.panes.find((p) => p.id === 'b');
-  console.log(`  right pane after a 900px drag on an 800px stage: ${b.width.toFixed(1)}px`);
+  console.log(`  right pane after a 500px drag on an ${STAGE_W}px stage: ${b.width.toFixed(1)}px`);
   check('the far pane stops at MIN_PANE_PX (80) instead of collapsing to zero',
     Math.abs(b.width - 80) < 2, `width=${b.width.toFixed(1)}`);
   check('the seam is still grabbable, so the drag is reversible',
-    (await win.locator('[data-divider="col0"]').boundingBox()).width > 4);
+    (await win.locator('[data-divider="col0-0"]').boundingBox()).width > 4);
 }
 
 // ============================================================================
@@ -297,123 +342,166 @@ await setLayout('2x2');
 {
   const before = await geometry();
   const at = await win.evaluate(() => {
-    const c = document.querySelector('[data-divider="col0"]').getBoundingClientRect();
-    const r = document.querySelector('[data-divider="row0"]').getBoundingClientRect();
+    const c = document.querySelector('[data-divider="col0-0"]').getBoundingClientRect();
+    const r = document.querySelector('[data-divider="row0-0"]').getBoundingClientRect();
     const x = c.left + c.width / 2, y = r.top + r.height / 2;
     const hit = document.elementFromPoint(x, y);
     return { x, y, id: hit?.dataset?.divider, cursor: getComputedStyle(hit).cursor };
   });
   console.log(`  crossing at (${at.x.toFixed(1)},${at.y.toFixed(1)}) resolves to ${at.id} with cursor ${at.cursor}`);
   check('a grab at the crossing resolves to exactly one handle, deterministically',
-    at.id === 'row0', `got ${at.id}`);
+    at.id === 'row0-0', `got ${at.id}`);
   check('and the cursor promises the axis that will actually move', at.cursor === 'row-resize', at.cursor);
-  const { after } = await dragTo('row0', 0, -70, false, 0.5); // 0.5 == the crossing
+  const { after } = await dragTo('row0-0', 0, -70, false, 0.5); // 0.5 == the crossing
   const h = (g, id) => g.panes.find((p) => p.id === id).height;
   check('dragging vertically from the crossing resizes rows, as the cursor promised',
     Math.abs(h(after, 'a') - h(before, 'a') + 70) < 2, `${h(before, 'a').toFixed(1)} -> ${h(after, 'a').toFixed(1)}`);
 }
 
 // ============================================================================
-// 6. Pane-size notification — the hard requirement.
+// 5c. Spanned layouts: no phantom handle inside a pane, and the real seams work.
+//     The defect: seams used to be emitted per grid LINE, so the col0|col1 line
+//     — which runs down the middle of `a` — got a full-height 9px band that
+//     changed nothing when dragged, yet persisted lopsided fractions and sat at
+//     z-index 2 over a live terminal.
+// ============================================================================
+console.log('\n--- spanned layout: seams ---');
+await setLayout('span');
+{
+  const g = await geometry();
+  const a = g.panes.find((p) => p.id === 'a');
+  console.log('  dividers:', g.dividers.map((d) =>
+    `${d.id}[${d.left.toFixed(1)},${d.top.toFixed(1)} ${d.width.toFixed(1)}x${d.height.toFixed(1)}]`).join(' '));
+  check('the line buried inside the spanning pane gets NO handle',
+    !g.dividers.some((d) => d.id === 'col0-0'), g.dividers.map((d) => d.id).join(','));
+  // The handle is 9px of grab centred on the seam, so its 4px overhang lands on
+  // the panes either side by design. The claim is about the SEAM itself: the
+  // line the handle represents must not pass through any pane's interior.
+  const through = g.dividers.filter((d) => {
+    const vertical = d.height > d.width;
+    const c = vertical ? (d.left + d.right) / 2 : (d.top + d.bottom) / 2;
+    return g.panes.some((p) => vertical
+      ? c > p.left + SEAM && c < p.right - SEAM && d.bottom > p.top && d.top < p.bottom
+      : c > p.top + SEAM && c < p.bottom - SEAM && d.right > p.left && d.left < p.right);
+  });
+  check('no seam passes through the interior of any pane',
+    through.length === 0, through.map((d) => d.id).join(','));
+  // The b|c seam is a boundary only over column 2, so its handle must stop there.
+  const row = g.dividers.find((d) => d.id.startsWith('row'));
+  check('the b|c row seam is clamped to column 2, not run across the whole grid',
+    row && Math.abs(row.left - a.right - SEAM) < 2 && Math.abs(row.right - g.stage.width) < 2,
+    JSON.stringify(row));
+
+  const beforeW = a.width;
+  const { after } = await dragTo('col1-0', -100, 0, false);
+  const a2 = after.panes.find((p) => p.id === 'a');
+  const b2 = after.panes.find((p) => p.id === 'b');
+  console.log(`  a: ${beforeW.toFixed(1)} -> ${a2.width.toFixed(1)}   b: ${b2.width.toFixed(1)}`);
+  check('dragging the real seam of a spanned layout resizes the span',
+    Math.abs(a2.width - beforeW + 100) < 3, `${beforeW.toFixed(1)} -> ${a2.width.toFixed(1)}`);
+  check('the spanned layout still tiles exactly after the drag',
+    tiling(after).exact && tiling(after).coversStage,
+    `overlap=${tiling(after).overlap.toFixed(2)} uncovered=${tiling(after).uncovered}`);
+}
+
+// ============================================================================
+// 6. Pane-size notification — the hard requirement. Terminal.tsx's own
+//    ResizeObserver is the ONLY mechanism; there is no second observer.
 // ============================================================================
 console.log('\n--- pane resize notification ---');
 await setLayout('2x2');
 await win.waitForTimeout(150);
 {
   const reset = () => win.evaluate(() => {
-    for (const k of Object.keys(window.__paneSizes)) window.__paneSizes[k] = [];
     for (const k of Object.keys(window.__roFires)) window.__roFires[k] = 0;
   });
 
   // (a) during a divider drag
   await reset();
   const preDrag = await geometry();
-  const { after: postDrag } = await dragTo('col0', 100, 0, false);
+  const { after: postDrag } = await dragTo('col0-0', 100, 0, false);
   const dw = (g, id) => g.panes.find((p) => p.id === id).width;
   console.log(`  (drag really moved geometry: a ${dw(preDrag, 'a').toFixed(1)} -> ${dw(postDrag, 'a').toFixed(1)})`);
-  const drag = await win.evaluate(() => ({ sizes: window.__paneSizes, ro: window.__roFires }));
-  console.log('  drag -> usePaneResize deliveries:', JSON.stringify(Object.fromEntries(
-    Object.entries(drag.sizes).map(([k, v]) => [k, v.length]))));
-  console.log('  drag -> stand-in ResizeObserver fires:', JSON.stringify(drag.ro));
-  check('usePaneResize fired for every pane the drag resized',
-    ['a', 'b', 'c', 'd'].every((k) => drag.sizes[k]?.length > 0),
-    Object.entries(drag.sizes).map(([k, v]) => `${k}:${v.length}`).join(' '));
+  const drag = await win.evaluate(() => ({ ...window.__roFires }));
+  console.log('  drag -> stand-in ResizeObserver fires:', JSON.stringify(drag));
+  check('the pane content\'s own ResizeObserver fired for every pane the drag resized',
+    ['a', 'b', 'c', 'd'].every((k) => drag[k] > 0), JSON.stringify(drag));
   check('it fired MORE THAN ONCE per pane — i.e. continuously, not just on pointerup',
-    ['a', 'b', 'c', 'd'].every((k) => drag.sizes[k].length > 1),
-    Object.entries(drag.sizes).map(([k, v]) => `${k}:${v.length}`).join(' '));
-  check('the last delivered size matches the pane\'s real box',
+    ['a', 'b', 'c', 'd'].every((k) => drag[k] > 1), JSON.stringify(drag));
+  // This number is the whole argument for the one-line rAF coalesce in
+  // Terminal.tsx: every fire is a ptyResize IPC and a conpty resize.
+  console.log(`  >> Terminal.tsx would send ${Math.max(...Object.values(drag))} ptyResize IPCs per pane for ONE drag`);
+  check('the last observed size matches the pane\'s real box',
     await win.evaluate(() => ['a', 'b', 'c', 'd'].every((k) => {
-      const r = document.querySelector(`.split-pane[data-pane="${k}"]`).getBoundingClientRect();
-      const [w, h] = window.__paneSizes[k].at(-1);
-      return Math.abs(w - r.width) < 1.5 && Math.abs(h - r.height) < 1.5;
+      const p = document.querySelector(`.pane[data-pane="${k}"]`).getBoundingClientRect();
+      const s = document.querySelector(`[data-stand="${k}"]`).getBoundingClientRect();
+      return Math.abs(s.width - p.width) < 1.5 && Math.abs(s.height - p.height) < 1.5;
     })));
-  check('a plain ResizeObserver on the pane\'s 100%-height child also fired (Terminal.tsx\'s own mechanism)',
-    ['a', 'b', 'c', 'd'].every((k) => drag.ro[k] > 0), JSON.stringify(drag.ro));
 
   // (b) when a SIBLING pane opens — nothing to do with this pane's own props
   await reset();
   await setLayout('3x3');
   await win.waitForTimeout(150);
-  const opened = await win.evaluate(() => ({ sizes: window.__paneSizes, ro: window.__roFires }));
-  console.log('  sibling opened (2x2 -> 3x3) -> deliveries:', JSON.stringify(Object.fromEntries(
-    Object.entries(opened.sizes).map(([k, v]) => [k, v.length]))));
-  check('usePaneResize fired for the pre-existing panes when new siblings opened',
-    ['a', 'b', 'c', 'd'].every((k) => opened.sizes[k]?.length > 0),
-    Object.entries(opened.sizes).filter(([k]) => 'abcd'.includes(k)).map(([k, v]) => `${k}:${v.length}`).join(' '));
+  const opened = await win.evaluate(() => ({ ...window.__roFires }));
+  console.log('  sibling opened (2x2 -> 3x3) -> RO fires:', JSON.stringify(opened));
+  check('the pre-existing panes were notified when new siblings opened',
+    ['a', 'b', 'c', 'd'].every((k) => opened[k] > 0), JSON.stringify(opened));
 
   // (c) when a sibling closes
   await reset();
   await setLayout('2x2');
   await win.waitForTimeout(150);
-  const closed = await win.evaluate(() => window.__paneSizes);
-  check('usePaneResize fired for the survivors when siblings closed (3x3 -> 2x2)',
-    ['a', 'b', 'c', 'd'].every((k) => closed[k]?.length > 0),
-    ['a', 'b', 'c', 'd'].map((k) => `${k}:${closed[k]?.length}`).join(' '));
+  const closed = await win.evaluate(() => ({ ...window.__roFires }));
+  check('the survivors were notified when siblings closed (3x3 -> 2x2)',
+    ['a', 'b', 'c', 'd'].every((k) => closed[k] > 0), JSON.stringify(closed));
 }
 
 // ============================================================================
-// 7. Panes must not re-mount. A re-mount destroys an xterm buffer.
+// 7. Panes must not re-mount. A re-mount destroys an xterm buffer (KAN-23).
+//    This is the assertion the inverted design exists for: because split view
+//    computes styles for App's own flat pane list instead of owning panes, the
+//    layout -> null -> layout transition cannot touch a single node.
 // ============================================================================
 console.log('\n--- re-mount detector ---');
 {
-  // Pane 'a' is present in every layout this harness has visited, so its count
-  // is a whole-run assertion: nothing above — six layout changes, four drags,
-  // nine focus clicks — re-mounted it.
   const total = await win.evaluate(() => window.__mounts);
   console.log('  mounts across the whole run:', JSON.stringify(total));
-  check('the pane present in every layout of the entire run mounted exactly ONCE', total.a === 1, `a:${total.a}`);
-  // b..d are legitimately absent from 1x1 / 1x2 / span, so their totals count
-  // real unmounts, not churn — hence the controlled sequence below.
+  check('every pane mounted exactly ONCE across the entire run (7 layouts, 6 drags, 9 focus clicks)',
+    'abcdefghi'.split('').every((k) => total[k] === 1),
+    'abcdefghi'.split('').map((k) => `${k}:${total[k]}`).join(' '));
 
   await setLayout('2x2');
   await win.waitForTimeout(150);
   const seq = await win.evaluate(async () => {
     const base = { ...window.__mounts };
+    const node = () => document.querySelector('.pane[data-pane="a"] .stand');
+    const first = node();
     const wait = () => new Promise((r) => setTimeout(r, 150));
-    window.__setLayout('3x3'); await wait();   // four siblings open
+    window.__setLayout('3x3'); await wait();     // four siblings open
     window.__set({ focused: 'i' }); await wait();
-    window.__setLayout('2x2'); await wait();   // they close again
+    window.__setLayout('null'); await wait();    // <- the transition finding 1 was about
+    window.__setLayout('3x3'); await wait();
+    window.__setLayout('2x2'); await wait();
     const delta = {};
     for (const k of Object.keys(window.__mounts)) delta[k] = window.__mounts[k] - (base[k] ?? 0);
-    return delta;
+    return { delta, sameNode: first === node() };
   });
-  console.log('  additional mounts over 2x2 -> 3x3 -> focus change -> 2x2:', JSON.stringify(seq));
-  check('opening four sibling panes re-mounted NONE of the four already on screen',
-    ['a', 'b', 'c', 'd'].every((k) => seq[k] === 0), ['a', 'b', 'c', 'd'].map((k) => `${k}:+${seq[k]}`).join(' '));
-  check('closing them again re-mounted none of the survivors either',
-    ['a', 'b', 'c', 'd'].every((k) => seq[k] === 0));
-  check('a focus change re-mounts nothing', ['a', 'b', 'c', 'd'].every((k) => seq[k] === 0));
-  check('the newly-opened siblings mounted exactly once each (they really were absent)',
-    ['e', 'f', 'g', 'h', 'i'].every((k) => seq[k] === 1), ['e', 'f', 'g', 'h', 'i'].map((k) => `${k}:+${seq[k]}`).join(' '));
+  console.log('  additional mounts over 2x2 -> 3x3 -> focus -> null -> 3x3 -> 2x2:', JSON.stringify(seq.delta));
+  check('opening and closing sibling panes re-mounted NOTHING',
+    Object.values(seq.delta).every((v) => v === 0), JSON.stringify(seq.delta));
+  check('collapsing to the classic single-pane path (layout null) and back re-mounted NOTHING',
+    Object.values(seq.delta).every((v) => v === 0));
+  check('a focus change re-mounts nothing', Object.values(seq.delta).every((v) => v === 0));
+  check('pane a is still the exact same DOM node it started as', seq.sameNode);
 
-  // The case an index key or an unsorted map would actually break: same tabs,
+  // The case an index key or a re-parenting render path would break: same tabs,
   // same rectangles, `cells` in a different order — exactly what
   // gridlayout.place() returns after touching one tab.
   await setLayout('2x2');
   await win.waitForTimeout(150);
   const reorder = await win.evaluate(async () => {
-    const nodes = () => [...document.querySelectorAll('.split-pane')].map((p) => p.dataset.pane);
-    const node = (id) => document.querySelector(`.split-pane[data-pane="${id}"]`);
+    const nodes = () => [...document.querySelectorAll('.pane:not([hidden])')].map((p) => p.dataset.pane);
+    const node = (id) => document.querySelector(`.pane[data-pane="${id}"]`);
     const base = { ...window.__mounts };
     const beforeOrder = nodes();
     const beforeNodes = beforeOrder.map(node);
@@ -434,24 +522,99 @@ console.log('\n--- re-mount detector ---');
     reorder.sameNodes && reorder.sameDomOrder, JSON.stringify(reorder));
   check('and every pane is still in the same place on screen', reorder.movedRects.length === 0,
     reorder.movedRects.join(','));
+}
 
-  // The sharper version of the same claim: adding a pane must not disturb the
-  // DOM identity of the ones already there.
+// ============================================================================
+// 8. Drag hygiene: no write for a click that moved nothing, exact
+//    reversibility (the accumulation guard), and keyboard resize.
+// ============================================================================
+console.log('\n--- drag hygiene ---');
+await setLayout('2x2');
+await win.waitForTimeout(150);
+{
+  // (a) a stationary click on a handle must not persist anything. Every
+  //     onResize is a workspace.json write.
+  await win.evaluate(() => { window.__resizeCalls = 0; });
+  const { x, y } = await grabPoint('col0-0');
+  await win.mouse.move(x, y);
+  await win.mouse.down();
+  await win.mouse.up();
+  await win.waitForTimeout(120);
+  const clicks = await win.evaluate(() => window.__resizeCalls);
+  console.log(`  onResize calls after a stationary click: ${clicks}`);
+  check('a click that moved nothing does not fire onResize (no workspace.json write)', clicks === 0, `${clicks}`);
+
+  // (b) the delta is measured from the pointerdown SNAPSHOT, not accumulated
+  //     per pointermove. Out past the clamp and back to the origin inside one
+  //     drag must land exactly where it started; an accumulating handler drifts
+  //     by everything the clamp swallowed.
+  const before = await geometry();
+  const w = (g, id) => g.panes.find((p) => p.id === id).width;
+  await win.mouse.move(x, y);
+  await win.mouse.down();
+  await win.mouse.move(x + 600, y, { steps: 8 });   // hard into the clamp
+  await win.waitForTimeout(40);
+  const pinned = await geometry();
+  await win.mouse.move(x - 600, y, { steps: 8 });   // hard into the other clamp
+  await win.waitForTimeout(40);
+  await win.mouse.move(x, y, { steps: 8 });         // back to the origin
+  await win.waitForTimeout(40);
+  await win.mouse.up();
+  await win.waitForTimeout(120);
+  const after = await geometry();
+  console.log(`  a: ${w(before, 'a').toFixed(1)} -> clamped ${w(pinned, 'a').toFixed(1)} -> back ${w(after, 'a').toFixed(1)}`);
+  check('the drag really hit the clamp on the way out',
+    Math.abs(w(pinned, 'b') - 80) < 2, `b=${w(pinned, 'b').toFixed(1)}`);
+  check('returning to the origin mid-drag restores the exact starting size',
+    Math.abs(w(after, 'a') - w(before, 'a')) < EPS,
+    `${w(before, 'a').toFixed(1)} -> ${w(after, 'a').toFixed(1)}`);
+
+  // (c) a pane closing MID-DRAG. A pty exiting is asynchronous and real, and it
+  //     re-shapes the grid under the pointer. Anything written after that would
+  //     be a template for a grid that no longer exists — the wrong number of
+  //     tracks, and fractions persisted for an axis that changed length.
+  await setLayout('3x3');
+  await win.waitForTimeout(150);
+  await win.evaluate(() => { window.__resizeCalls = 0; window.__lastResize = null; });
+  {
+    const g = await grabPoint('col0-0');
+    await win.mouse.move(g.x, g.y);
+    await win.mouse.down();
+    await win.mouse.move(g.x + 60, g.y, { steps: 4 });
+    await win.evaluate(() => window.__setLayout('2x1')); // 3 cols -> 2, mid-drag
+    await win.waitForTimeout(120);
+    await win.mouse.move(g.x + 200, g.y, { steps: 6 });
+    await win.waitForTimeout(60);
+    await win.mouse.up();
+    await win.waitForTimeout(150);
+    const end = await geometry();
+    const reported = await win.evaluate(() => window.__lastResize);
+    console.log(`  layout changed mid-drag: tracks=${end.cols}x${end.rows} onResize=${JSON.stringify(reported)}`);
+    check('a layout change mid-drag never persists fractions for the old track count',
+      reported === null || reported.cols.length === end.cols, JSON.stringify(reported));
+    check('and the grid the drag was abandoned on is still an exact tiling',
+      tiling(end).exact && tiling(end).coversStage,
+      `overlap=${tiling(end).overlap.toFixed(2)} uncovered=${tiling(end).uncovered}`);
+  }
+
+  // (d) keyboard resize — the handles are focusable separators.
   await setLayout('2x2');
   await win.waitForTimeout(150);
-  const stable = await win.evaluate(async () => {
-    const node = () => document.querySelector('.split-pane[data-pane="a"] .stand');
-    const first = node();
-    window.__setLayout('3x3');
-    await new Promise((r) => setTimeout(r, 150));
-    const second = node();
-    window.__setLayout('2x2');
-    await new Promise((r) => setTimeout(r, 150));
-    return { sameAfterOpen: first === second, sameAfterClose: first === node() };
+  const kb0 = await geometry();
+  const role = await win.evaluate(() => {
+    const d = document.querySelector('[data-divider="col0-0"]');
+    return { role: d.getAttribute('role'), orient: d.getAttribute('aria-orientation'), tab: d.tabIndex };
   });
-  check('opening a sibling pane keeps the SAME DOM node for pane a (not a re-created one)',
-    stable.sameAfterOpen, JSON.stringify(stable));
-  check('closing it again keeps that same node', stable.sameAfterClose, JSON.stringify(stable));
+  check('a handle is an ARIA separator, focusable, with its orientation declared',
+    role.role === 'separator' && role.orient === 'vertical' && role.tab === 0, JSON.stringify(role));
+  await win.locator('[data-divider="col0-0"]').focus();
+  await win.keyboard.press('ArrowRight');
+  await win.keyboard.press('ArrowRight');
+  await win.waitForTimeout(120);
+  const kb1 = await geometry();
+  console.log(`  two ArrowRight presses: a ${w(kb0, 'a').toFixed(1)} -> ${w(kb1, 'a').toFixed(1)}`);
+  check('arrow keys resize the seam without a mouse',
+    Math.abs(w(kb1, 'a') - w(kb0, 'a') - 32) < 2, `+${(w(kb1, 'a') - w(kb0, 'a')).toFixed(1)}px`);
 }
 
 if (SHOW) {
@@ -464,6 +627,7 @@ await new Promise((r) => {
   const t = setTimeout(() => { proc.kill(); r(); }, 5_000);
   proc.once('exit', () => { clearTimeout(t); r(); });
 });
+fs.rmSync(TMP, { recursive: true, force: true });
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -1,21 +1,31 @@
-// Renderer half of test/harness/splitgrid.mjs — SplitGrid with coloured divs
-// standing in for panes. Bundled by that script; not part of the app build.
+// Renderer half of test/harness/splitgrid.mjs.
 //
-// Every stand-in deliberately has the SAME shape as Terminal.tsx's outer node
-// (a div at width:100%/height:100% carrying its own ResizeObserver), so the
-// harness measures the exact condition a real terminal depends on rather than a
-// friendlier stand-in.
-import { useEffect, useRef, useState } from 'react';
+// This deliberately reproduces App.tsx's REAL structure rather than a
+// convenient one, because the whole point of the inverted design is that split
+// view does not change that structure:
+//   - one flat container (`.content`, position: relative) that gets
+//     `placement.container` spread onto it;
+//   - EVERY tab mounted once, forever, as an absolutely positioned `.pane`
+//     sibling — never re-parented, merely hidden when it is not on screen
+//     (that is KAN-23: an xterm that changes parent loses alt-screen mode and
+//     its scrollback);
+//   - each pane's whole contribution to the layout is `placement.panes[id]`.
+//
+// Every stand-in has the SAME shape as Terminal.tsx's outer node (a div at
+// width:100%/height:100% carrying its own ResizeObserver), so the harness
+// measures the exact condition a real terminal depends on.
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GridCell, GridLayout } from '../../src/shared/types';
-import { SplitGrid, usePaneResize } from '../../src/renderer/components/SplitGrid';
+import { SplitDividers } from '../../src/renderer/components/SplitDividers';
+import { gridPlacement } from '../../src/renderer/splitgrid';
 import '../../src/renderer/index.css';
 
 const H = window as any;
 H.__mounts = {};      // tabId -> times the stand-in has mounted (re-mount detector)
-H.__paneSizes = {};   // tabId -> sizes delivered by usePaneResize
 H.__roFires = {};     // tabId -> times the stand-in's OWN ResizeObserver fired
 H.__lastResize = null;
+H.__resizeCalls = 0;
 
 const cell = (tabId: string, col: number, row: number, colSpan = 1, rowSpan = 1): GridCell =>
   ({ tabId, col, row, colSpan, rowSpan });
@@ -28,8 +38,10 @@ const grid = (cols: number, rows: number): GridLayout => {
   return { cols, rows, cells };
 };
 
-// Named cols x rows.
+// Named cols x rows. `null` is the classic single-pane path — the transition
+// that the pane-owning design would have re-mounted every terminal across.
 H.__layouts = {
+  null: null,
   '1x1': grid(1, 1),
   '1x2': grid(1, 2),
   '2x1': grid(2, 1),
@@ -47,14 +59,12 @@ H.__layouts = {
   } as GridLayout,
 };
 
+/** Every tab that exists. App mounts one `.pane` per terminal tab, always. */
+const ALL = 'abcdefghi'.split('');
 const HUES = [8, 140, 210, 40, 280, 170, 320, 95, 250];
 
 function Stand({ tabId }: { tabId: string }) {
   const el = useRef<HTMLDivElement>(null);
-
-  usePaneResize(({ width, height }) => {
-    (H.__paneSizes[tabId] ||= []).push([Math.round(width), Math.round(height)]);
-  });
 
   useEffect(() => {
     H.__mounts[tabId] = (H.__mounts[tabId] ?? 0) + 1;
@@ -86,7 +96,7 @@ function Stand({ tabId }: { tabId: string }) {
 }
 
 interface State {
-  layout: GridLayout;
+  layout: GridLayout | null;
   focused: string | undefined;
   cols?: number[];
   rows?: number[];
@@ -94,6 +104,8 @@ interface State {
 
 function Harness() {
   const [s, setS] = useState<State>({ layout: H.__layouts['2x2'], focused: 'a' });
+  const contentRef = useRef<HTMLDivElement>(null);
+  const placement = useMemo(() => gridPlacement(s.layout, s.cols, s.rows), [s.layout, s.cols, s.rows]);
 
   // Assigned during render (not in an effect) so the driver script can call it
   // the moment the first paint lands.
@@ -101,18 +113,33 @@ function Harness() {
   H.__setLayout = (name: string) => H.__set({ layout: H.__layouts[name], cols: undefined, rows: undefined });
 
   return (
-    <div id="stage" style={{ width: 800, height: 600, margin: 24 }}>
-      <SplitGrid
-        layout={s.layout}
-        focusedTabId={s.focused}
-        onFocusPane={(id) => H.__set({ focused: id })}
-        colFractions={s.cols}
-        rowFractions={s.rows}
+    // #stage IS the container: `position: relative` + the placement style, the
+    // five-line integration described in SplitDividers.tsx.
+    <div
+      id="stage"
+      ref={contentRef}
+      style={{ width: 800, height: 600, margin: 24, position: 'relative', overflow: 'hidden', ...placement.container }}
+    >
+      {ALL.map((id) => (
+        <div
+          key={id}
+          className={`pane${id === s.focused ? ' pane-focused' : ''}`}
+          data-pane={id}
+          style={placement.panes[id]}
+          hidden={placement.split ? !placement.panes[id] : id !== s.focused}
+          onPointerDownCapture={() => H.__set({ focused: id })}
+        >
+          <Stand tabId={id} />
+        </div>
+      ))}
+      <SplitDividers
+        placement={placement}
+        containerRef={contentRef}
         onResize={(cols, rows) => {
           H.__lastResize = { cols, rows };
+          H.__resizeCalls += 1;
           H.__set({ cols, rows });
         }}
-        renderPane={(tabId) => <Stand tabId={tabId} />}
       />
     </div>
   );

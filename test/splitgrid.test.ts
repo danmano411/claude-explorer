@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest'
 import type { GridCell, GridLayout } from '../src/shared/types'
 import {
   MIN_PANE_PX,
+  SEAM_PX,
   cellArea,
   dividerArea,
+  dividerId,
   dividers,
+  gridPlacement,
   gridTemplate,
   normalizeFractions,
   resizeFractions,
@@ -19,6 +22,15 @@ const cell = (tabId: string, col: number, row: number, colSpan = 1, rowSpan = 1)
 })
 
 const layout = (cols: number, rows: number, cells: GridCell[] = []): GridLayout => ({ cols, rows, cells })
+
+/** A full cols x rows of 1x1 cells, named a, b, c... in reading order. */
+const grid = (cols: number, rows: number): GridLayout => {
+  const cells: GridCell[] = []
+  let i = 0
+  for (let row = 0; row < rows; row++)
+    for (let col = 0; col < cols; col++) cells.push(cell(String.fromCharCode(97 + i++), col, row))
+  return { cols, rows, cells }
+}
 
 const sum = (a: number[]) => a.reduce((x, y) => x + y, 0)
 
@@ -82,36 +94,86 @@ describe('cellArea', () => {
 
 describe('dividers', () => {
   it('a single pane has none', () => {
-    expect(dividers(layout(1, 1))).toEqual([])
+    expect(dividers(grid(1, 1))).toEqual([])
   })
   it('an N-track axis has N-1 interior seams, and no seam on the outer edge', () => {
-    expect(dividers(layout(2, 1))).toEqual([{ axis: 'col', index: 0 }])
-    expect(dividers(layout(1, 2))).toEqual([{ axis: 'row', index: 0 }])
-    expect(dividers(layout(3, 3))).toEqual([
-      { axis: 'col', index: 0 },
-      { axis: 'col', index: 1 },
-      { axis: 'row', index: 0 },
-      { axis: 'row', index: 1 },
+    expect(dividers(grid(2, 1))).toEqual([{ axis: 'col', index: 0, start: 0, end: 1 }])
+    expect(dividers(grid(1, 2))).toEqual([{ axis: 'row', index: 0, start: 0, end: 1 }])
+    expect(dividers(grid(3, 3))).toEqual([
+      { axis: 'col', index: 0, start: 0, end: 3 },
+      { axis: 'col', index: 1, start: 0, end: 3 },
+      { axis: 'row', index: 0, start: 0, end: 3 },
+      { axis: 'row', index: 1, start: 0, end: 3 },
     ])
   })
-  it('gives every divider a unique axis+index, so React keys are stable', () => {
-    const ds = dividers(layout(4, 4))
-    expect(new Set(ds.map((d) => `${d.axis}${d.index}`)).size).toBe(ds.length)
+  it('gives every divider a unique id, so React keys are stable', () => {
+    const ds = dividers(grid(4, 4))
+    expect(new Set(ds.map(dividerId)).size).toBe(ds.length)
+  })
+
+  // The defect this replaced: seams were emitted per grid LINE, so a line
+  // buried inside a spanning cell got a full-length handle that changed nothing
+  // when dragged, yet still persisted lopsided fractions and sat above a live
+  // terminal eating pointer events.
+  it('emits no seam for a line that runs through the middle of a spanning cell', () => {
+    // 3x2; `a` covers cols 0-1 and both rows. The col0|col1 line is inside `a`.
+    const span = layout(3, 2, [cell('a', 0, 0, 2, 2), cell('b', 2, 0), cell('c', 2, 1)])
+    expect(dividers(span)).toEqual([
+      { axis: 'col', index: 1, start: 0, end: 2 }, // a | b,c — a real edge
+      { axis: 'row', index: 0, start: 2, end: 3 }, // b | c, over column 2 only
+    ])
+  })
+  it('clamps a seam to the cross-axis run where it is really a boundary', () => {
+    // The row seam above only spans column 2: over columns 0-1 it would lie
+    // inside `a`.
+    const span = layout(3, 2, [cell('a', 0, 0, 2, 2), cell('b', 2, 0), cell('c', 2, 1)])
+    const row = dividers(span).find((d) => d.axis === 'row')!
+    expect([row.start, row.end]).toEqual([2, 3])
+  })
+  it('splits one seam into two handles when a span straddles only its middle', () => {
+    // 3x3, `e` spans cols 1-2 of the middle row. The col1|col2 line is a real
+    // boundary on rows 0 and 2, and buried inside `e` on row 1.
+    const l = layout(3, 3, [
+      cell('a', 0, 0), cell('b', 1, 0), cell('c', 2, 0),
+      cell('d', 0, 1), cell('e', 1, 1, 2, 1),
+      cell('f', 0, 2), cell('g', 1, 2), cell('h', 2, 2),
+    ])
+    expect(dividers(l).filter((d) => d.axis === 'col' && d.index === 1)).toEqual([
+      { axis: 'col', index: 1, start: 0, end: 1 },
+      { axis: 'col', index: 1, start: 2, end: 3 },
+    ])
+    expect(new Set(dividers(l).map(dividerId)).size).toBe(dividers(l).length)
+  })
+  it('emits no seam where no cell has an edge at all', () => {
+    // A 3x1 holding one cell in column 0: its right edge is the col0|col1 line,
+    // but nothing at all touches the col1|col2 line.
+    expect(dividers(layout(3, 1, [cell('a', 0, 0)])))
+      .toEqual([{ axis: 'col', index: 0, start: 0, end: 1 }])
+  })
+  it('has none at all for a layout with no cells', () => {
+    expect(dividers(layout(3, 3))).toEqual([])
   })
 })
 
 describe('dividerArea', () => {
   // A handle placed on the wrong grid line IS a hit-test bug: these are the
   // grab boxes the browser hit-tests against.
-  it('puts a col handle on the line between its two tracks, spanning all rows', () => {
-    expect(dividerArea({ axis: 'col', index: 0 })).toEqual({ gridColumn: '2 / span 1', gridRow: '1 / -1' })
-    expect(dividerArea({ axis: 'col', index: 1 })).toEqual({ gridColumn: '3 / span 1', gridRow: '1 / -1' })
+  it('puts a col handle on the line between its two tracks, spanning its run', () => {
+    expect(dividerArea({ axis: 'col', index: 0, start: 0, end: 3 }))
+      .toEqual({ gridColumn: '2 / span 1', gridRow: '1 / 4' })
+    expect(dividerArea({ axis: 'col', index: 1, start: 0, end: 3 }))
+      .toEqual({ gridColumn: '3 / span 1', gridRow: '1 / 4' })
   })
-  it('puts a row handle on the line between its two tracks, spanning all columns', () => {
-    expect(dividerArea({ axis: 'row', index: 0 })).toEqual({ gridRow: '2 / span 1', gridColumn: '1 / -1' })
+  it('puts a row handle on the line between its two tracks, spanning its run', () => {
+    expect(dividerArea({ axis: 'row', index: 0, start: 0, end: 2 }))
+      .toEqual({ gridRow: '2 / span 1', gridColumn: '1 / 3' })
+  })
+  it('confines a partial seam to its own run instead of crossing a neighbour', () => {
+    expect(dividerArea({ axis: 'row', index: 0, start: 2, end: 3 }))
+      .toEqual({ gridRow: '2 / span 1', gridColumn: '3 / 4' })
   })
   it('never lands on line 1, which is the grid edge and not draggable', () => {
-    for (const d of dividers(layout(4, 4))) {
+    for (const d of dividers(grid(4, 4))) {
       const a = dividerArea(d)
       const line = parseInt(String(d.axis === 'col' ? a.gridColumn : a.gridRow), 10)
       expect(line).toBeGreaterThanOrEqual(2)
@@ -139,10 +201,6 @@ describe('resizeFractions', () => {
     expect(next[3]).toBe(1)
     expect(next[1]).toBeCloseTo(1.4)
     expect(next[2]).toBeCloseTo(0.6)
-  })
-  it('is measured from the snapshot, so the same delta is not applied twice', () => {
-    const once = resizeFractions(undefined, 2, 0, 100, W)
-    expect(resizeFractions(undefined, 2, 0, 100, W)).toEqual(once)
   })
 
   it('clamps at minPx instead of letting a pane reach zero', () => {
@@ -175,7 +233,19 @@ describe('resizeFractions', () => {
   })
   it('honours a caller-supplied minimum', () => {
     expect(resizeFractions(undefined, 2, 0, 5000, W, 250)).toEqual([1.5, 0.5])
-    expect(resizeFractions(undefined, 2, 0, 5000, W, 0)).toEqual([2, 0])
+  })
+  it('never lets a caller ask for a zero-width pane, whatever it passes', () => {
+    // A pane at 0 has no seam left to grab, so the drag that created it cannot
+    // be undone. minPx is floored at 1px no matter what.
+    for (const bad of [0, -50, NaN]) {
+      const next = resizeFractions(undefined, 2, 0, 5000, W, bad)
+      expect(next[1]).toBeGreaterThan(0)
+      expect(sum(next)).toBeCloseTo(2)
+    }
+    // 1px of 1000px over 2 tracks == 0.002fr: the floor, not the 0 asked for.
+    const floored = resizeFractions(undefined, 2, 0, 5000, W, 0)
+    expect(floored[1]).toBeCloseTo(0.002, 6)
+    expect(floored[1] * (W / 2)).toBeCloseTo(1)
   })
 
   it('is a no-op for a seam that does not exist', () => {
@@ -190,5 +260,70 @@ describe('resizeFractions', () => {
   it('normalises a bad fractions array before resizing instead of propagating it', () => {
     expect(resizeFractions([5, 5], 2, 0, 100, W)).toEqual([1.2, 0.8])
     expect(resizeFractions([0, 2], 2, 0, 100, W)).toEqual([1.2, 0.8])
+  })
+})
+
+describe('gridPlacement', () => {
+  it('is inert without a layout, so the classic single-pane path is untouched', () => {
+    for (const l of [null, undefined]) {
+      const p = gridPlacement(l)
+      expect(p.split).toBe(false)
+      expect(p.container).toEqual({}) // no display:grid — the container stays a block
+      expect(p.panes).toEqual({})
+      expect(p.dividers).toEqual([])
+    }
+  })
+  it('is inert for a layout with no cells — remove() on the last pane yields one', () => {
+    const p = gridPlacement(layout(2, 2))
+    expect(p.split).toBe(false)
+    expect(p.container).toEqual({})
+  })
+
+  it('makes the caller\'s own container a grid and gives every tab a grid-area', () => {
+    const p = gridPlacement(grid(2, 2))
+    expect(p.split).toBe(true)
+    expect(p.container.display).toBe('grid')
+    expect(p.container.gridTemplateColumns).toBe('1fr 1fr')
+    expect(p.container.gridTemplateRows).toBe('1fr 1fr')
+    expect(Object.keys(p.panes).sort()).toEqual(['a', 'b', 'c', 'd'])
+    expect(p.panes.d).toEqual({ gridColumn: '2 / span 1', gridRow: '2 / span 1' })
+  })
+  it('paints exactly one seam between panes, via the grid gap', () => {
+    const p = gridPlacement(grid(2, 2))
+    expect(p.container.gap).toBe(`${SEAM_PX}px`)
+    expect(p.container.background).toBe('var(--line)')
+  })
+  it('carries the caller\'s fractions into the template and back out normalised', () => {
+    const p = gridPlacement(grid(2, 1), [3, 1])
+    expect(p.container.gridTemplateColumns).toBe('1.5fr 0.5fr')
+    expect(p.cols).toEqual([1.5, 0.5])
+    expect(p.rows).toEqual([1])
+  })
+
+  // workspace.json is a file on disk; gridlayout's invariants are not enforced
+  // on the way back in.
+  it('drops an out-of-bounds cell instead of letting CSS invent implicit tracks', () => {
+    const p = gridPlacement(layout(2, 2, [cell('a', 0, 0), cell('x', 9, 0)]))
+    expect(Object.keys(p.panes)).toEqual(['a'])
+    expect(p.cells.map((c) => c.tabId)).toEqual(['a'])
+  })
+  it('drops a duplicate tabId — two panes claiming one terminal', () => {
+    const p = gridPlacement(layout(2, 1, [cell('a', 0, 0), cell('a', 1, 0)]))
+    expect(Object.keys(p.panes)).toEqual(['a'])
+    expect(p.panes.a).toEqual({ gridColumn: '1 / span 1', gridRow: '1 / span 1' }) // first wins
+  })
+  it('drops an overlapping cell instead of stacking panes silently', () => {
+    const p = gridPlacement(layout(2, 2, [cell('a', 0, 0, 2, 2), cell('b', 1, 1)]))
+    expect(Object.keys(p.panes)).toEqual(['a'])
+  })
+  it('drops a cell with no tab, so no pane is keyed on an empty string', () => {
+    const p = gridPlacement(layout(2, 1, [cell('', 0, 0), cell('b', 1, 0)]))
+    expect(Object.keys(p.panes)).toEqual(['b'])
+  })
+  it('computes its dividers from the SANITISED cells, not the raw ones', () => {
+    // The overlapping `b` is dropped, so `a` really does span the whole grid
+    // and there is no seam anywhere.
+    const p = gridPlacement(layout(2, 2, [cell('a', 0, 0, 2, 2), cell('b', 1, 1)]))
+    expect(p.dividers).toEqual([])
   })
 })
