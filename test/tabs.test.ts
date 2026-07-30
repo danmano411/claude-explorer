@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   newViewerTab, newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
-  closeTabList, openViewerTabList,
+  closeTabList, openViewerTabList, type Tab,
 } from '../src/renderer/tabs'
 import type { PersistedTab } from '../src/shared/types'
 
@@ -173,5 +173,35 @@ describe('openViewerTabList', () => {
     expect(b.tabs).toHaveLength(2)
     const diff = openViewerTabList(b.tabs, 'C:\\repo\\a.ts', 'diff')
     expect(diff.tabs).toHaveLength(3)
+  })
+
+  // KAN-47: a viewer opened from a tab inside group G joins G, at G's right
+  // edge — reusing addToGroup's "tag + relocate" rather than reimplementing
+  // insertion here.
+  describe('sourceGroupId (KAN-47 auto-link)', () => {
+    it('a fresh viewer joins the source group at its right edge', () => {
+      const grouped: Tab[] = [
+        { ...newFilesTab('C:\\repo'), groupId: 'g1' },
+        { ...newFilesTab('C:\\repo\\sub'), groupId: 'g1' },
+        newFilesTab('C:\\other'), // loose, sits after the group
+      ]
+      const { tabs, id } = openViewerTabList(grouped, 'C:\\repo\\a.ts', 'file', 'g1')
+      expect(tabs.map((t) => t.groupId)).toEqual(['g1', 'g1', 'g1', undefined])
+      expect(tabs[2].id).toBe(id) // landed right after the run, still before the loose tab
+    })
+
+    it('no sourceGroupId leaves the new tab ungrouped at the far end (unchanged default)', () => {
+      const grouped: Tab[] = [{ ...newFilesTab('C:\\repo'), groupId: 'g1' }]
+      const { tabs } = openViewerTabList(grouped, 'C:\\repo\\a.ts', 'file')
+      expect(tabs.at(-1)!.groupId).toBeUndefined()
+    })
+
+    it('re-focusing an already-open viewer never relocates it, even with a different sourceGroupId', () => {
+      const first = openViewerTabList([{ ...newFilesTab('C:\\repo'), groupId: 'g1' }], 'C:\\repo\\a.ts', 'file')
+      const before = first.tabs
+      const second = openViewerTabList(before, 'C:\\repo\\a.ts', 'file', 'g1')
+      expect(second.tabs).toBe(before) // same reference: the dedupe path, no move
+      expect(second.id).toBe(first.id)
+    })
   })
 })
