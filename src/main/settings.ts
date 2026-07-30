@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import type { Settings } from '../shared/types'
 
-const DEFAULTS: Settings = { ideCommand: 'code', mode: 'explorer' }
+const DEFAULTS: Settings = { ideCommand: 'code', mode: 'explorer', groupWithSource: true }
 const file = () => join(app.getPath('userData'), 'settings.json')
 
 export function getSettings(): Settings {

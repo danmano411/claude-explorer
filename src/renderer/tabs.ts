@@ -19,6 +19,9 @@ export interface Tab {
   filePath?: string // absolute file being viewed; set when view === 'viewer'
   viewerMode?: 'file' | 'diff' // 'file' -> fsRead, 'diff' -> gitDiff; set when view === 'viewer'
   renamed?: boolean // user set a custom title; suppress auto-title-on-navigate
+  /** The tab folder this tab belongs to (TabGroup.id), or absent for a loose
+   *  tab. Makes `Tab` satisfy groups.ts's `Grouped` structurally. */
+  groupId?: string
 }
 
 export function toPersisted(t: Tab): PersistedTab {
@@ -28,6 +31,7 @@ export function toPersisted(t: Tab): PersistedTab {
     cwd: t.cwd,
     title: t.title,
     renamed: t.renamed,
+    groupId: t.groupId,
     terminalKind: t.terminalKind,
     resumeSessionId: t.sessionId,
     filePath: t.filePath,
@@ -55,6 +59,7 @@ export function fromPersisted(p: PersistedTab): Tab | null {
       cwd: p.cwd,
       title: p.title,
       renamed: p.renamed,
+      groupId: p.groupId,
       terminalKind: p.terminalKind ?? 'claude',
       sessionId: p.resumeSessionId,
     }
@@ -66,6 +71,7 @@ export function fromPersisted(p: PersistedTab): Tab | null {
     cwd: p.cwd,
     title: p.title,
     renamed: p.renamed,
+    groupId: p.groupId,
     filePath: p.filePath,
     viewerMode: p.viewerMode,
   }

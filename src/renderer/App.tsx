@@ -38,8 +38,14 @@ export function App() {
     (async () => {
       const w = await window.api.workspaceGet();
       const restored = w.tabs.map(fromPersisted).filter((t): t is Tab => t !== null);
-      if (restored.length) { setTabs(restored); selectTab(restored[0].id); }
-      else {
+      if (restored.length) {
+        // Land on the tab you left, not tab 1. sanitize() guarantees activeTabId
+        // names a member of the space, but not that the tab was *renderable* —
+        // fromPersisted can still drop it — so fall back to the first tab.
+        const space = w.spaces.find((s) => s.id === w.activeSpaceId);
+        const focus = restored.find((t) => t.id === space?.activeTabId) ?? restored[0];
+        setTabs(restored); selectTab(focus.id);
+      } else {
         const home = await window.api.fsHome();
         const t = newFilesTab(home);
         setTabs([t]); selectTab(t.id);
@@ -85,9 +91,13 @@ export function App() {
       .finally(() => spawning.current.delete(t.id));
   }, [active, tabs]);
 
-  // Persist the tab set so a restart puts you back where you were. Debounced:
-  // navigating a folder retitles its tab, and writing the whole document on
-  // every keystroke-fast state change is pointless churn.
+  // Persist the tab set *and which tab is focused* so a restart puts you back
+  // where you were. Debounced: navigating a folder retitles its tab, and writing
+  // the whole document on every keystroke-fast state change is pointless churn.
+  //
+  // ponytail: still writes spaces[0] rather than the active space — there is only
+  // ever one until the spaces switcher (KAN-45) lands. Key off activeSpaceId when
+  // it does; the restore above already reads that way.
   useEffect(() => {
     if (!tabs.length) return;
     const timer = setTimeout(() => {
@@ -96,11 +106,11 @@ export function App() {
           ...w,
           tabs: tabs.map(toPersisted),
           spaces: w.spaces.map((s, i) =>
-            i === 0 ? { ...s, tabIds: tabs.map((t) => t.id) } : s),
+            i === 0 ? { ...s, tabIds: tabs.map((t) => t.id), activeTabId: active } : s),
         }));
     }, 400);
     return () => clearTimeout(timer);
-  }, [tabs]);
+  }, [tabs, active]);
 
   // Application menu (File/Settings) posts commands; dispatch through a ref so
   // the subscription (mounted once) always calls the latest closures.

@@ -2,6 +2,11 @@ import { app } from 'electron'
 import { join } from 'node:path'
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
 import type { Workspace } from '../shared/types'
+// Pure logic, no DOM and no electron — it lives under renderer/ because that is
+// where its other callers are, not because it needs a window. Importing it is
+// deliberate: a second groupId repair path here would be a second thing to keep
+// in step with the TabBar's idea of a valid group.
+import { normalize } from '../renderer/groups'
 
 const file = () => join(app.getPath('userData'), 'workspace.json')
 
@@ -33,24 +38,33 @@ export function sanitize(raw: unknown): Workspace {
   }
 
   const groups = w.groups.filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string')
-  const groupIds = new Set(groups.map((g) => g.id))
 
-  const tabs = w.tabs
-    .filter((t) => t && typeof t.id === 'string' && typeof t.cwd === 'string')
-    // A tab pointing at a group that did not survive keeps the tab, loses the
-    // grouping: the tab is real, the reference is not.
-    .map((t) => (t.groupId && !groupIds.has(t.groupId) ? { ...t, groupId: undefined } : t))
+  // normalize() is the one repair path for groupId: it clears a reference to a
+  // group that did not survive (the tab is real, the reference is not) and pulls
+  // each surviving group back into one contiguous run, which is the invariant
+  // the TabBar renders against.
+  const tabs = normalize(
+    w.tabs.filter((t) => t && typeof t.id === 'string' && typeof t.cwd === 'string'),
+    groups,
+  )
   const tabIds = new Set(tabs.map((t) => t.id))
 
   const spaces = w.spaces
     .filter((s) => s && typeof s.id === 'string')
-    .map((s) => ({
-      ...s,
-      tabIds: (Array.isArray(s.tabIds) ? s.tabIds : []).filter((id) => tabIds.has(id)),
-      layout: s.layout && Array.isArray(s.layout.cells)
-        ? { ...s.layout, cells: s.layout.cells.filter((c) => c && tabIds.has(c.tabId)) }
-        : null,
-    }))
+    .map((s) => {
+      const members = (Array.isArray(s.tabIds) ? s.tabIds : []).filter((id) => tabIds.has(id))
+      return {
+        ...s,
+        tabIds: members,
+        // Focusing a tab this space does not contain would leave the window on
+        // a blank pane. Absent (a v0.4.0 file) is fine — restore falls back to
+        // the first tab.
+        activeTabId: s.activeTabId && members.includes(s.activeTabId) ? s.activeTabId : undefined,
+        layout: s.layout && Array.isArray(s.layout.cells)
+          ? { ...s.layout, cells: s.layout.cells.filter((c) => c && tabIds.has(c.tabId)) }
+          : null,
+      }
+    })
 
   if (!spaces.length) return { ...emptyWorkspace(), groups, tabs }
   const activeSpaceId = spaces.some((s) => s.id === w.activeSpaceId)
