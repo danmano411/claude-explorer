@@ -23,7 +23,11 @@ const SLIDE_MS = 160;
  * translated themselves.
  */
 type Dnd =
-  | { kind: 'tab'; from: number; ids: Set<string>; moveKeys: string[] }
+  // `id`, not a frozen index (KAN-52 review #4): a tab closing or opening
+  // mid-drag (pty exit, auto-link) shifts everyone's index, and dragstart's
+  // snapshot would silently move the wrong tab. Resolved back to an index via
+  // `indexOf` at every use, so it always reads the CURRENT list.
+  | { kind: 'tab'; id: string; ids: Set<string>; moveKeys: string[] }
   | { kind: 'group'; groupId: string; ids: Set<string>; moveKeys: string[] };
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -204,7 +208,10 @@ export function TabBar({
     dnd === null || insert === null
       ? tabs
       : dnd.kind === 'tab'
-        ? reorderWithGroups(tabs, dnd.from, insert)
+        ? (() => {
+            const from = indexOf.get(dnd.id);
+            return from === undefined ? tabs : reorderWithGroups(tabs, from, insert);
+          })()
         : moveGroupRun(tabs, dnd.groupId, insert);
 
   const stripRef = useRef<HTMLDivElement>(null);
@@ -220,6 +227,9 @@ export function TabBar({
   /** Pointer offset inside the grabbed element, and its live translation. */
   const grab = useRef({ dx: 0, tx: 0 });
   const ghost = useRef<HTMLCanvasElement | null>(null);
+  /** Last pointer x seen by dragover, so the layout effect can re-anchor the
+   *  held tab after a preview commit (KAN-52 review #5). */
+  const lastX = useRef<number | null>(null);
 
   const slideNode = (key: string) =>
     stripRef.current?.querySelector<HTMLElement>(`[data-slide="${CSS.escape(key)}"]`) ?? null;
@@ -253,9 +263,16 @@ export function TabBar({
       n.style.transform = `translateX(${dx}px)`;
       moved.push(n);
     }
-    if (!moved.length) return;
-    void el.offsetWidth; // flush the inverted positions before releasing them
-    for (const n of moved) { n.style.transition = `transform ${SLIDE_MS}ms ease`; n.style.transform = ''; }
+    if (moved.length) {
+      void el.offsetWidth; // flush the inverted positions before releasing them
+      for (const n of moved) { n.style.transition = `transform ${SLIDE_MS}ms ease`; n.style.transform = ''; }
+    }
+    // KAN-52 review #5: a preview commit can remount the dragged node itself
+    // (crossing into/out of a group wrapper is a parent change, so React
+    // discards the old node), which drops its transform for one frame until
+    // the next dragover reapplies it. Re-anchor right after the commit,
+    // using the last pointer position, instead of waiting for that event.
+    if (lastX.current !== null) follow(lastX.current);
   });
 
   const beginDrag = (next: Dnd, e: React.DragEvent, node: HTMLElement | null) => {
@@ -274,6 +291,13 @@ export function TabBar({
       return { id: t.id, center: r ? r.left + r.width / 2 : Number.MAX_SAFE_INTEGER };
     });
     grab.current = { dx: node ? e.clientX - node.getBoundingClientRect().left : 0, tx: 0 };
+    // KAN-52 review #1: the preview reparents the dragged element across a
+    // group boundary (into or out of a .tabgroup wrapper), and React remounts
+    // across a parent change — so the ORIGINAL source node is detached from
+    // the tree and a `dragend` listener on `.tabbar` never sees it bubble.
+    // `dragend` still fires ON the node the OS is tracking as the drag
+    // source, wherever it now sits, so listen there directly.
+    if (node) node.addEventListener('dragend', cancelDrag, { once: true });
     e.dataTransfer.effectAllowed = 'move';
     // The real element follows the pointer, so the OS ghost would be a second
     // copy of the same tab. Under reduced motion nothing follows the pointer,
@@ -295,9 +319,16 @@ export function TabBar({
     }
     dndRef.current = null;
     insertRef.current = null;
+    lastX.current = null;
     setDnd(null);
     setInsert(null);
   };
+
+  // Shared by the strip's onDragEnd and the source-node listener beginDrag
+  // attaches (KAN-52 review #1) — both are just "the drag is over, and it was
+  // not a drop" (onDrop already calls endDrag itself and short-circuits
+  // before this can double-fire anything observable).
+  const cancelDrag = () => { clearSpring(); endDrag(); };
 
   /** Post-splice insert index: how many tabs that are NOT moving sit left of
    *  the pointer. Same coordinate space `reorderWithGroups` expects. */
@@ -317,7 +348,6 @@ export function TabBar({
   };
 
   const renderTab = (t: Tab) => {
-    const i = indexOf.get(t.id)!;
     let cls = t.id === activeId ? 'tab active' : 'tab';
     if (t.pinned) cls += ' pinned';
     if (dnd?.kind === 'tab' && dnd.ids.has(t.id)) cls += ' dragging';
@@ -337,7 +367,7 @@ export function TabBar({
         onClick={() => onSelect(t.id)}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: t.id }); }}
         onDragStart={(e) => {
-          beginDrag({ kind: 'tab', from: i, ids: new Set([t.id]), moveKeys: [t.id] }, e, e.currentTarget);
+          beginDrag({ kind: 'tab', id: t.id, ids: new Set([t.id]), moveKeys: [t.id] }, e, e.currentTarget);
           e.dataTransfer.setData(TAB_MIME, t.id);
         }}
         onDragEnter={(e) => {
@@ -382,7 +412,7 @@ export function TabBar({
         e.dataTransfer.dropEffect = 'move';
         const at = insertAt(e.clientX, d.ids);
         if (at !== insertRef.current) { insertRef.current = at; setInsert(at); }
-        if (!reducedMotion()) follow(e.clientX);
+        if (!reducedMotion()) { lastX.current = e.clientX; follow(e.clientX); }
       }}
       onDrop={(e) => {
         const d = dndRef.current;
@@ -397,10 +427,15 @@ export function TabBar({
         // Unconditional, even when `at` equals the tab's own index: landing on a
         // group's inclusive edge changes MEMBERSHIP without changing position,
         // and the preview has already shown that happening.
-        if (d.kind === 'tab') onReorder(d.from, at);
-        else onReorderGroup(d.groupId, at);
+        if (d.kind === 'tab') {
+          // Resolved fresh, not the dragstart snapshot (KAN-52 review #4) — a
+          // close/open mid-drag would otherwise move whatever tab now sits at
+          // a stale index instead of the one actually dragged.
+          const from = indexOf.get(d.id);
+          if (from !== undefined) onReorder(from, at);
+        } else onReorderGroup(d.groupId, at);
       }}
-      onDragEnd={() => { clearSpring(); endDrag(); }}
+      onDragEnd={cancelDrag}
     >
       {spaceMenu}
       {fileMenu}

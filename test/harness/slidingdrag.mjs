@@ -63,6 +63,15 @@ const strip = (win) => win.evaluate(() => {
   };
 });
 
+/** Leftover drag state that a cancelled drag must NOT leave behind: a
+ *  `.dragging` element (intercepts pointer events — review #1 measured a
+ *  30s-timeout stuck tab from exactly this) or a live inline transform. */
+const dragArtifacts = (win) => win.evaluate(() => ({
+  dragging: document.querySelectorAll('.tab.dragging, .tabgroup.dragging').length,
+  transformed: [...document.querySelectorAll('.tabbar [data-slide]')]
+    .filter((n) => n.style.transform).length,
+}));
+
 /** Is a transform TRANSITION actually in flight in the strip right now?
  *  Filtered to transitions on purpose — a Claude tab's status dot runs a
  *  keyframe animation forever and would make this true for free. */
@@ -102,10 +111,16 @@ const xOfTab = (win, i, frac = 0.5) => win.evaluate(([j, f]) => {
 }, [i, frac]);
 
 /** dragstart, grabbed at the element's centre — a real drag has a grab point,
- *  and TabBar anchors the held element to it. */
+ *  and TabBar anchors the held element to it. The source element is stashed
+ *  on `window.__src` (review #2): a preview that reparents it across a group
+ *  boundary detaches it from the tree, and a real browser always fires
+ *  `dragend` on the node that started the drag, not on whatever the pointer
+ *  happens to be over — dispatching on `.tabbar` instead is the one thing a
+ *  real browser never does, and would not have caught review #1. */
 const dragStart = (win, sel, nth = 0) => win.evaluate(([s, n]) => {
   window.__dt = new DataTransfer();
   const el = document.querySelectorAll(s)[n];
+  window.__src = el;
   const r = el.getBoundingClientRect();
   el.dispatchEvent(new DragEvent('dragstart', {
     bubbles: true, dataTransfer: window.__dt,
@@ -138,7 +153,22 @@ async function release(win) {
   await win.evaluate(() => {
     const bar = document.querySelector('.tabbar');
     bar.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: window.__dt }));
-    bar.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: window.__dt }));
+    // dragend goes to the SOURCE node (review #2), not `.tabbar` — a preview
+    // that reparented it across a group boundary means `.tabbar` may not
+    // even be an ancestor of it any more by drop time.
+    (window.__src ?? bar).dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: window.__dt }));
+  });
+  await win.waitForTimeout(400);
+}
+
+/** Cancel a drag mid-flight: dragend with no drop. A real browser fires this
+ *  on Escape, a drop outside the window, or a drop anywhere outside
+ *  `.tabbar` — dispatched on the SOURCE node for the same reason as
+ *  `release()`. */
+async function cancel(win) {
+  await win.evaluate(() => {
+    (window.__src ?? document.querySelector('.tabbar'))
+      .dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: window.__dt }));
   });
   await win.waitForTimeout(400);
 }
@@ -363,6 +393,46 @@ const profile = (tag) => {
   const pafter = await strip(win);
   check('pinned-before-unpinned survives the drop', pinnedFirst(pafter) && pafter.order === 'A D B C',
     pafter.order);
+
+  await close();
+}
+
+// ===========================================================================
+// Run 4: cancelling a drag that crossed a group boundary (review #1). The
+// preview reparents the dragged tab into the `.tabgroup` wrapper, which
+// remounts it — a `dragend` listener that only lives on `.tabbar` never sees
+// that detached node's event, so a cancel here used to leave the strip
+// permanently stuck: one `.dragging` element with a live transform,
+// intercepting pointer events forever.
+// ===========================================================================
+{
+  const { win, close } = await launchApp({ userDataDir: profile('cancel') });
+  await win.waitForSelector('.entry');
+  await namedTabs(win, ['A', 'B', 'C', 'D']);
+  await tabMenu(win, 1, 'New group from this tab'); // B
+  await tabMenu(win, 2, /^Add to /);                // C
+  const before = await strip(win);
+  check('a two-member group B,C to drag into and cancel out of',
+    before.order === 'A B C D' && JSON.stringify(before.memberIdx) === '[1,2]', before.order);
+
+  // Drag D into the run — same move as Run 2's join case — then cancel
+  // instead of dropping: Escape, a drop outside the window, and a drop
+  // anywhere outside `.tabbar` all surface to the page as exactly this,
+  // `dragend` with no preceding `drop`.
+  await startTabDrag(win, 3);
+  await moveTo(win, await xOfTab(win, 1, 0.6)); // over B, inside the run
+  const mid = await strip(win);
+  check('MID-DRAG: the preview joined the run, same as a real drop would',
+    mid.tabs.find((t) => t.name === 'D')?.grouped === true, mid.order);
+  await cancel(win);
+
+  const after = await strip(win);
+  const artifacts = await dragArtifacts(win);
+  check('CANCEL: the strip reverted to its pre-drag order, not the previewed one',
+    after.order === 'A B C D' && JSON.stringify(after.memberIdx) === '[1,2]',
+    `${before.order} -> (previewed ${mid.order}) -> ${after.order}`);
+  check('CANCEL: no .dragging element and no leftover inline transform survive',
+    artifacts.dragging === 0 && artifacts.transformed === 0, JSON.stringify(artifacts));
 
   await close();
 }
