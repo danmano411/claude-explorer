@@ -21,6 +21,9 @@
 // the reason spelled out at the top of groups.mjs: Chromium will not synthesise
 // HTML5 DnD from mouse moves, and TabBar's onDrop reads `over`/`dragFrom` out of
 // its render closure, so React has to commit between the phases.
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
 import { launchApp } from './app.mjs';
 
 const results = [];
@@ -155,6 +158,12 @@ let looseWidth;
     check('a pinned tab loses its title and its close button, keeps its icon',
       c.pinned && !c.hasTitle && !c.hasClose && c.hasIcon, JSON.stringify(c));
     check('a pinned tab is narrower than a titled one', c.w < looseWidth, `${c.w} vs ${looseWidth}`);
+    // This six-tab strip is all file tabs, so every icon is the 📁 glyph and
+    // this spread is structurally ~0 regardless of whether pinning preserves
+    // height — it cannot fail against the KAN-33 regression (a Claude tab's
+    // icon is a sized `.tab-status` dot, not a glyph). Run 3 below opens a
+    // pinned Claude tab specifically to give this comparison a tab that can
+    // actually discriminate.
     check('KAN-33 held: a pinned tab is still exactly as tall as the rest',
       Math.max(...s.tabs.map((t) => t.h)) - Math.min(...s.tabs.map((t) => t.h)) < 0.5,
       JSON.stringify(s.tabs.map((t) => t.h)));
@@ -258,6 +267,43 @@ let looseWidth;
   check('a pinned tab can still be closed from the context menu',
     after.tabs.length === s.tabs.length - 1 && !after.tabs.some((t) => t.name === 'C'),
     names(after));
+
+  await close();
+}
+
+// ===========================================================================
+// Run 3: KAN-33 height parity, specifically for a PINNED Claude terminal tab.
+// A fresh profile — this only needs two tabs and must not inherit Run 1/2's
+// pinned+grouped state. A Claude tab's only child once pinned is `.tab-icon`
+// wrapping the 8px `.tab-status` dot (not a text glyph like 📁/▶), which is
+// exactly the case the height-parity check above cannot exercise.
+// ===========================================================================
+{
+  const PROFILE = path.join(os.tmpdir(), 'claude-explorer-pinned-height-harness');
+  fs.rmSync(PROFILE, { recursive: true, force: true });
+  const { win, close } = await launchApp({ userDataDir: PROFILE });
+  await win.waitForSelector('.tab:not(.add)');
+  await win.waitForTimeout(500);
+
+  // Tab 1 (already open): pin it as a plain file tab.
+  await tabMenu(win, 0, 'Pin tab');
+
+  // Tab 2: a new file tab, converted in place into a Claude terminal, then
+  // pinned — same entry-open trick tabvisuals.mjs uses to avoid a real CLI
+  // round trip.
+  await win.click('.tab.add');
+  await win.waitForTimeout(600);
+  await win.waitForSelector('.entry-open');
+  await win.locator('.entry-open').first().click();
+  await win.waitForTimeout(2000);
+  await tabMenu(win, 1, 'Pin tab');
+
+  const s = await strip(win);
+  check('two pinned tabs: a file tab and a Claude terminal tab', s.tabs.length === 2 && s.tabs.every((t) => t.pinned),
+    JSON.stringify(s.tabs));
+  const heights = s.tabs.map((t) => t.h);
+  check('a pinned Claude terminal tab is exactly as tall as a pinned file tab',
+    Math.max(...heights) - Math.min(...heights) < 0.5, JSON.stringify(heights));
 
   await close();
 }

@@ -194,9 +194,24 @@ export function TabBar({
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(TAB_MIME)) {
             e.preventDefault();
-            const r = e.currentTarget.getBoundingClientRect();
-            const side: 'left' | 'right' = e.clientX > r.left + r.width / 2 ? 'right' : 'left';
-            if (over?.index !== i || over?.side !== side) setOver({ index: i, side });
+            let target = i;
+            let side: 'left' | 'right';
+            // KAN-53: reorderWithGroups() clamps the drop to the dragged tab's own
+            // pinned/unpinned region, so painting the indicator on a hovered tab
+            // from the OTHER region would promise a drop the clamp then refuses.
+            // Snap the indicator to the seam instead — the last tab of the
+            // dragged tab's own region — so it always shows where the drop will
+            // actually land, and the drag still visibly stops there.
+            if (dragFrom !== null && !!tabs[dragFrom].pinned !== !!t.pinned) {
+              const boundary = tabs.findIndex((x) => !x.pinned);
+              const boundaryIdx = boundary === -1 ? tabs.length : boundary;
+              target = tabs[dragFrom].pinned ? Math.max(boundaryIdx - 1, 0) : boundaryIdx;
+              side = tabs[dragFrom].pinned ? 'right' : 'left';
+            } else {
+              const r = e.currentTarget.getBoundingClientRect();
+              side = e.clientX > r.left + r.width / 2 ? 'right' : 'left';
+            }
+            if (over?.index !== target || over?.side !== side) setOver({ index: target, side });
           } else if (drag) {
             e.preventDefault(); // allow the file-drag hover to keep firing
           }

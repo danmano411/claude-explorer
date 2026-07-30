@@ -103,14 +103,13 @@ body {
 .tab.add { color: var(--ink-soft); font-size: 18px; padding: 4px 12px; }
 
 /* ===== Pinned tabs (KAN-53) =====
-   Icon only: TabBar renders no title and no close button, so all this has to do
-   is stop the box from being title-shaped. Symmetric padding centres the one
-   remaining child; the max-width cap is dropped to `none` so `.tab.active`'s
-   40ch growth rule cannot widen a pinned tab when it happens to be focused.
-   Everything else — height (KAN-33's line-height), border, radius, active
-   treatment, both colour schemes — is inherited from `.tab` unchanged, which is
-   the point: a pinned tab is the same tab, narrower. */
-.tab.pinned { padding-left: 8px; padding-right: 8px; gap: 0; max-width: none; }
+   Icon only: TabBar renders no title and no close button. Symmetric padding
+   centres the one remaining child. KAN-33's height strut is `.tab-title`'s
+   line-height — deleting the title for a pinned tab deletes the strut too, so
+   `.tab-icon` needs its own (a Claude tab's icon is an 8px status dot with no
+   text, so it has nothing else to inherit the height from). */
+.tab.pinned { padding-left: 8px; padding-right: 8px; }
+.tab.pinned .tab-icon { min-height: 1.4em; }
 
 /* ===== Tab folders (KAN-44) =====
    A group is a contiguous run of this same strip, wrapped in one flex box so
