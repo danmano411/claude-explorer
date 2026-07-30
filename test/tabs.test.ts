@@ -58,6 +58,25 @@ describe('persistence round trip', () => {
     expect(fromPersisted(toPersisted(t))!.renamed).toBe(true)
   })
 
+  // KAN-43: groups.ts shipped with no call sites because `Tab` had nowhere to
+  // hold a groupId, so a group survived exactly until the next restart. Both
+  // fromPersisted branches (terminal / everything else) build their result
+  // field-by-field, which is why both are exercised here.
+  it('carries groupId through persist -> restore, on a files tab', () => {
+    const t = { ...newFilesTab('C:\\repo'), groupId: 'g1' }
+    expect(toPersisted(t).groupId).toBe('g1')
+    expect(fromPersisted(toPersisted(t))!.groupId).toBe('g1')
+  })
+
+  it('carries groupId through persist -> restore, on a terminal tab', () => {
+    const t = { ...newTerminalTab('C:\\repo', 'claude', 'pty-1', 'repo', 'sess-abc'), groupId: 'g1' }
+    expect(fromPersisted(toPersisted(t))!.groupId).toBe('g1')
+  })
+
+  it('leaves an ungrouped tab ungrouped', () => {
+    expect(fromPersisted(toPersisted(newFilesTab('C:\\repo')))!.groupId).toBeUndefined()
+  })
+
   it('round-trips a viewer tab with its mode', () => {
     const back = fromPersisted(toPersisted(newViewerTab('C:\\repo\\a.ts', 'diff')))!
     expect(back.view).toBe('viewer')

@@ -1,4 +1,4 @@
-import type { TabGroup } from '../shared/types'
+import type { TabGroup } from './types'
 import { reorder } from './tabreorder'
 
 /**
@@ -240,10 +240,14 @@ export function normalize<T extends Grouped>(tabs: T[], groups: TabGroup[]): T[]
     }
   }
 
-  // Nothing to repair: same elements, same order. Return the original
-  // reference rather than an equal-by-value copy, matching this module's
-  // no-op convention elsewhere.
-  return result.every((t, i) => t === tabs[i]) ? tabs : result
+  // Nothing to repair: same elements, same order. Length must match too — a
+  // trailing duplicate id (`[t1,t2,t2]`) makes `result` a same-length-prefix
+  // match against a *shorter* deduped list only when the dupe isn't trailing,
+  // but a plain `.every` on `result` alone is true whenever `result` is a
+  // PREFIX of `tabs`, which a trailing dupe always produces — so the dupe
+  // would silently survive. Return the original reference rather than an
+  // equal-by-value copy, matching this module's no-op convention elsewhere.
+  return result.length === tabs.length && result.every((t, i) => t === tabs[i]) ? tabs : result
 }
 
 /**
