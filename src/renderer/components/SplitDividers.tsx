@@ -46,9 +46,11 @@ export interface SplitDividersProps {
  * `style={placement.panes[t.id]}` and a capture-phase `selectTab` (xterm stops
  * propagation, so a bubbling handler never sees a click inside a terminal —
  * exactly the pane you most need to focus by clicking it), and this component
- * is the last child. `Terminal.tsx` coalesces its ResizeObserver into a
- * `requestAnimationFrame` so a drag costs one `ptyResize` per frame rather than
- * ~8 per pointermove; that is a flooding fix, not a correctness one.
+ * is the last child. Because the boxes really change on every pointermove, each
+ * pane's own ResizeObserver fires ~8x per move; `Terminal.tsx` coalesces those
+ * down to a handful of `ptyResize` calls per drag, ending on the resting size.
+ * That is a CORRECTNESS fix, not a flooding one — see the resize comment there
+ * (KAN-50) for why a TUI mis-wraps when the pty is resized once per frame.
  *
  * Styles live in `index.css` under "M5: split view", with the rest of the app's.
  */

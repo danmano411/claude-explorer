@@ -448,9 +448,12 @@ await win.waitForTimeout(150);
     ['a', 'b', 'c', 'd'].every((k) => drag[k] > 0), JSON.stringify(drag));
   check('it fired MORE THAN ONCE per pane — i.e. continuously, not just on pointerup',
     ['a', 'b', 'c', 'd'].every((k) => drag[k] > 1), JSON.stringify(drag));
-  // This number is the whole argument for the one-line rAF coalesce in
-  // Terminal.tsx: every fire is a ptyResize IPC and a conpty resize.
-  console.log(`  >> Terminal.tsx would send ${Math.max(...Object.values(drag))} ptyResize IPCs per pane for ONE drag`);
+  // This number is the whole argument for the coalescing in Terminal.tsx: an
+  // uncoalesced pane would turn each of these into a ptyResize IPC and a conpty
+  // screen-buffer resize. It fits per frame and tells the pty once the size
+  // stops moving, so one drag costs the pty exactly one resize (KAN-50, proved
+  // in test/harness/termsize.mjs).
+  console.log(`  >> an uncoalesced pane would send ${Math.max(...Object.values(drag))} ptyResize IPCs per pane for ONE drag`);
   check('the last observed size matches the pane\'s real box',
     await win.evaluate(() => ['a', 'b', 'c', 'd'].every((k) => {
       const p = document.querySelector(`.pane[data-pane="${k}"]`).getBoundingClientRect();
