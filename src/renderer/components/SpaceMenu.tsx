@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { acceleratorLabel, canDeleteSpace } from './SpaceMenu'
+import type { Space } from '../../shared/types'
+import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
 import './SpaceMenu.css'
 
 /**
@@ -7,14 +8,27 @@ import './SpaceMenu.css'
  * tab strip that switches between Spaces.
  *
  * Fully props-driven, no App state of its own, so wiring it into App.tsx
- * later is mechanical. `tabCount` on each space is what the delete-confirm
- * message names ("Delete «M4 work» and close its 5 tabs?"); it's carried
- * per-space rather than looked up elsewhere because this component must not
- * import tabs.ts (owned by another M5 ticket this milestone).
+ * later is mechanical. Takes `Space` straight from the shared contract
+ * (`src/shared/types.ts`) — `tabIds.length` is the tab count the
+ * delete-confirm message names, no synthetic shape or `tabs.ts` import
+ * needed.
+ *
+ * Invariant App must uphold: `activeSpaceId` must name a member of `spaces`
+ * (or `spaces` may briefly be empty during a delete, before App re-picks
+ * one). If it doesn't — a load in progress, or a delete whose caller hasn't
+ * updated `activeSpaceId` yet — the trigger falls back to the generic label
+ * "Space" and Rename/Delete render disabled rather than acting on nothing.
+ * Picking the new active id after `onDelete` fires is App's job, same as
+ * every other space-list mutation here: this component only reports intent.
  *
  * Rename and Delete act on the CURRENT space (`activeSpaceId`) — same as the
  * per-space "Rename"/"Close" the tab context menu already offers for the
  * current tab, not a picker over every space in the list.
+ *
+ * No "Save as…" / duplicate-space action: a tab is a member of exactly one
+ * space (`Space.tabIds`), so there is no coherent "duplicate this space"
+ * operation without a tab living in two spaces at once. "New empty space"
+ * covers starting a second one.
  *
  * Does NOT implement the Ctrl+1..9 global shortcut — see integration note in
  * the file's task description. This component renders the accelerator
@@ -24,22 +38,21 @@ import './SpaceMenu.css'
  * input has focus (a terminal needs to receive Ctrl+1 itself).
  */
 export interface SpaceMenuProps {
-  spaces: { id: string; name: string; tabCount: number }[]
+  spaces: Space[]
   activeSpaceId: string
   onSwitch: (id: string) => void
   onCreate: (name: string) => void
   onRename: (id: string, name: string) => void
   onDelete: (id: string) => void
-  onSaveAs: (name: string) => void
 }
 
 export function SpaceMenu({
-  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onSaveAs,
+  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
-  const [adding, setAdding] = useState<'new' | 'saveas' | null>(null)
+  const [adding, setAdding] = useState(false)
   const [addDraft, setAddDraft] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -47,12 +60,15 @@ export function SpaceMenu({
   itemRefs.current = []
   const registerItem = (el: HTMLElement | null) => { if (el) itemRefs.current.push(el) }
 
-  const active = spaces.find((s) => s.id === activeSpaceId)
+  // Dedupe defensively: a duplicate id would otherwise produce duplicate
+  // React keys and an autoFocus rename input on every matching row.
+  const uniqueSpaces = spaces.filter((s, i) => spaces.findIndex((x) => x.id === s.id) === i)
+  const active = uniqueSpaces.find((s) => s.id === activeSpaceId)
 
   const close = () => {
     setOpen(false)
     setRenaming(false)
-    setAdding(null)
+    setAdding(false)
   }
 
   // Close on outside click — same approach as RecentMenu.
@@ -65,22 +81,34 @@ export function SpaceMenu({
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
+  // On the outer container (not the dropdown) — opening the menu leaves
+  // focus on the trigger button, a SIBLING of the dropdown, so a handler on
+  // the dropdown alone never sees the keydown.
   const onMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) return
     if (e.key === 'Escape') { e.preventDefault(); close(); return }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
       const items = itemRefs.current
-      if (items.length === 0) return
-      let idx = items.indexOf(document.activeElement as HTMLElement)
-      idx = e.key === 'ArrowDown' ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length
-      items[idx]?.focus()
+      const idx = items.indexOf(document.activeElement as HTMLElement)
+      const next = nextFocusIndex(idx, e.key, items.length)
+      if (next >= 0) items[next]?.focus()
     }
+  }
+
+  // Clicking another menu item while a rename/add input is focused would
+  // otherwise blur the input first — committing it and closing the menu —
+  // before the click on the sibling item ever lands. Suppressing the
+  // browser's default focus-shift on mousedown skips that blur; the click
+  // still fires normally. Input clicks (repositioning the caret) are exempt.
+  const onDropdownMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).tagName !== 'INPUT') e.preventDefault()
   }
 
   const startRename = () => {
     if (!active) return
     setRenameDraft(active.name)
-    setAdding(null)
+    setAdding(false)
     setRenaming(true)
   }
   const commitRename = () => {
@@ -89,19 +117,19 @@ export function SpaceMenu({
     close()
   }
 
-  const startAdd = (mode: 'new' | 'saveas') => {
+  const startAdd = () => {
     setAddDraft('')
     setRenaming(false)
-    setAdding(mode)
+    setAdding(true)
   }
   const commitAdd = () => {
     const name = addDraft.trim()
-    if (name) (adding === 'new' ? onCreate : onSaveAs)(name)
+    if (name) onCreate(name)
     close()
   }
 
   return (
-    <div className="spacemenu" ref={ref}>
+    <div className="spacemenu" ref={ref} onKeyDown={onMenuKeyDown}>
       <button
         className="spacemenu-btn"
         onClick={() => setOpen((o) => !o)}
@@ -111,9 +139,9 @@ export function SpaceMenu({
       </button>
 
       {open && (
-        <div className="spacemenu-dropdown" onKeyDown={onMenuKeyDown}>
+        <div className="spacemenu-dropdown" onMouseDown={onDropdownMouseDown}>
           <ul className="spacemenu-list">
-            {spaces.map((s, i) => (
+            {uniqueSpaces.map((s, i) => (
               <li key={s.id}>
                 {renaming && s.id === activeSpaceId ? (
                   <input
@@ -122,7 +150,6 @@ export function SpaceMenu({
                     autoFocus
                     value={renameDraft}
                     onChange={(e) => setRenameDraft(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
                     onBlur={commitRename}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') { e.preventDefault(); commitRename() }
@@ -148,7 +175,7 @@ export function SpaceMenu({
 
           <ul className="spacemenu-list">
             <li>
-              {adding === 'saveas' ? (
+              {adding ? (
                 <input
                   ref={(el) => registerItem(el)}
                   className="spacemenu-rename"
@@ -156,7 +183,6 @@ export function SpaceMenu({
                   value={addDraft}
                   placeholder="Space name"
                   onChange={(e) => setAddDraft(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
                   onBlur={commitAdd}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') { e.preventDefault(); commitAdd() }
@@ -164,44 +190,27 @@ export function SpaceMenu({
                   }}
                 />
               ) : (
-                <button ref={(el) => registerItem(el)} className="spacemenu-item" onClick={() => startAdd('saveas')}>
-                  Save as…
-                </button>
-              )}
-            </li>
-            <li>
-              {adding === 'new' ? (
-                <input
-                  ref={(el) => registerItem(el)}
-                  className="spacemenu-rename"
-                  autoFocus
-                  value={addDraft}
-                  placeholder="Space name"
-                  onChange={(e) => setAddDraft(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onBlur={commitAdd}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') { e.preventDefault(); commitAdd() }
-                    if (e.key === 'Escape') { e.preventDefault(); close() }
-                  }}
-                />
-              ) : (
-                <button ref={(el) => registerItem(el)} className="spacemenu-item" onClick={() => startAdd('new')}>
+                <button ref={(el) => registerItem(el)} className="spacemenu-item" onClick={startAdd}>
                   New empty space
                 </button>
               )}
             </li>
             <li>
-              <button ref={(el) => registerItem(el)} className="spacemenu-item" onClick={startRename}>
+              <button
+                ref={(el) => registerItem(el)}
+                className="spacemenu-item"
+                onClick={startRename}
+                disabled={!active}
+              >
                 Rename
               </button>
             </li>
-            {canDeleteSpace(spaces.length) && (
+            {active && canDeleteSpace(uniqueSpaces.length) && (
               <li>
                 <button
                   ref={(el) => registerItem(el)}
                   className="spacemenu-item"
-                  onClick={() => { if (active) setConfirmDeleteId(active.id); close() }}
+                  onClick={() => { setConfirmDeleteId(active.id); close() }}
                 >
                   Delete
                 </button>
@@ -212,17 +221,25 @@ export function SpaceMenu({
       )}
 
       {confirmDeleteId && (() => {
-        const target = spaces.find((s) => s.id === confirmDeleteId)
+        const target = uniqueSpaces.find((s) => s.id === confirmDeleteId)
         if (!target) return null
+        const count = target.tabIds.length
         return (
           <div className="modal-backdrop" onClick={() => setConfirmDeleteId(null)}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <p>Delete «{target.name}» and close its {target.tabCount} tab{target.tabCount === 1 ? '' : 's'}?</p>
+              <p>Delete «{target.name}» and close its {count} tab{count === 1 ? '' : 's'}?</p>
               <div className="modal-actions">
                 <button onClick={() => setConfirmDeleteId(null)}>Cancel</button>
                 <button
                   className="danger"
-                  onClick={() => { onDelete(target.id); setConfirmDeleteId(null) }}
+                  onClick={() => {
+                    // Re-check: the menu item that opens this modal is
+                    // gated on canDeleteSpace too, but `spaces` can shrink
+                    // to 1 while the modal is still open (another tab/IPC
+                    // path deletes concurrently) — never delete the last one.
+                    if (canDeleteSpace(uniqueSpaces.length)) onDelete(target.id)
+                    setConfirmDeleteId(null)
+                  }}
                 >
                   Delete
                 </button>

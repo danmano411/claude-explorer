@@ -44,6 +44,8 @@
 }
 .spacemenu-item:hover, .spacemenu-item:focus-visible { background: var(--clay-soft); outline: none; }
 .spacemenu-item.active { color: var(--clay); }
+.spacemenu-item:disabled { color: var(--ink-soft); cursor: default; }
+.spacemenu-item:disabled:hover { background: transparent; }
 
 .spacemenu-check { flex: none; width: 1.2em; color: var(--clay); }
 
