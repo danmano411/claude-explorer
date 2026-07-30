@@ -12,27 +12,50 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 import pw from 'playwright-core';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
+// Module level, evaluated once per node process — so two launchApp() calls in
+// ONE script (workspace.mjs's restart round trip) share a profile, while a
+// concurrent `npm run dev` or another harness run never collides with it.
+const TMP_PROFILE = path.join(os.tmpdir(), `claude-explorer-harness-${process.pid}`);
+fs.rmSync(TMP_PROFILE, { recursive: true, force: true });
+
 /**
  * Launch the built app. Returns { app, win, close } — `win` is the renderer
  * Page, so everything Playwright can do to a web page works on it.
  *
- * `userDataDir` points the app at a throwaway profile. Pass it for anything that
- * asserts on persisted state: the app now restores the previous workspace, so a
- * test sharing the real profile both accumulates other runs' tabs (a stale tab
- * gets measured instead of the fresh one) and does not start at home. Leaving it
- * unset keeps the real profile, which is what an inspection run wants.
+ * `userDataDir` defaults to a throwaway per-run profile (TMP_PROFILE), because
+ * the single-instance lock (KAN-4) is keyed on userData: sharing the real dev
+ * profile while `npm run dev` is up makes this hang for `timeout` ms instead of
+ * working — the second instance exits before it ever shows a window. A 30 s
+ * silent timeout in a tool a single developer runs by hand is worse than a loud
+ * failure, so the default is structurally incapable of colliding.
+ *
+ * Pass `realProfile: true` for an inspection run that wants to see your actual
+ * tabs, or an explicit `userDataDir` to control the value (needed when a test
+ * also spawns raw electron children with the same --user-data-dir).
+ *
+ * `extraArgs` are appended after the entry script, which is where Electron
+ * leaves them for process.argv — that is how the CLI flags are exercised.
  */
-export async function launchApp({ timeout = 30_000, userDataDir } = {}) {
+export async function launchApp({
+  timeout = 30_000, userDataDir = TMP_PROFILE, realProfile = false, extraArgs = [],
+} = {}) {
+  // A separate boolean rather than `userDataDir: null` on purpose: a
+  // null/undefined distinction is the kind of subtlety that silently
+  // reintroduces the bug this default exists to prevent.
+  const profile = realProfile ? null : userDataDir;
   const app = await pw._electron.launch({
     executablePath: require('electron'), // outside Electron this export IS the exe path
     args: [
-      ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : []),
+      ...(profile ? [`--user-data-dir=${profile}`] : []),
       path.join(root, 'out/main/index.js'),
+      ...extraArgs,
     ],
     cwd: root,
     timeout,
@@ -57,7 +80,9 @@ export async function launchApp({ timeout = 30_000, userDataDir } = {}) {
 
 if (process.argv[1]?.endsWith('app.mjs')) {
   const out = process.argv[3] || path.join(root, 'test/harness/shot.png');
-  const { win, close } = await launchApp();
+  // The only caller that genuinely wants the real profile: this is an
+  // inspection screenshot of *your* app with *your* tabs.
+  const { win, close } = await launchApp({ realProfile: true });
   // The file list renders after an async fsHome() round-trip; wait for a row.
   await win.waitForSelector('.entry', { timeout: 15_000 }).catch(() => {});
   await win.screenshot({ path: out });
