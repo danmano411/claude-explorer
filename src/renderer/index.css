@@ -342,6 +342,11 @@ body {
 .filemenu-project, .filemenu-session { font-family: var(--font-mono); font-size: 12px; }
 .filemenu-project { padding-right: 4px; }
 
+/* New session row (KAN-54 review): first row of a project's sessions flyout,
+   ahead of the separator — same treatment as .ctx-sep/.filemenu-item, no new
+   palette. */
+.filemenu-sep { height: 1px; margin: 4px 0; background: var(--line); }
+
 .filemenu-x {
   flex: none; font-family: var(--font-serif); font-size: 12px; color: var(--ink-soft);
   background: transparent; border: none; padding: 4px 10px 4px 4px; cursor: pointer;

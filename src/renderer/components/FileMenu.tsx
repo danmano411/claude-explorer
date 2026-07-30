@@ -40,7 +40,10 @@ import { relTime, topSessions } from '../filemenu'
 export interface FileMenuProps {
   onNewTab: () => void
   onOpenFolder: (path: string) => void
-  onOpenSession: (path: string, resumeId: string) => void
+  /** `resumeId` omitted means "start a fresh session" — the New session row
+   *  below calls this with no second argument, same as the old RecentMenu's
+   *  `New` button did (KAN-54 review: that action was dropped by omission). */
+  onOpenSession: (path: string, resumeId?: string) => void
 }
 
 /**
@@ -285,6 +288,21 @@ export function FileMenu({ onNewTab, onOpenFolder, onOpenSession }: FileMenuProp
                         {project === r.path && (
                           <Flyout>
                             <ul className="filemenu-list filemenu-sessions">
+                              {/* Always first, regardless of load state — starting a
+                                  fresh session doesn't depend on what sessions:list
+                                  returns. Same data-lvl as the rows below it so
+                                  ArrowRight/Up/Down treat it as an ordinary row. */}
+                              <li className="filemenu-row">
+                                <button
+                                  className="filemenu-item filemenu-newsession"
+                                  data-lvl="3"
+                                  onMouseEnter={(e) => e.currentTarget.focus()}
+                                  onClick={() => { onOpenSession(r.path); close() }}
+                                >
+                                  <span className="filemenu-label">＋ New session</span>
+                                </button>
+                              </li>
+                              <li className="filemenu-sep" aria-hidden />
                               {sessions === null && <li className="filemenu-empty">Loading…</li>}
                               {sessions?.length === 0 && <li className="filemenu-empty">No sessions</li>}
                               {sessions && topSessions(sessions).map((s) => (

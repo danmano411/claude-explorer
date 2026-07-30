@@ -2,22 +2,27 @@
 // standalone Open Recent button.
 //   npm run build && node test/harness/filemenu.mjs
 //
-// The load-bearing claim is the third level: clicking a session must RESUME
-// THAT SESSION. "A terminal tab appeared" is not evidence of that — the first
-// version of test/harness/resume.mjs asserted exactly that and reported PASS
-// while resume was completely broken. So the proof here is a two-sided one:
+// There are two load-bearing claims, both about the third level, both proven
+// the same two-sided way: "a terminal tab appeared" is not evidence of either
+// — the first version of test/harness/resume.mjs asserted exactly that and
+// reported PASS while resume was completely broken.
 //
-//   * every session row in ~/claudetest carries a distinct marker in its title
-//     (each transcript's first user prompt), and each marker string exists in
-//     exactly ONE jsonl on disk — checked, not assumed;
-//   * we click a session that is NOT the newest, and require its marker to
-//     come back on screen while the newest session's marker does not.
+//   1. clicking a SESSION must RESUME THAT SESSION (section 10):
+//      * every session row in ~/claudetest carries a distinct marker in its
+//        title (each transcript's first user prompt), and each marker string
+//        exists in exactly ONE jsonl on disk — checked, not assumed;
+//      * we click a session that is NOT the newest, and require its marker to
+//        come back on screen while the newest session's marker does not.
+//   2. clicking NEW SESSION (KAN-54 review — dropped, then restored) must
+//      start a FRESH conversation, never resume one (section 11):
+//      * a transcript id appears on disk that was not there before the click;
+//      * the pane never shows any pre-existing session's marker.
 //
-// A fresh session shows neither marker; resuming the newest one shows the
-// wrong marker. Both failure modes are caught.
+// A fresh session shows no pre-existing marker; resuming the wrong one shows
+// it anyway. Both failure modes are caught in both directions.
 //
 // Everything else (the cascade, laziness, the disabled row, the flip, the
-// keyboard chain) is cheap and runs in the same window before the slow part.
+// keyboard chain) is cheap and runs in the same window before the slow parts.
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -164,10 +169,19 @@ await win.waitForTimeout(400);
   check('the list is capped at 20', rows.length <= 20, `${rows.length}`);
 
   markers = rows
-    .map((r) => ({ id: r.id, marker: (r.title.match(/RESUME-OK-\d{6}|PROBE-OK/) ?? [])[0] }))
+    .map((r) => ({ id: r.id, marker: (r.title.match(/RESUME-OK-\d{6}|PROBE-OK-\d{6}/) ?? [])[0] }))
     .filter((m) => m.marker);
   check('the session titles carry distinguishable markers', markers.length >= 2,
     markers.map((m) => m.marker).join(', '));
+
+  // KAN-54 review: New session leads every project's flyout, ahead of a
+  // separator, regardless of what's below it.
+  const kids = await win.locator('.filemenu-sessions').first()
+    .evaluate((ul) => Array.from(ul.children).slice(0, 2).map((li) => li.className));
+  check('New session leads the flyout, then a separator, then the sessions',
+    kids[0] === 'filemenu-row' && kids[1] === 'filemenu-sep', kids.join(' | '));
+  const newRow = await win.locator('.filemenu-newsession').first().textContent().catch(() => null);
+  check('the New session row is labeled', /new session/i.test(newRow ?? ''), newRow ?? '(row not found)');
 }
 
 // --- 6. the empty project -------------------------------------------------
@@ -178,6 +192,11 @@ await win.waitForTimeout(600);
   const rows = await win.locator('.filemenu-session').count();
   check('a project with no sessions shows a disabled row, not an empty flyout',
     empty.some((t) => /no sessions/i.test(t)) && rows === 0, `${empty.join('|')} / ${rows} rows`);
+  // KAN-54 review: "no sessions" describes the EXISTING-session list, not
+  // whether you can start one — New session must still lead the flyout here.
+  const newRowOnEmpty = await win.locator('.filemenu-newsession').count();
+  check('New session, separator, disabled row — even with zero sessions',
+    newRowOnEmpty === 1, `${newRowOnEmpty} New session rows`);
 }
 
 // --- 7. clicking the project row itself -----------------------------------
@@ -224,11 +243,13 @@ await win.waitForTimeout(600);
 
   await win.keyboard.press('ArrowRight');
   const d = await focused(win);
-  check('ArrowRight again steps into that project’s sessions', d.lvl === '3', `lvl ${d.lvl}: ${d.text}`);
+  check('ArrowRight again steps into that project’s sessions, landing on New session first',
+    d.lvl === '3' && /new session/i.test(d.text), `lvl ${d.lvl}: ${d.text}`);
 
   await win.keyboard.press('ArrowDown');
   const e = await focused(win);
-  check('ArrowDown moves within the session list', e.lvl === '3' && e.text !== d.text, e.text);
+  check('ArrowDown moves within the session list, off New session and onto a real one',
+    e.lvl === '3' && e.text !== d.text && !/new session/i.test(e.text), e.text);
 
   await win.keyboard.press('ArrowLeft');
   const f = await focused(win);
@@ -304,6 +325,106 @@ console.log(`\nresuming ${target.marker} (${target.id}) — the OLDEST session, 
 
   if (!resumed) {
     const dump = path.join(os.tmpdir(), 'filemenu-resume.txt');
+    fs.writeFileSync(dump, rows);
+    console.log(`  (pane text written to ${dump})`);
+  }
+}
+
+// --- 11. New session (KAN-54 review): a FRESH session, not a resume --------
+//
+// The action this file exists to guard: New session was dropped from the old
+// three-action RecentMenu when it became this two-action File menu, and "a
+// terminal tab appeared" is exactly the false-positive this file's own header
+// comment warns about — it would pass whether New session spawned a fresh
+// conversation, silently resumed the newest one, or resumed nothing at all.
+// Two-sided proof, same shape as section 10:
+//   * a NEW transcript id appears on disk that was NOT there before the click
+//   * the pane shows NONE of the pre-existing sessions' markers
+//
+// Reached and activated by keyboard alone (ArrowRight, Enter) off a mouse
+// hover on the project row — proving "reachable by arrows, activated by
+// Enter" IS the click that produces the evidence below, rather than a second,
+// separate spawn just to check the keyboard path.
+console.log('\nNew session — must be a fresh conversation, never a resume');
+const beforeFiles = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')));
+const knownMarkers = markers.map((m) => m.marker);
+{
+  const beforeTabs = await win.locator('.tab:not(.add)').count();
+  await openMenu(win);
+  await hoverRecent(win);
+  await win.locator(byPath(CLAUDE_DIR)).hover();
+  await win.waitForSelector('.filemenu-session');
+  await win.waitForTimeout(400);
+
+  await win.keyboard.press('ArrowRight'); // project row (focused by hover) -> its sessions
+  const landed = await focused(win);
+  check('ArrowRight from the project row lands on New session',
+    landed.lvl === '3' && /new session/i.test(landed.text), `lvl ${landed.lvl}: ${landed.text}`);
+
+  await win.keyboard.press('Enter'); // native button activation — no special-case code
+
+  // Poll the tab COUNT rather than wait for '.xterm': unlike section 10, the
+  // ACTIVE tab here is already a terminal (last section's resumed session), so
+  // waiting for '.xterm' to merely exist resolves instantly on that stale pane
+  // instead of the new one — and openClaudeNewTab is async (two IPC round
+  // trips, recentsAdd then ptySpawn, before setTabs fires), so the count check
+  // has to survive that gap rather than race it.
+  let afterTabs = beforeTabs;
+  for (let i = 0; i < 30 && afterTabs !== beforeTabs + 1; i++) {
+    await win.waitForTimeout(300);
+    afterTabs = await win.locator('.tab:not(.add)').count();
+  }
+  check('Enter on New session opened a terminal tab', afterTabs === beforeTabs + 1,
+    `${beforeTabs} → ${afterTabs}`);
+  await win.waitForSelector(VIS + '.xterm', { timeout: 30_000 });
+  check('the menu closed behind it', await win.locator('.filemenu-dropdown').count() === 0);
+
+  // Evidence #1: before typing anything, the pane must not be replaying ANY
+  // pre-existing conversation. A resume prints history within a second or two
+  // of the transcript loading (section 10 above), so this window is enough to
+  // catch a silent fallback to "resume the newest" without waiting a full turn.
+  await win.waitForTimeout(5000);
+  let rows = await win.$eval(VIS + '.xterm-rows', (el) => el.textContent);
+  const leaked = knownMarkers.filter((m) => rows.includes(m));
+  check('the new pane shows none of the pre-existing sessions’ markers',
+    leaked.length === 0, leaked.length ? `leaked: ${leaked.join(', ')}` : '');
+
+  // Defensive, same as resume.mjs: first run in a folder can ask to trust it.
+  // Unlikely here (CLAUDE_DIR already has a dozen sessions), but cheap to guard.
+  if (/trust/i.test(rows)) {
+    await win.locator(VIS + '.xterm-screen').click();
+    await win.keyboard.press('Enter');
+    await win.waitForTimeout(3000);
+  }
+
+  // Evidence #2: a real, distinct transcript gets written for THIS session —
+  // not "a tab exists", the id on disk. A fresh marker (never seen before) also
+  // rules out a resume falling back to some OTHER old, unmarked transcript.
+  const PROBE = `PROBE-OK-${Date.now().toString().slice(-6)}`;
+  await win.locator(VIS + '.xterm-screen').click();
+  await win.keyboard.type(`Reply with exactly this and nothing else: ${PROBE}`);
+  await win.waitForTimeout(300);
+  await win.keyboard.press('Enter');
+
+  let newFile = null;
+  for (let i = 0; i < 30 && !newFile; i++) {
+    await win.waitForTimeout(1000);
+    const now = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+    newFile = now.find((f) => !beforeFiles.has(f));
+  }
+  check('a NEW transcript id appeared on disk that was not there before the click',
+    !!newFile, newFile ?? `no new file among ${fs.readdirSync(dir).length} on disk`);
+  check('the new transcript is neither of the two sessions clicked earlier in this run',
+    !newFile || (newFile !== `${target.id}.jsonl` && newFile !== `${decoy.id}.jsonl`),
+    newFile ?? '');
+
+  rows = await win.$eval(VIS + '.xterm-rows', (el) => el.textContent);
+  const stillClean = knownMarkers.every((m) => !rows.includes(m));
+  check('and still no pre-existing marker leaked in after the reply', stillClean,
+    stillClean ? '' : knownMarkers.filter((m) => rows.includes(m)).join(', '));
+
+  if (!newFile || leaked.length || !stillClean) {
+    const dump = path.join(os.tmpdir(), 'filemenu-newsession.txt');
     fs.writeFileSync(dump, rows);
     console.log(`  (pane text written to ${dump})`);
   }
