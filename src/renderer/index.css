@@ -501,7 +501,12 @@ body {
 .viewer-code {
   flex: 1; min-height: 0; overflow: auto;
   background: var(--bg); color: var(--ink);
-  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
+  /* 1.4 — same value KAN-33 already settled on for .tab; code is read in runs
+     of adjacent lines, so looser leading (was 1.55) only hurts. Both the plain
+     viewer's CSS-counter gutter and the diff view's .dn column read this same
+     rule (no separate line-height anywhere else in this file), so they can
+     never drift out of sync with their line's content. */
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.4;
 }
 .viewer-code pre.shiki { margin: 0; padding: 8px 0; background: transparent; }
 .viewer-code code { display: block; width: max-content; min-width: 100%; counter-reset: line; }
