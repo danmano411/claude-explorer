@@ -98,3 +98,33 @@ export function newViewerTab(filePath: string, mode: 'file' | 'diff' = 'file'): 
     title: winBasename(filePath),
   }
 }
+
+/**
+ * Remove a tab by id. Exported (rather than inlined as `tabs.filter(...)` at
+ * the call site) so App can pass it straight to setTabs's functional form:
+ * `setTabs((ts) => closeTabList(ts, id))`. React threads functional updates
+ * through each other's output, so several closeTab calls issued before a
+ * commit compose correctly instead of each computing "remaining" from the
+ * same stale snapshot (KAN-37).
+ */
+export function closeTabList(ts: Tab[], id: string): Tab[] {
+  return ts.filter((t) => t.id !== id)
+}
+
+/**
+ * Dedupe-or-append for opening a file viewer, plus which tab (existing or
+ * new) should become active. Exported for the same reason as closeTabList:
+ * the "is it already open" check has to run against the list React is about
+ * to commit, not a stale closure snapshot, or two rapid opens of the same
+ * file both miss each other and both append (KAN-37).
+ */
+export function openViewerTabList(
+  ts: Tab[], filePath: string, mode: 'file' | 'diff',
+): { tabs: Tab[]; id: string } {
+  const open = ts.find(
+    (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode,
+  )
+  if (open) return { tabs: ts, id: open.id }
+  const t = newViewerTab(filePath, mode)
+  return { tabs: [...ts, t], id: t.id }
+}

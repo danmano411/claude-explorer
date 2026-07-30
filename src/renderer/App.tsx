@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  newFilesTab, newTerminalTab, newViewerTab, toPersisted, fromPersisted, needsSpawn, type Tab,
+  newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
+  closeTabList, openViewerTabList, type Tab,
 } from './tabs';
 import { reorder } from './tabreorder';
 import { usePtyStatus } from './ptystatus';
@@ -148,26 +149,27 @@ export function App() {
   // could not live inside a future tab group). Re-opening the same file focuses
   // the tab that already has it instead of piling up duplicates.
   const openViewerTab = (filePath: string, mode: 'file' | 'diff' = 'file') => {
-    const open = tabs.find(
-      (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode,
-    );
-    if (open) { selectTab(open.id); return; }
-    const t = newViewerTab(filePath, mode);
-    setTabs((ts) => [...ts, t]); selectTab(t.id);
+    setTabs((ts) => {
+      const { tabs: next, id } = openViewerTabList(ts, filePath, mode);
+      selectTab(id);
+      return next;
+    });
   };
 
   const closeTab = (id: string) => {
     const t = tabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
-    const remaining = tabs.filter((x) => x.id !== id);
-    setTabs(remaining);
     lastActivated.current.delete(id);
-    if (id === active && remaining.length) {
-      // Focus the most-recently-activated remaining tab; never leave active blank.
-      const next = remaining.reduce((a, b) =>
-        (lastActivated.current.get(b.id) ?? 0) > (lastActivated.current.get(a.id) ?? 0) ? b : a);
-      setActive(next.id);
-    }
+    setTabs((ts) => {
+      const remaining = closeTabList(ts, id);
+      if (id === active && remaining.length) {
+        // Focus the most-recently-activated remaining tab; never leave active blank.
+        const next = remaining.reduce((a, b) =>
+          (lastActivated.current.get(b.id) ?? 0) > (lastActivated.current.get(a.id) ?? 0) ? b : a);
+        setActive(next.id);
+      }
+      return remaining;
+    });
   };
 
   const reorderTabs = (from: number, insert: number) =>

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   newViewerTab, newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
+  closeTabList, openViewerTabList,
 } from '../src/renderer/tabs'
 import type { PersistedTab } from '../src/shared/types'
 
@@ -102,5 +103,56 @@ describe('needsSpawn', () => {
   it('is false for panes that never had one', () => {
     expect(needsSpawn(newFilesTab('C:\\r'))).toBe(false)
     expect(needsSpawn(newViewerTab('C:\\r\\a.ts'))).toBe(false)
+  })
+})
+
+// KAN-37: closeTab used to compute `remaining` from the enclosing closure's
+// `tabs`, so several closeTab calls dispatched before React re-renders each
+// filtered the *same* stale array — only the last call's write stuck, and
+// every tab "closed" by an earlier call in the batch came back. closeTabList
+// is what setTabs's functional form now calls: `setTabs((ts) =>
+// closeTabList(ts, id))`. React threads a functional update's result into
+// the next queued one, so the fix is proven by applying closeTabList
+// straight to its own prior output — exactly what React does, and exactly
+// what the old closure-capturing code did not.
+describe('closeTabList', () => {
+  it('threads five back-to-back closes against 8 tabs down to exactly 3', () => {
+    const eight = Array.from({ length: 8 }, (_, i) => newFilesTab(`C:\\t${i}`))
+    const closeIds = eight.slice(0, 5).map((t) => t.id)
+    const result = closeIds.reduce((ts, id) => closeTabList(ts, id), eight)
+    expect(result).toHaveLength(3)
+    expect(result.map((t) => t.id)).toEqual(eight.slice(5).map((t) => t.id))
+  })
+
+  it('leaves the list untouched when the id is not present', () => {
+    const three = Array.from({ length: 3 }, (_, i) => newFilesTab(`C:\\t${i}`))
+    expect(closeTabList(three, 'no-such-id')).toHaveLength(3)
+  })
+})
+
+// KAN-37: openViewerTab's "already open?" check had the same shape — it read
+// `tabs` from the closure, so two openViewerTab calls for the same file
+// issued back to back both missed each other's not-yet-committed tab and
+// both appended, producing two viewer tabs for one file. openViewerTabList
+// is what the functional setTabs updater now calls; feeding the second
+// call's own prior output (its own output, same as React would) proves the
+// dedupe now sees the first call's tab.
+describe('openViewerTabList', () => {
+  it('two back-to-back opens of the same file dedupe to a single viewer tab', () => {
+    const first = openViewerTabList([], 'C:\\repo\\a.ts', 'file')
+    const second = openViewerTabList(first.tabs, 'C:\\repo\\a.ts', 'file')
+    const viewers = second.tabs.filter(
+      (t) => t.view === 'viewer' && t.filePath === 'C:\\repo\\a.ts',
+    )
+    expect(viewers).toHaveLength(1)
+    expect(second.id).toBe(first.id) // second call re-selects the same tab, doesn't create one
+  })
+
+  it('a different file, or a different mode on the same file, gets its own tab', () => {
+    const a = openViewerTabList([], 'C:\\repo\\a.ts', 'file')
+    const b = openViewerTabList(a.tabs, 'C:\\repo\\b.ts', 'file')
+    expect(b.tabs).toHaveLength(2)
+    const diff = openViewerTabList(b.tabs, 'C:\\repo\\a.ts', 'diff')
+    expect(diff.tabs).toHaveLength(3)
   })
 })
