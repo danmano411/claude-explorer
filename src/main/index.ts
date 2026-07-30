@@ -16,6 +16,7 @@ import { buildMenu, buildMenuThrottled } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
+import { registerControlHandlers } from './control.handlers'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
 import { CH } from '../shared/ipc'
@@ -166,6 +167,8 @@ app.whenReady().then(() => {
   registerGitHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
+  // KAN-39: only the reply listener + pending map. Nothing calls control() yet.
+  registerControlHandlers(() => mainWindow)
   // Async since KAN-55 — File > Open Recent now lists each recent folder's
   // Claude sessions, and a native menu template is built ahead of the click.
   // Not awaited: the window must not wait on a session-directory scan, and

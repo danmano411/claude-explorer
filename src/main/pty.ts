@@ -26,6 +26,38 @@ function resolveClaude(): string {
 const CLAUDE = resolveClaude()
 
 /**
+ * Every caller-influenced value that reaches ARGV is validated here, because
+ * node-pty builds the Win32 command line itself and its quoting is narrower
+ * than it looks: `argsToCommandLine` (node_modules/node-pty/lib/
+ * windowsPtyAgent.js) quotes an argument only when it is EMPTY or contains a
+ * space/tab, so `&`, `|`, `^`, `>` go out BARE. When resolveClaude() lands on
+ * a .cmd/.bat shim the line then runs through COMSPEC — and cmd.exe reads
+ * those bare characters as operators, so `--resume abc&calc` launches calc.
+ * An npm-global install of Claude Code IS a .cmd shim, so that is an ordinary
+ * machine, not an exotic one.
+ *
+ * Both ids are Claude session UUIDs (a transcript is `<uuid>.jsonl`), so demand
+ * exactly that shape — an id of any other shape names no transcript and could
+ * only ever have produced a failed launch anyway. `path` needs no guard: it is
+ * handed to node-pty's `cwd` OPTION, a separate native parameter that never
+ * joins the command line. Keep it that way, and if you add a flag below,
+ * validate its value HERE — spawn() is the one place every caller routes
+ * through (the control channel, the File menu, workspace restore, the CLI).
+ */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** A refusal, not a launch failure: nothing was spawned. Typed so a caller —
+ *  KAN-40's MCP layer, via the control channel — can tell "you sent junk" from
+ *  "claude died", and so this never takes the paint-it-in-the-pane path below,
+ *  which would create a terminal tab for a request that was never legitimate. */
+export class PtyArgError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PtyArgError'
+  }
+}
+
+/**
  * Claude Code marks its own environment so a `claude` it spawns knows it is a
  * nested session — and a nested session **does not save a transcript**. If
  * Claude Explorer is itself launched from a Claude session (running `npm run
@@ -72,6 +104,14 @@ export class PtyManager {
     onData: (id: string, d: string) => void,
     onExit: (id: string, code: number) => void,
   ): string {
+    // Before anything else, including the shell branch: a value that cannot
+    // reach argv today must not become reachable by a later edit down there.
+    for (const key of ['resumeId', 'sessionId'] as const) {
+      const v = opts[key]
+      if (v !== undefined && !SESSION_ID.test(v))
+        throw new PtyArgError(`pty: ${key} is not a Claude session id`)
+    }
+
     const id = randomUUID()
 
     // Plain interactive shell tab (feature 5) — no Claude.

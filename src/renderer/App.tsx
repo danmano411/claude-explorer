@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
+  newFilesTab, newTerminalTab, toPersisted, toControlTab, fromPersisted, needsSpawn,
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
 import {
@@ -16,7 +16,7 @@ import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, switchSpace,
 } from './spaces';
-import type { Space, TabGroup } from '../shared/types';
+import type { ControlRequest, ControlResult, Space, TabGroup } from '../shared/types';
 import { isTypingTarget } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
@@ -708,6 +708,116 @@ export function App() {
   const onOpenIde = (id: string) => { const p = cwdOf(id); if (p) window.api.ideOpen(p); };
   const onRename = (id: string, title: string) =>
     update(id, { title: title.trim() || (cwdOf(id) ? basename(cwdOf(id)!) : 'Tab'), renamed: true });
+
+  // --- KAN-39 control channel ----------------------------------------------
+  //
+  // Main asks, this answers, exactly once per request id. FOUR ops and no
+  // others; why `openClaudeSession` — the one op here that spawns — may not
+  // ride `menu:command` is recorded next to the channel constants in
+  // src/shared/ipc.ts and above `applyCli` here: menu:command is reachable from
+  // argv via sendPendingCli, and this channel is not reachable from anything.
+  //
+  // WHY A QUEUE RATHER THAN A PLAIN HANDLER. Requests arrive back-to-back with
+  // NO React commit between them. An op that answered from its enclosing
+  // closure would read the tab list as it was before the op in front of it —
+  // the same staleness KAN-37 fixed for the writers, except a functional
+  // updater cannot fix it here, because the answer has to leave the process and
+  // `setTabs` is not a way to return a value. So requests are queued and
+  // drained ONE PER COMMIT: the drain lives in an effect, React runs the newest
+  // render's copy of that effect, and it re-arms itself only after its op has
+  // settled. Five closeTabs in a row therefore each see one fewer tab, and a
+  // listTabs issued straight after an open sees the tab that open created —
+  // with no sleep anywhere, because the commit boundary IS the wait.
+  const controlQueue = useRef<ControlRequest[]>([]);
+  const controlBusy = useRef(false);
+  const [controlTick, setControlTick] = useState(0);
+
+  // Mount-once, same as onMenuCommand/onMenuSession. No ref-to-latest-closure
+  // needed on THIS half: it only enqueues, and the executor below is what has
+  // to be current — which the drain effect gets for free.
+  useEffect(() => window.api.onControlRequest((req) => {
+    controlQueue.current.push(req);
+    setControlTick((n) => n + 1); // the drain is an effect, so it needs a commit
+  }), []);
+
+  /**
+   * The ops switch. Throwing IS the error path — the drain turns any rejection
+   * into an `{ ok: false, error }` reply, so nothing escapes as an unhandled
+   * throw and no op ever fails silently.
+   */
+  const runControl = async (req: ControlRequest): Promise<ControlResult> => {
+    // main stopped waiting for this one, so starting it now is work nobody is
+    // listening for — and if the caller retried on that timeout, work done
+    // TWICE (two Claude processes on one folder). The queue is exactly where
+    // that happens: a request sat behind a slow op runs when it reaches the
+    // front, long after main rejected it. Both processes read the same system
+    // clock, so this is a direct comparison. What it CANNOT cover is the op
+    // that was already executing when the timeout fired — see ControlOp.
+    if (Date.now() > req.deadline) throw new Error('control: expired');
+    // Before restore commits, the restore effect ends in a REPLACING
+    // setTabs(restored) that would wipe a tab opened here — the race pendingCli
+    // and pendingSession queue around. Answered rather than queued: main times a
+    // request out in 15s, so an honest error a caller can retry beats a reply
+    // that may never arrive.
+    //
+    // listTabs is gated too, though nothing it does can be wiped: `tabs` is []
+    // until that setTabs(restored) lands, and [] is indistinguishable from "no
+    // tabs open". A caller 200ms after launch would be told the window is empty
+    // while four tabs are about to appear, and nothing in the reply lets it
+    // know to ask again. An error says exactly that, and `restoreDone` flips in
+    // the same synchronous block as setTabs(restored), so any drain that gets
+    // past here runs after a commit that includes the restored list.
+    if (!restoreDone.current) throw new Error('control: not ready');
+    switch (req.op) {
+      case 'listTabs':
+        // The whole store, every space: `tabs` IS the live tab list and a
+        // ControlTab names no space. Store order, i.e. the order tabs opened in.
+        return tabs.map((t) => toControlTab(t, status));
+      case 'closeTab': {
+        const { tabId } = req.args;
+        if (!tabs.some((t) => t.id === tabId)) throw new Error(`control: unknown tab ${tabId}`);
+        // ponytail: `closeTab` revokes membership from the ACTIVE space, so
+        // closing a tab a background space owns leaves that space's `tabIds`
+        // holding a dead id — harmless (sliceOf drops it, sanitize() prunes it
+        // on the next write) but untidy. Scope this to `activeSpace` if a
+        // caller ever needs closing to be space-exact.
+        closeTab(tabId);
+        return null;
+      }
+      case 'openViewerTab':
+        // Sourceless, exactly like applyCli's 'open-file' arm: a control caller
+        // is not a tab, so there is no group to inherit and it appends far
+        // right. Awaited so the tab exists before the reply goes out.
+        await openViewerTab(req.args.filePath, req.args.mode ?? 'file');
+        return null;
+      case 'openClaudeSession':
+        await openClaudeNewTab(req.args.cwd, req.args.resumeId);
+        return null;
+      default:
+        // Unreachable through the type, reachable across an IPC boundary.
+        throw new Error(`control: unknown op ${(req as { op: string }).op}`);
+    }
+  };
+
+  useEffect(() => {
+    if (controlBusy.current || !controlQueue.current.length) return;
+    const req = controlQueue.current.shift()!;
+    controlBusy.current = true;
+    // Two-arg `then`, not `.then().catch()`: the catch arm of a chain also sees
+    // a throw from the SUCCESS arm, which would put a second reply on the wire
+    // for one request id. These two are mutually exclusive by construction.
+    runControl(req).then(
+      (result) => window.api.controlReply({ id: req.id, ok: true, result }),
+      (e: unknown) => window.api.controlReply({
+        id: req.id, ok: false, error: e instanceof Error ? e.message : String(e),
+      }),
+    )
+      // Re-armed unconditionally, not just when something is queued: this bump
+      // and the op's own state writes land in ONE commit, so the next drain
+      // runs against them. An empty queue returns at the top, so the chain ends
+      // after a single spare render rather than spinning.
+      .finally(() => { controlBusy.current = false; setControlTick((n) => n + 1); });
+  }, [controlTick]);
 
   // --- spaces --------------------------------------------------------------
   //

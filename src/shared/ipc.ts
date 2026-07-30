@@ -12,6 +12,8 @@ import type {
   SearchDone,
   Workspace,
   TrashWarn,
+  ControlRequest,
+  ControlReply,
 } from './types'
 
 export const CH = {
@@ -73,6 +75,21 @@ export const CH = {
   // groups referencing tabs that no longer exist.
   workspaceGet: 'workspace:get',
   workspaceSet: 'workspace:set',
+  // --- KAN-39 control channel: the only main -> renderer REQUEST/RESPONSE
+  // path in the app. Two channels because the two halves travel in opposite
+  // directions — `control:request` is an event main sends (same shape as
+  // menu:command), `control:reply` is a renderer -> main send (same shape as
+  // pty:write) that main matches back to a pending promise by id. The live tab
+  // list is renderer React state; workspace:get is a debounced disk snapshot
+  // with no ptyId and no pty status in it, so it cannot answer for it.
+  //
+  // openClaudeSession rides THIS channel and not menu:command because it
+  // SPAWNS, and menu:command is reachable from argv (sendPendingCli in
+  // main/index.ts) with no authentication of any kind. Same structural
+  // reasoning as menuSession above; see main/cli.ts. There is no external
+  // caller of control:request yet — KAN-40 adds the first one.
+  controlRequest: 'control:request', // main -> renderer event
+  controlReply: 'control:reply',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -145,4 +162,10 @@ export interface Api {
   // there is nothing saved, so the renderer never branches on "first run".
   workspaceGet(): Promise<Workspace>
   workspaceSet(w: Workspace): Promise<void>
+  // --- KAN-39 control channel. Main asks, the renderer answers.
+  onControlRequest(cb: (req: ControlRequest) => void): () => void
+  /** Exactly once per request id. Fire-and-forget `send`, not `invoke`: this
+   *  IS the response, so awaiting it would be a second round trip. Main drops
+   *  a reply whose id it no longer has pending (timed out, or a duplicate). */
+  controlReply(reply: ControlReply): void
 }

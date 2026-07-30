@@ -218,3 +218,78 @@ export interface Workspace {
 export type SearchDone =
   | { ok: true; count: number; truncated: boolean }
   | { ok: false; reason: string; kind: 'cancelled' | 'norg' | 'badpattern' | 'error' }
+
+// --- KAN-39 control channel ------------------------------------------------
+
+/**
+ * One tab as `listTabs` reports it. NOT `Tab` and not `PersistedTab`: `Tab`
+ * lives in the renderer, and `PersistedTab` is a disk snapshot with no `ptyId`
+ * and no live status in it — which is the whole reason this channel exists
+ * rather than reusing `workspace:get`.
+ *
+ * `ptyId` is here because it is the only INJECTABLE correlation key. A tab id
+ * is minted in the renderer after the spawn resolves, so nothing outside the
+ * renderer can be handed one in advance; a ptyId can be, so a caller that
+ * knows its own pty can join itself to a tab.
+ *
+ * Deliberately no `groupId`: tab folders are M5's model and this channel does
+ * not speak it. `status` is absent for a tab with no process (files/viewer)
+ * and for a terminal tab whose pty has not emitted an event yet.
+ */
+export interface ControlTab {
+  id: string
+  ptyId?: string
+  view: TabView
+  cwd: string
+  title: string
+  terminalKind?: 'claude' | 'shell'
+  status?: PtyStatus
+}
+
+/**
+ * The four ops, and nothing else. Every arm names its target explicitly — no
+ * op defaults to the active tab. (The renderer MAY accept the literal
+ * `'active'` as a `tabId` alias; it must never be the only way to address one.)
+ *
+ * NEVER AUTO-RETRY A MUTATING OP ON A TIMEOUT. main gives up after
+ * CONTROL_TIMEOUT_MS, and a request that was still QUEUED when that happened is
+ * guaranteed not to run — the renderer refuses to start one whose `deadline`
+ * has passed. But an op that was already EXECUTING cannot be recalled: nothing
+ * un-spawns a Claude Code that is halfway up. So a timeout on
+ * `openClaudeSession` means "it may or may not have happened", and retrying it
+ * is how you end up with two Claude processes on one folder. Ask `listTabs` —
+ * idempotent, and the only one of the four safe to retry blindly — and decide
+ * from what it says.
+ *
+ * ponytail: a deadline stamped on the request, not a cancel channel. A real
+ * cancel needs main to send a `control:cancel` AND every op to become
+ * interruptible, which for `openClaudeSession` means killing a pty it has
+ * already been handed. Ceiling: the in-flight window (one op, up to 15s). Build
+ * the cancel when an op is slow enough that that window starts costing.
+ */
+export type ControlOp =
+  | { op: 'listTabs'; args?: undefined }
+  | { op: 'closeTab'; args: { tabId: string } }
+  | { op: 'openViewerTab'; args: { filePath: string; mode?: 'file' | 'diff' } }
+  | { op: 'openClaudeSession'; args: { cwd: string; resumeId?: string } }
+
+/** An op plus the correlation id main matches the reply back on, and the wall
+ *  clock instant past which the renderer must not START it — the epoch that
+ *  keeps a request main has already timed out from running later anyway. Both
+ *  processes read the same system clock, so there is no skew to allow for.
+ *  Required, not optional: control.ts is the only producer, and an unstamped
+ *  request would silently be one that never expires. */
+export type ControlRequest = ControlOp & { id: string; deadline: number }
+
+/**
+ * ponytail: one result type for all four ops — the rows for `listTabs`, `null`
+ * for the three mutating ones. Widen to a per-op result map when a caller
+ * actually needs the id of the tab `openViewerTab`/`openClaudeSession` landed
+ * on (KAN-40 is the first candidate; nothing needs it today).
+ */
+export type ControlResult = ControlTab[] | null
+
+/** Exactly one reply per request id. */
+export type ControlReply =
+  | { id: string; ok: true; result: ControlResult }
+  | { id: string; ok: false; error: string }

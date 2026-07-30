@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   newViewerTab, newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
-  closeTabList, openViewerTabList, type Tab,
+  closeTabList, openViewerTabList, toControlTab, type Tab,
 } from '../src/renderer/tabs'
-import type { PersistedTab } from '../src/shared/types'
+import type { PersistedTab, PtyStatus } from '../src/shared/types'
 
 describe('newViewerTab', () => {
   it('carries the file path and derives title + containing folder', () => {
@@ -221,5 +221,33 @@ describe('openViewerTabList', () => {
       expect(second.tabs).toBe(before) // same reference: the dedupe path, no move
       expect(second.id).toBe(first.id)
     })
+  })
+})
+
+describe('toControlTab (KAN-39 listTabs row)', () => {
+  const status = new Map<string, PtyStatus>([['pty-1', 'waiting'], ['tab-1', 'running']])
+
+  it('joins status by ptyId, not by tab id', () => {
+    const t: Tab = { ...newTerminalTab('C:\\repo', 'claude', 'pty-1', 'repo', 'sess'), id: 'tab-1' }
+    const row = toControlTab(t, status)
+    expect(row.ptyId).toBe('pty-1')
+    expect(row.status).toBe('waiting') // 'running' is the decoy keyed by tab id
+  })
+
+  it('reports no status for a tab with no process, and none for an unseen pty', () => {
+    expect(toControlTab(newFilesTab('C:\\repo'), status).status).toBeUndefined()
+    expect(toControlTab(newViewerTab('C:\\repo\\a.ts'), status).status).toBeUndefined()
+    expect(toControlTab(newTerminalTab('C:\\r', 'shell', 'pty-9', 'Terminal'), status).status).toBeUndefined()
+  })
+
+  it('carries the six identity fields and drops the M5 grouping model', () => {
+    const t: Tab = { ...newFilesTab('C:\\repo'), groupId: 'g1', pinned: true }
+    const row = toControlTab(t, status)
+    expect(row).toEqual({
+      id: t.id, ptyId: undefined, view: 'files', cwd: 'C:\\repo', title: 'repo',
+      terminalKind: undefined, status: undefined,
+    })
+    expect(Object.keys(row)).not.toContain('groupId')
+    expect(Object.keys(row)).not.toContain('pinned')
   })
 })
