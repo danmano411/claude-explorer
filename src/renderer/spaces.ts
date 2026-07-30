@@ -3,20 +3,60 @@
  * switch between: a named, ordered set of tab ids with its own remembered
  * active tab.
  *
+ * ## `space.tabIds` is AUTHORITATIVE for order and membership
+ *
+ * The workspace document has two tab-bearing arrays and only one of them may
+ * define order. It is this one. `Workspace.tabs` is an unordered store keyed by
+ * id — it says what a tab *is* (cwd, view, groupId); `tabIds` says which space
+ * shows it and in what order the strip draws it. Two consequences that are easy
+ * to get wrong:
+ *
+ *  - **Reorder is space-relative.** The strip renders `tabIds`, so the indices
+ *    a drag produces index `tabIds`, not `Workspace.tabs`. That is what
+ *    `reorderInSpace` is for; reordering the global array instead moves the
+ *    wrong tab as soon as a second space exists.
+ *  - **`groups.ts` contiguity applies to the space's slice**, not to the global
+ *    array. A group is drawn as one run inside one strip, and the strip is one
+ *    space's `tabIds`. `sanitize()` (src/main/workspace.ts) enforces this by
+ *    running `normalize()` over each space's member slice. An integrator wiring
+ *    a group-aware drag composes `reorderWithGroups` over the space's slice of
+ *    tab objects for the groupId decision, then feeds the resulting id order
+ *    back through `reorderInSpace` — this module holds ids only and cannot see
+ *    a groupId.
+ *
  * ## The invariant: a tab belongs to EXACTLY ONE space
  *
- * Every mutator here preserves it and `normalizeSpaces` restores it from
- * arbitrary input. Both failure directions are real bugs, not cosmetic:
+ * Every mutator here preserves it. It is *established* one layer down, by
+ * `sanitize()` in src/main/workspace.ts, which is the single repair path for
+ * the whole document (see "Where repair lives" below). Both failure directions
+ * are real bugs, not cosmetic:
  *
  *  - **Zero** spaces own a tab → the tab is unreachable. There is no UI that
  *    can show it, so a live Claude session keeps burning tokens with no way
  *    back to it and no way to close it. This is the worst outcome in the
- *    feature, which is why `normalizeSpaces` *adopts* orphans into the active
- *    space rather than dropping them.
+ *    feature, which is why `sanitize()` *adopts* orphans into the active space
+ *    rather than dropping them.
  *  - **Two** spaces own a tab → it renders in both, and PTY ownership becomes
  *    ambiguous: closing the space that "has" it would kill a process the other
  *    space is still showing. So `addTabToSpace` evicts the tab from every other
  *    space instead of just appending.
+ *
+ * Note what is NOT a violation: a space member with no `GridCell` in that
+ * space's `layout`. The tab strip is what makes a tab reachable — the grid is
+ * placement only, and clicking a strip tab shows it in the focused pane. So
+ * `addTabToSpace` has no obligation to find the tab a free cell.
+ *
+ * ## Where repair lives: `sanitize()`, and nowhere else
+ *
+ * Nothing here is total on a hand-edited `workspace.json`, and nothing here
+ * tries to be. Every document the renderer ever sees has already been through
+ * `sanitize()` — it is called on read *and* on write in src/main/workspace.ts,
+ * so there is no path from disk to these functions that skips it. It is what
+ * coerces types, drops members naming no tab, collapses duplicate space ids,
+ * gives a tab claimed by two spaces to the first, adopts orphans and repoints a
+ * dangling `activeSpaceId`. A second normalizer in the renderer would be a
+ * second thing to keep in step with the first, so there isn't one: the
+ * functions below assume a sanitized document and say so where it shows.
  *
  * ## Why deleting the last space is refused
  *
@@ -40,18 +80,28 @@
  * operation that intends process death, which is exactly why it returns
  * `closedTabIds` — that list, and only that list, is what may be killed.
  *
+ * ## Caller obligation 2: persist off `spaces`, not off the tab list
+ *
+ * A space is legally empty — `createSpace` makes one that way, and you are
+ * expected to be looking at it before you open anything in it. The persistence
+ * effect in App.tsx bails on `if (!tabs.length) return`, which means the write
+ * that would have recorded a brand-new empty space never happens and the space
+ * is gone on restart. The workspace document is `spaces` + `tabs`; it has to be
+ * written whenever EITHER changes, not only when there is a tab to write.
+ *
  * Written generically over a local structural type (see `Spaced`), in the shape
- * of `groups.ts`: pure, total, immutable in and out, no React, no IPC.
+ * of `groups.ts`: pure, immutable in and out, no React, no IPC.
  */
 
+import { reorder } from '../shared/tabreorder'
+
 /**
- * The minimal shape this module needs from a space. `Space`
- * (../shared/types.ts) does not yet carry `activeTabId` — another worker owns
- * that file this milestone — so nothing here imports it. Once
- * `activeTabId?: string` lands on `Space`, every exported function already
- * accepts it with zero changes: `Space` satisfies `Spaced` structurally, and
- * extra fields (`layout`) ride through the spreads untouched. Deliberately not
- * a duplicate `Space` interface.
+ * The minimal shape this module needs from a space — the `groups.ts` `Grouped`
+ * precedent, so nothing here imports `Space` and this file stays a leaf. `Space`
+ * (../shared/types.ts, `activeTabId` included since KAN-43) satisfies it
+ * structurally, and the fields it has that this module has no opinion about
+ * (`layout`) ride through the spreads untouched. Deliberately not a duplicate
+ * `Space` interface.
  */
 export type Spaced = { id: string; name: string; tabIds: string[]; activeTabId?: string }
 
@@ -92,8 +142,19 @@ function withoutTab<T extends Spaced>(s: T, tabId: string): T {
   return nextActive === undefined ? stripActiveTab({ ...s, tabIds }) : { ...s, tabIds, activeTabId: nextActive }
 }
 
-/** Appends a new empty space. Returns the new list and the new space's id (the
- *  caller needs it to switch to what it just created). */
+/**
+ * Appends a new empty space. Returns the new list and the new space's id (the
+ * caller needs it to switch to what it just created).
+ *
+ * Empty is the only kind of space you can create, and there is deliberately no
+ * `duplicateSpace`. "Save this arrangement as a new space" cannot mean anything
+ * under the exactly-one-owner invariant: copying the tab ids gives every tab two
+ * owners, and moving them (`createSpace` + `addTabToSpace`, which evicts) empties
+ * the space you were trying to snapshot. A real duplicate would have to clone the
+ * `Tab` records and spawn second PTYs, which is a tab-lifecycle decision that
+ * does not belong in a pure id-shuffling module. The menu item was dropped
+ * instead.
+ */
 export function createSpace<T extends Spaced>(spaces: readonly T[], name: string): { spaces: T[]; id: string } {
   const created = blank<T>(name)
   return { spaces: [...spaces, created], id: created.id }
@@ -115,6 +176,11 @@ export function renameSpace<T extends Spaced>(spaces: readonly T[], spaceId: str
  * moves you to the one that took its slot (or the one before it), so the caller
  * cannot accidentally keep pointing at a space that no longer exists. Feed it
  * to `switchSpace` to get the tab ids to render.
+ *
+ * The returned id ALWAYS resolves against the returned list, including when the
+ * `activeSpaceId` handed in named nothing — passing a stale one through
+ * untouched just because it was not the space being deleted would hand the
+ * caller a dangling id it never had a way to notice.
  */
 export function deleteSpace<T extends Spaced>(
   spaces: readonly T[],
@@ -129,7 +195,12 @@ export function deleteSpace<T extends Spaced>(
 
   const closedTabIds = [...spaces[i].tabIds]
   const next = spaces.filter((_, k) => k !== i)
-  const nextActiveSpaceId = spaceId === activeSpaceId ? (next[i] ?? next[i - 1]).id : activeSpaceId
+  const nextActiveSpaceId =
+    spaceId === activeSpaceId
+      ? (next[i] ?? next[i - 1]).id
+      : next.some((s) => s.id === activeSpaceId)
+        ? activeSpaceId
+        : next[0].id
   return { ok: true, spaces: next, activeSpaceId: nextActiveSpaceId, closedTabIds }
 }
 
@@ -181,6 +252,14 @@ export function setActiveTab<T extends Spaced>(spaces: readonly T[], spaceId: st
  *
  * No-op (same reference) for an unknown spaceId, or when the tab is already a
  * member of that space.
+ *
+ * That second no-op does NOT repair a dirty target: given a document where the
+ * tab is already listed in this space *and* in another one (or listed twice
+ * here), adding it again returns the list unchanged, two owners and all. That
+ * is deliberate. The precondition of every function in this module is a
+ * sanitized document, and `sanitize()` cannot hand out a two-owner document —
+ * so a dirty input here means a caller built one in memory, which repairing
+ * silently would hide. Repair belongs in one place; see the module doc.
  */
 export function addTabToSpace<T extends Spaced>(spaces: readonly T[], spaceId: string, tabId: string): T[] {
   const i = spaces.findIndex((s) => s.id === spaceId)
@@ -215,77 +294,31 @@ export function removeTabFromSpace<T extends Spaced>(spaces: readonly T[], space
 }
 
 /**
- * Repairs a space list after a restore from a possibly hand-edited
- * `workspace.json`. Total, and the only function here that will invent a space.
+ * Moves a tab within one space's order. Composes `tabreorder.reorder` rather
+ * than re-deriving the splice, exactly as `groups.reorderWithGroups` does.
  *
- *  - Membership is filtered to `knownTabIds`, so a space cannot reference a tab
- *    that does not exist.
- *  - A tab claimed by two spaces (or listed twice in one) is kept at its FIRST
- *    occurrence only — never two.
- *  - A known tab that no space claims is adopted by the active space — never
- *    zero. It lands somewhere visible on purpose: an orphan is likely a live
- *    session, and burying it in a space the user is not looking at is barely
- *    better than losing it.
- *  - Two spaces sharing an id are collapsed to the first: a duplicate id makes
- *    every lookup in this module ambiguous.
- *  - An `activeTabId` that is not a member of its own space is dropped.
- *  - At least one space exists afterwards, and `activeSpaceId` names one of
- *    them.
+ * `from` and `insert` index THAT SPACE'S `tabIds` — see the authority rule in
+ * the module doc. The strip renders `tabIds`, so a drag over it produces
+ * space-relative indices; handing them to a reorder over `Workspace.tabs`
+ * instead moves whichever tab happens to sit at that global index. `insert` is
+ * post-splice, the coordinate space `tabreorder.dropIndex` already returns.
  *
- * Deliberately does NOT invent an `activeTabId` for a space that has tabs but
- * no remembered active one: "no tab focused" is a legal state, and which tab a
- * pane focuses on arrival is the renderer's call, not persistence's.
+ * Membership does not change, so `activeTabId` stays valid by construction and
+ * is left alone. No-op (same reference) for an unknown spaceId, an out-of-range
+ * `from`, or a move that lands where it started; `insert` is clamped rather
+ * than thrown on, matching `reorderWithGroups`.
  */
-export function normalizeSpaces<T extends Spaced>(
+export function reorderInSpace<T extends Spaced>(
   spaces: readonly T[],
-  knownTabIds: readonly string[],
-  activeSpaceId: string,
-): { spaces: T[]; activeSpaceId: string } {
-  const known = new Set(knownTabIds)
-  const claimed = new Set<string>()
-  const spaceIds = new Set<string>()
-
-  const cleaned: T[] = []
-  for (const s of spaces) {
-    if (spaceIds.has(s.id)) continue
-    spaceIds.add(s.id)
-    const tabIds: string[] = []
-    for (const id of s.tabIds) {
-      if (!known.has(id) || claimed.has(id)) continue
-      claimed.add(id)
-      tabIds.push(id)
-    }
-    cleaned.push(tabIds.length === s.tabIds.length ? s : { ...s, tabIds })
-  }
-  if (cleaned.length === 0) cleaned.push(blank<T>('Space'))
-
-  const activeIdx = Math.max(
-    0,
-    cleaned.findIndex((s) => s.id === activeSpaceId),
-  )
-
-  const orphans: string[] = []
-  for (const id of knownTabIds) {
-    if (claimed.has(id)) continue
-    claimed.add(id) // a duplicated knownTabIds entry must not be adopted twice
-    orphans.push(id)
-  }
-  if (orphans.length > 0) {
-    const host = cleaned[activeIdx]
-    cleaned[activeIdx] = { ...host, tabIds: [...host.tabIds, ...orphans] }
-  }
-
-  const repaired = cleaned.map((s) =>
-    s.activeTabId !== undefined && !s.tabIds.includes(s.activeTabId) ? stripActiveTab(s) : s,
-  )
-
-  // Nothing to repair: same spaces, same order, same references — matching this
-  // module's no-op convention elsewhere. `activeSpaceId` is resolved
-  // independently, so an untouched list can still come back with a corrected
-  // active id.
-  const unchanged = repaired.length === spaces.length && repaired.every((s, i) => s === spaces[i])
-  return {
-    spaces: unchanged ? (spaces as T[]) : repaired,
-    activeSpaceId: cleaned[activeIdx].id,
-  }
+  spaceId: string,
+  from: number,
+  insert: number,
+): T[] {
+  const i = spaces.findIndex((s) => s.id === spaceId)
+  if (i === -1) return spaces as T[]
+  const { tabIds } = spaces[i]
+  if (from < 0 || from >= tabIds.length) return spaces as T[]
+  const clamped = Math.max(0, Math.min(insert, tabIds.length - 1))
+  if (clamped === from) return spaces as T[]
+  return replaceAt(spaces, i, { ...spaces[i], tabIds: reorder(tabIds, from, clamped) })
 }

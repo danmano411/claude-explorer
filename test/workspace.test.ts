@@ -156,3 +156,222 @@ describe('sanitize', () => {
     expect(sanitize(w).spaces[0].tabIds).toEqual(['t1', 't2'])
   })
 })
+
+/**
+ * KAN-45 review D-4: these four repairs used to live in a second normalizer in
+ * src/renderer/spaces.ts, re-implementing what sanitize() already did and
+ * disagreeing with it. They live here now, and only here.
+ */
+describe('sanitize — the spaces invariants', () => {
+  const plain = (): Workspace => ({
+    version: 1 as const,
+    groups: [],
+    tabs: [
+      { id: 't1', view: 'files' as const, cwd: 'C:\\a', title: 'a' },
+      { id: 't2', view: 'files' as const, cwd: 'C:\\b', title: 'b' },
+      { id: 't3', view: 'files' as const, cwd: 'C:\\c', title: 'c' },
+    ],
+    spaces: [
+      { id: 's1', name: 'One', tabIds: ['t1'], layout: null },
+      { id: 's2', name: 'Two', tabIds: ['t2'], layout: null },
+    ],
+    activeSpaceId: 's1',
+  })
+
+  // Two owners means it renders in both spaces and PTY ownership is ambiguous:
+  // closing the space that "has" it kills a process the other is still showing.
+  it('gives a tab claimed by two spaces to the first one only', () => {
+    const w = plain()
+    w.spaces[0].tabIds = ['t1', 't2']
+    w.spaces[1].tabIds = ['t2', 't3']
+    const out = sanitize(w)
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't2'])
+    expect(out.spaces[1].tabIds).toEqual(['t3'])
+  })
+
+  it('collapses two spaces sharing an id, keeping the first', () => {
+    const w = plain()
+    w.spaces[1].id = 's1'
+    const out = sanitize(w)
+    expect(out.spaces).toHaveLength(1)
+    expect(out.spaces[0].name).toBe('One')
+  })
+
+  // Zero owners is the worst outcome in the feature: no UI can show the tab, so
+  // a live Claude session keeps running with no way back to it and no way to
+  // close it. Adoption lands it in the space the user is looking at.
+  it('adopts a tab no space claims into the ACTIVE space', () => {
+    const out = sanitize({ ...plain(), activeSpaceId: 's2' })
+    expect(out.spaces[1].tabIds).toEqual(['t2', 't3'])
+    expect(out.spaces[0].tabIds).toEqual(['t1'])
+  })
+
+  it('adopts into the first space when activeSpaceId names nothing', () => {
+    const out = sanitize({ ...plain(), activeSpaceId: 'gone' })
+    expect(out.activeSpaceId).toBe('s1')
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't3'])
+  })
+
+  it('invents a space when there are none, and every tab lands in it', () => {
+    const out = sanitize({ ...plain(), spaces: [] })
+    expect(out.spaces).toHaveLength(1)
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't2', 't3'])
+    expect(out.activeSpaceId).toBe(out.spaces[0].id)
+  })
+
+  // An adopted tab may belong to a group that already has a run in that space;
+  // appending it blind would split the run the TabBar draws as one strip.
+  it('keeps a group contiguous after adopting an orphan into its space', () => {
+    const w = plain()
+    w.groups = [{ id: 'g1', name: 'Repo', color: '#C15F3C', collapsed: false }]
+    w.tabs[0].groupId = 'g1'
+    w.tabs[2].groupId = 'g1'
+    w.spaces[0].tabIds = ['t1', 't2'] // t3 orphaned, and it is in t1's group
+    w.spaces[1].tabIds = []
+    expect(sanitize(w).spaces[0].tabIds).toEqual(['t1', 't3', 't2'])
+  })
+
+  // THE authority rule (see the module doc in src/renderer/spaces.ts): `tabIds`
+  // defines order, `tabs` is an unordered store. Deriving membership order from
+  // `tabs` instead silently undoes every reorderInSpace on the next save.
+  it('believes tabIds order over the order of the global tabs array', () => {
+    const w = plain()
+    w.spaces[0].tabIds = ['t3', 't1']
+    w.spaces[1].tabIds = ['t2']
+    const out = sanitize(w)
+    expect(out.spaces[0].tabIds).toEqual(['t3', 't1'])
+    expect(out.tabs.map((t) => t.id)).toEqual(['t1', 't2', 't3']) // untouched, and irrelevant
+  })
+
+  it('survives a reorder round-trip, which is the point of the rule above', () => {
+    const w = plain()
+    w.spaces[0].tabIds = ['t1', 't3']
+    w.spaces[1].tabIds = ['t2']
+    const saved = sanitize(w)
+    saved.spaces[0].tabIds = ['t3', 't1'] // the user dragged t3 left
+    expect(sanitize(saved).spaces[0].tabIds).toEqual(['t3', 't1'])
+  })
+
+  // A cell naming a tab another space owns would paint that space's tab into
+  // this one's pane — the same phantom the one-owner rule exists to prevent.
+  it('drops a grid cell pointing at a tab this space does not own', () => {
+    const w = plain()
+    w.spaces[0].layout = {
+      cols: 2, rows: 1,
+      cells: [
+        { tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+        { tabId: 't2', col: 1, row: 0, colSpan: 1, rowSpan: 1 }, // s2 owns t2
+      ],
+    }
+    expect(sanitize(w).spaces[0].layout!.cells.map((c) => c.tabId)).toEqual(['t1'])
+  })
+
+  // The converse is NOT a defect (review finding 4): the tab strip is what makes
+  // a tab reachable; the grid is placement only.
+  it('leaves an adopted tab with no grid cell alone', () => {
+    const w = plain()
+    w.spaces[0].layout = {
+      cols: 1, rows: 1,
+      cells: [{ tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 }],
+    }
+    const out = sanitize(w)
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't3'])
+    expect(out.spaces[0].layout!.cells.map((c) => c.tabId)).toEqual(['t1'])
+  })
+
+  // An empty space is legal — createSpace makes one, and you look at it before
+  // you open anything in it. Dropping it on save loses the space outright.
+  it('keeps a space with no tabs at all', () => {
+    const w = plain()
+    w.spaces[1].tabIds = []
+    w.spaces[0].tabIds = ['t1', 't2', 't3']
+    expect(sanitize(w).spaces.map((s) => s.id)).toEqual(['s1', 's2'])
+  })
+
+  // Review finding 5: the old renderer-side normalizer threw on any of these.
+  // sanitize() is the guard that made that survivable, so it must really hold.
+  it('is total on garbage inside the spaces array', () => {
+    const w = { ...plain(), spaces: [null, { name: 'no id' }, { id: 7 }, { id: 's1', tabIds: null }] }
+    expect(() => sanitize(w)).not.toThrow()
+    const out = sanitize(w)
+    expect(out.spaces).toHaveLength(1)
+    expect(out.spaces[0].id).toBe('s1')
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't2', 't3']) // all adopted
+  })
+})
+
+describe('sanitize — randomised garbage sweep', () => {
+  // Deterministic PRNG (mulberry32) so the sweep is reproducible, not flaky.
+  function mulberry32(seed: number) {
+    let a = seed
+    return () => {
+      a |= 0
+      a = (a + 0x6d2b79f5) | 0
+      let t = Math.imul(a ^ (a >>> 15), 1 | a)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+
+  it('restores every spaces invariant from arbitrary garbage', () => {
+    const tabPool = ['t1', 't2', 't3', 't4', 'ghost1', 'ghost2']
+    for (let seed = 1; seed <= 60; seed++) {
+      const rand = mulberry32(seed * 104729)
+      const pick = <X>(xs: readonly X[]): X => xs[Math.floor(rand() * xs.length)]
+
+      // Deliberately broken, and broken BELOW the type level too — nulls, wrong
+      // types, missing fields. That is the whole reason this sweep moved here:
+      // sanitize() takes `unknown` and is the app's only guard, so "total on
+      // arbitrary garbage" has to be true of THIS function, not merely of a
+      // renderer helper that never saw a raw file.
+      const tabs: unknown[] = []
+      for (const id of tabPool) {
+        if (id.startsWith('ghost') && rand() < 0.8) continue
+        tabs.push(rand() < 0.15 ? { id, cwd: null } : { id, view: 'files', cwd: 'C:\\x', title: id })
+      }
+      if (rand() < 0.3) tabs.push(null)
+
+      const spaces: unknown[] = []
+      for (let i = 0; i < Math.floor(rand() * 5); i++) {
+        const roll = rand()
+        if (roll < 0.1) { spaces.push(null); continue }
+        if (roll < 0.18) { spaces.push({ name: 'no id at all' }); continue }
+        const tabIds: string[] = []
+        for (let k = 0; k < Math.floor(rand() * 5); k++) tabIds.push(pick(tabPool))
+        spaces.push({
+          id: pick(['sA', 'sB', 'sC']),
+          name: `space-${i}`,
+          tabIds: rand() < 0.15 ? null : tabIds,
+          activeTabId: rand() < 0.7 ? pick([...tabPool, 'nothing']) : undefined,
+          layout:
+            rand() < 0.4
+              ? { cols: 2, rows: 1, cells: [{ tabId: pick(tabPool), col: 0, row: 0, colSpan: 1, rowSpan: 1 }] }
+              : null,
+        })
+      }
+
+      const raw = { version: 1, tabs, spaces, groups: [], activeSpaceId: pick(['sA', 'sB', 'sC', 'sZ']) }
+      const out = sanitize(raw)
+      const known = out.tabs.map((t) => t.id)
+
+      expect(out.spaces.length).toBeGreaterThan(0)
+      // Exactly one owner per tab: never zero (unreachable live session), never
+      // two (ambiguous PTY ownership).
+      const counts = new Map<string, number>()
+      for (const s of out.spaces) for (const id of s.tabIds) counts.set(id, (counts.get(id) ?? 0) + 1)
+      expect(counts.size).toBe(new Set(known).size)
+      for (const id of known) expect(counts.get(id)).toBe(1)
+      // No space remembers an active tab it does not own.
+      for (const s of out.spaces) {
+        if (s.activeTabId !== undefined) expect(s.tabIds).toContain(s.activeTabId)
+        // No pane may show a tab this space does not own.
+        for (const c of s.layout?.cells ?? []) expect(s.tabIds).toContain(c.tabId)
+      }
+      expect(out.spaces.some((s) => s.id === out.activeSpaceId)).toBe(true)
+      expect(new Set(out.spaces.map((s) => s.id)).size).toBe(out.spaces.length)
+      // Idempotent: a second pass has nothing left to fix. Also what makes the
+      // read/write symmetry safe — sanitize() runs on both.
+      expect(sanitize(out)).toEqual(out)
+    }
+  })
+})

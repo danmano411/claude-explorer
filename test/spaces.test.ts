@@ -4,20 +4,24 @@ import {
   addTabToSpace,
   createSpace,
   deleteSpace,
-  normalizeSpaces,
   removeTabFromSpace,
   renameSpace,
+  reorderInSpace,
   setActiveTab,
   switchSpace,
 } from '../src/renderer/spaces'
 
 /**
- * The real persisted type, widened with the field KAN-43 is adding to it right
- * now (`Space.activeTabId?: string`). Once that lands this alias collapses to
- * `Space` with no other change — which is the point of writing the module over
- * a structural type.
+ * The real persisted type. KAN-43 has landed `activeTabId?: string` on `Space`
+ * itself, so this is now a plain alias — kept only so the sweep's local helpers
+ * stay readable. The module is still written over a structural type (`Spaced`),
+ * which is why `Space` drops straight in.
+ *
+ * Document repair (dedupe, orphan adoption, space-id collapse, dangling
+ * `activeSpaceId`) is NOT tested here: it lives in `sanitize()`, and its tests
+ * live with it in test/workspace.test.ts.
  */
-type S = Space & { activeTabId?: string }
+type S = Space
 
 const space = (id: string, tabIds: string[] = [], activeTabId?: string): S => ({
   id,
@@ -120,6 +124,15 @@ describe('deleteSpace', () => {
     const spaces = [space('a'), space('b'), space('c')]
     const result = deleteSpace(spaces, 'c', 'a')
     expect(result.ok && result.activeSpaceId).toBe('c')
+  })
+  // Passing a stale id straight back out would hand the caller a dangling
+  // activeSpaceId it had no way to notice — the switcher would then render
+  // nothing and every subsequent op would miss its findIndex.
+  it('never returns an activeSpaceId that names nothing, even when handed one', () => {
+    const spaces = [space('a'), space('b')]
+    const result = deleteSpace(spaces, 'GARBAGE', 'b')
+    expect(result.ok && result.activeSpaceId).toBe('a')
+    expect(result.ok && result.spaces.some((s) => s.id === result.activeSpaceId)).toBe(true)
   })
   it('does not mutate its input', () => {
     const spaces = [space('a', ['t1']), space('b')]
@@ -241,11 +254,17 @@ describe('addTabToSpace', () => {
   })
   it('does not validate the tabId against a tab registry — it has none', () => {
     // Documents the boundary: membership and the tab list are separate here, so
-    // an id that names no tab is accepted and left for normalizeSpaces to sweep
-    // up. Callers pass live tab ids; see the module doc comment.
+    // an id that names no tab is accepted. Sweeping it up is sanitize()'s job
+    // (test/workspace.test.ts), not a second repair path in here.
     const result = addTabToSpace([space('a')], 'a', 'nosuchtab')
     expect(result[0].tabIds).toEqual(['nosuchtab'])
-    expect(normalizeSpaces(result, [], 'a').spaces[0].tabIds).toEqual([])
+  })
+  // Pins the documented precondition rather than a wish: the input below cannot
+  // come out of sanitize(), so repairing it here would be a second normalizer
+  // that only ever fires for a caller that already broke the invariant.
+  it('does NOT repair a dirty target — a two-owner input stays two-owner', () => {
+    const spaces = [space('a', ['t1']), space('b', ['t1', 't1'])]
+    expect(addTabToSpace(spaces, 'b', 't1')).toBe(spaces)
   })
   it('does not mutate its input', () => {
     const spaces = [space('a', ['t1', 't2'], 't2'), space('b', ['t3'])]
@@ -290,101 +309,44 @@ describe('removeTabFromSpace', () => {
   })
 })
 
-describe('normalizeSpaces', () => {
-  it('leaves an already-consistent list untouched (same reference)', () => {
-    const spaces = [space('a', ['t1'], 't1'), space('b', ['t2'])]
-    const result = normalizeSpaces(spaces, ['t1', 't2'], 'a')
-    expect(result.spaces).toBe(spaces)
-    expect(result.activeSpaceId).toBe('a')
+describe('reorderInSpace', () => {
+  it('moves a tab within the space order', () => {
+    const result = reorderInSpace([space('a', ['t1', 't2', 't3'])], 'a', 0, 2)
+    expect(result[0].tabIds).toEqual(['t2', 't3', 't1'])
   })
-  it('drops tab ids with no tab', () => {
-    const result = normalizeSpaces([space('a', ['t1', 'ghost', 't2'])], ['t1', 't2'], 'a')
-    expect(result.spaces[0].tabIds).toEqual(['t1', 't2'])
+  it('indexes THIS space, not a global list — a second space is untouched', () => {
+    const spaces = [space('a', ['t1', 't2']), space('b', ['t3', 't4'])]
+    const result = reorderInSpace(spaces, 'b', 0, 1)
+    expect(result[0]).toBe(spaces[0])
+    expect(result[1].tabIds).toEqual(['t4', 't3'])
   })
-  it('keeps a tab claimed by two spaces at its first occurrence only', () => {
-    const spaces = [space('a', ['t1', 't2']), space('b', ['t2', 't3'])]
-    const result = normalizeSpaces(spaces, ['t1', 't2', 't3'], 'a')
-    expect(result.spaces[0].tabIds).toEqual(['t1', 't2'])
-    expect(result.spaces[1].tabIds).toEqual(['t3'])
-    expect(ownedExactlyOnce(result.spaces, ['t1', 't2', 't3'])).toBe(true)
+  it('changes order only — membership and the active tab survive', () => {
+    const result = reorderInSpace([space('a', ['t1', 't2', 't3'], 't1')], 'a', 0, 2)
+    expect(result[0].activeTabId).toBe('t1')
+    expect([...result[0].tabIds].sort()).toEqual(['t1', 't2', 't3'])
   })
-  it('de-duplicates a tab listed twice within one space', () => {
-    const result = normalizeSpaces([space('a', ['t1', 't1'])], ['t1'], 'a')
-    expect(result.spaces[0].tabIds).toEqual(['t1'])
+  it('is a no-op (same reference) for an unknown spaceId', () => {
+    const spaces = [space('a', ['t1', 't2'])]
+    expect(reorderInSpace(spaces, 'ghost', 0, 1)).toBe(spaces)
   })
-  it('adopts an orphan tab into the active space — never zero owners', () => {
-    const spaces = [space('a', ['t1']), space('b', ['t2'])]
-    const result = normalizeSpaces(spaces, ['t1', 't2', 'orphan'], 'b')
-    expect(result.spaces[1].tabIds).toEqual(['t2', 'orphan'])
-    expect(ownedExactlyOnce(result.spaces, ['t1', 't2', 'orphan'])).toBe(true)
+  it('is a no-op for an out-of-range from, rather than dropping a tab', () => {
+    const spaces = [space('a', ['t1', 't2'])]
+    expect(reorderInSpace(spaces, 'a', 5, 0)).toBe(spaces)
+    expect(reorderInSpace(spaces, 'a', -1, 0)).toBe(spaces)
   })
-  it('adopts orphans into the first space when the active id does not resolve', () => {
-    const spaces = [space('a', []), space('b', [])]
-    const result = normalizeSpaces(spaces, ['orphan'], 'ghost')
-    expect(result.activeSpaceId).toBe('a')
-    expect(result.spaces[0].tabIds).toEqual(['orphan'])
+  it('is a no-op when the move lands where it started', () => {
+    const spaces = [space('a', ['t1', 't2'])]
+    expect(reorderInSpace(spaces, 'a', 1, 1)).toBe(spaces)
   })
-  it('adopts a duplicated knownTabIds entry exactly once', () => {
-    const result = normalizeSpaces([space('a', [])], ['t1', 't1'], 'a')
-    expect(result.spaces[0].tabIds).toEqual(['t1'])
-  })
-  it('drops an activeTabId that is not in its own space', () => {
-    const spaces = [space('a', ['t1'], 't2'), space('b', ['t2'], 't2')]
-    const result = normalizeSpaces(spaces, ['t1', 't2'], 'a')
-    expect(result.spaces[0].activeTabId).toBeUndefined()
-    expect(result.spaces[1].activeTabId).toBe('t2')
-  })
-  it('drops an activeTabId whose tab was stolen by an earlier space', () => {
-    const spaces = [space('a', ['t1']), space('b', ['t1'], 't1')]
-    const result = normalizeSpaces(spaces, ['t1'], 'a')
-    expect(result.spaces[1].tabIds).toEqual([])
-    expect(result.spaces[1].activeTabId).toBeUndefined()
-    expect(activeTabsAreMembers(result.spaces)).toBe(true)
-  })
-  it('does not invent an activeTabId for a space that has tabs but remembers none', () => {
-    const result = normalizeSpaces([space('a', ['t1', 't2'])], ['t1', 't2'], 'a')
-    expect(result.spaces[0].activeTabId).toBeUndefined()
-  })
-  it('collapses two spaces sharing an id', () => {
-    const spaces = [space('a', ['t1']), space('a', ['t2'])]
-    const result = normalizeSpaces(spaces, ['t1', 't2'], 'a')
-    expect(result.spaces).toHaveLength(1)
-    expect(result.spaces[0].tabIds).toEqual(['t1', 't2']) // t2 re-adopted as an orphan
-    expect(ownedExactlyOnce(result.spaces, ['t1', 't2'])).toBe(true)
-  })
-  it('invents a space when there are none, and every tab lands in it', () => {
-    const result = normalizeSpaces<S>([], ['t1', 't2'], 'ghost')
-    expect(result.spaces).toHaveLength(1)
-    expect(result.spaces[0].tabIds).toEqual(['t1', 't2'])
-    expect(result.activeSpaceId).toBe(result.spaces[0].id)
-    expect(result.spaces[0].layout).toBeNull()
-  })
-  it('repoints an activeSpaceId that names nothing', () => {
-    const spaces = [space('a'), space('b')]
-    expect(normalizeSpaces(spaces, [], 'ghost').activeSpaceId).toBe('a')
-  })
-  it('preserves fields it knows nothing about, like layout', () => {
-    const withLayout: S = {
-      id: 'a',
-      name: 'a',
-      tabIds: ['t1', 'ghost'],
-      layout: { cols: 2, rows: 1, cells: [{ tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 }] },
-    }
-    const result = normalizeSpaces([withLayout], ['t1'], 'a')
-    expect(result.spaces[0].layout).toEqual(withLayout.layout)
+  it('clamps an out-of-range insert instead of throwing', () => {
+    const result = reorderInSpace([space('a', ['t1', 't2', 't3'])], 'a', 0, 99)
+    expect(result[0].tabIds).toEqual(['t2', 't3', 't1'])
   })
   it('does not mutate its input', () => {
-    const spaces = [space('a', ['t1', 'ghost'], 'ghost'), space('b', ['t1'])]
+    const spaces = [space('a', ['t1', 't2', 't3'], 't3')]
     const snapshot = structuredClone(spaces)
-    normalizeSpaces(spaces, ['t1'], 'nope')
+    reorderInSpace(spaces, 'a', 2, 0)
     expect(spaces).toEqual(snapshot)
-  })
-  it('is idempotent', () => {
-    const spaces = [space('a', ['t1', 't2', 'ghost'], 'ghost'), space('b', ['t2'], 't2')]
-    const once = normalizeSpaces(spaces, ['t1', 't2', 't3'], 'ghost')
-    const twice = normalizeSpaces(once.spaces, ['t1', 't2', 't3'], once.activeSpaceId)
-    expect(twice.spaces).toBe(once.spaces)
-    expect(twice.activeSpaceId).toBe(once.activeSpaceId)
   })
 })
 
@@ -406,14 +368,18 @@ describe('exactly-one-space invariant sweep', () => {
       const rand = mulberry32(seed * 7919)
       const pick = <X>(xs: readonly X[]): X => xs[Math.floor(rand() * xs.length)]
 
-      // Start deliberately dirty, so the sweep also exercises the repair path.
+      // Starts CLEAN, because that is now the real precondition: sanitize()
+      // (test/workspace.test.ts) is what turns a hand-edited file into this,
+      // and these mutators are only ever handed its output. The dirt the sweep
+      // still throws at them is ids that name nothing — ghost spaces, ghost
+      // tabs, a ghost activeSpaceId — which no sanitizer can rule out because
+      // they come from the UI, not from disk.
       let known = ['t1', 't2', 't3', 't4', 't5', 't6']
-      let spaces: S[] = [space('s0', ['t1', 't2', 't2', 'ghost'], 'ghost'), space('s1', ['t2', 't3'])]
-      let activeSpaceId = 'nosuchspace'
-      ;({ spaces, activeSpaceId } = normalizeSpaces(spaces, known, activeSpaceId))
+      let spaces: S[] = [space('s0', ['t1', 't2', 't3'], 't2'), space('s1', ['t4', 't5', 't6'])]
+      let activeSpaceId = 's0'
 
       for (let step = 0; step < 60; step++) {
-        const op = Math.floor(rand() * 7)
+        const op = Math.floor(rand() * 8)
         const spaceId = pick([...spaces.map((s) => s.id), 'ghostspace'])
         const tabId = pick([...known, 'ghosttab'])
 
@@ -422,7 +388,13 @@ describe('exactly-one-space invariant sweep', () => {
         } else if (op === 1) {
           spaces = renameSpace(spaces, spaceId, `renamed-${step}`)
         } else if (op === 2) {
-          const result = deleteSpace(spaces, activeSpaceId, spaceId)
+          // Sometimes hand it an activeSpaceId that names nothing. A caller
+          // CAN hold a stale one (a space deleted in another code path, a
+          // restore race), and passing it back out untouched would leave the
+          // switcher pointing at nothing — the invariant assertion below is
+          // what catches that.
+          const activeArg = rand() < 0.25 ? 'ghostactive' : activeSpaceId
+          const result = deleteSpace(spaces, activeArg, spaceId)
           if (result.ok) {
             spaces = result.spaces
             activeSpaceId = result.activeSpaceId
@@ -454,12 +426,31 @@ describe('exactly-one-space invariant sweep', () => {
           const before = spaces
           spaces = addTabToSpace(spaces, spaceId, opened)
           if (spaces !== before && !known.includes(opened)) known = [...known, opened]
-        } else {
+        } else if (op === 6) {
           // Removing membership without a destination is only correct when the
           // tab is being closed, so model exactly that: the tab leaves `known`.
           const before = spaces
           spaces = removeTabFromSpace(spaces, spaceId, tabId)
           if (spaces !== before) known = known.filter((id) => id !== tabId)
+        } else {
+          // Reorder is order-only. `from`/`insert` deliberately run one past the
+          // end so out-of-range indices — which a drag from a strip that just
+          // lost a tab really does produce — are swept too.
+          const len = spaces.find((s) => s.id === spaceId)?.tabIds.length ?? 0
+          const before = spaces.map((s) => [s.id, [...s.tabIds].sort().join(',')] as const)
+          spaces = reorderInSpace(
+            spaces,
+            spaceId,
+            Math.floor(rand() * (len + 2)) - 1,
+            Math.floor(rand() * (len + 2)) - 1,
+          )
+          // Every space keeps exactly the members it had: a reorder that edited
+          // the wrong space, or dropped/duplicated a tab, changes one of these
+          // signatures. (The global assertions below would miss a swap between
+          // two spaces of equal size.)
+          for (const [id, signature] of before) {
+            expect([...spaces.find((s) => s.id === id)!.tabIds].sort().join(',')).toBe(signature)
+          }
         }
 
         // --- the invariants, after EVERY single operation ---
@@ -475,35 +466,4 @@ describe('exactly-one-space invariant sweep', () => {
     }
   })
 
-  it('normalizeSpaces restores the invariant from arbitrary garbage', () => {
-    const tabPool = ['t1', 't2', 't3', 't4', 'ghost1', 'ghost2']
-    for (let seed = 1; seed <= 60; seed++) {
-      const rand = mulberry32(seed * 104729)
-      const pick = <X>(xs: readonly X[]): X => xs[Math.floor(rand() * xs.length)]
-
-      // Random, deliberately broken input: repeated space ids, tabs claimed by
-      // several spaces, ids of tabs that do not exist, bogus activeTabIds.
-      const known = tabPool.filter((id) => !id.startsWith('ghost') || rand() < 0.2)
-      const spaces: S[] = []
-      const spaceCount = Math.floor(rand() * 4) // 0..3, including the empty list
-      for (let i = 0; i < spaceCount; i++) {
-        const tabIds: string[] = []
-        for (let k = 0; k < Math.floor(rand() * 5); k++) tabIds.push(pick(tabPool))
-        const activeTabId = rand() < 0.7 ? pick([...tabPool, 'nothing']) : undefined
-        spaces.push(space(pick(['sA', 'sB', 'sC']), tabIds, activeTabId))
-      }
-      const activeSpaceId = pick(['sA', 'sB', 'sC', 'sZ'])
-
-      const result = normalizeSpaces(spaces, known, activeSpaceId)
-
-      expect(result.spaces.length).toBeGreaterThan(0)
-      expect(ownedExactlyOnce(result.spaces, known)).toBe(true)
-      expect(activeTabsAreMembers(result.spaces)).toBe(true)
-      expect(result.spaces.some((s) => s.id === result.activeSpaceId)).toBe(true)
-      expect(new Set(result.spaces.map((s) => s.id)).size).toBe(result.spaces.length)
-      // Idempotent: a second pass has nothing left to fix.
-      const again = normalizeSpaces(result.spaces, known, result.activeSpaceId)
-      expect(again.spaces).toBe(result.spaces)
-    }
-  })
 })
