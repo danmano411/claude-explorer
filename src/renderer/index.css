@@ -620,10 +620,16 @@ body {
 }
 
 /* The focused pane's ring, applied by App.tsx only while a split is up (a lone
-   pane needs no "which one is focused"). An inset ring rather than a border,
-   because a border shrinks the content box and would force every terminal in
-   the grid to re-fit on every focus change. */
+   pane needs no "which one is focused").
+
+   An OUTLINE pulled inwards, not a border and not an inset box-shadow. A border
+   shrinks the content box and would force every terminal in the grid to re-fit
+   on every focus change. An inset box-shadow keeps the box but paints under the
+   element's own descendants, so a pane holding a file browser (opaque nav bar,
+   opaque list) showed almost none of it — outlines are painted in the last step
+   of the painting order, above every descendant, and cost no layout at all. */
 .pane-focused {
-  box-shadow: inset 0 0 0 2px var(--clay);
+  outline: 2px solid var(--clay);
+  outline-offset: -2px;
   z-index: 1; /* the ring reads as continuous over the neighbour's edge */
 }
