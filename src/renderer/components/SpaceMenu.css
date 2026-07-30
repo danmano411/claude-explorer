@@ -1,0 +1,62 @@
+/* SpaceMenu — lives at the left edge of the tab strip (KAN-45).
+ * New stylesheet per the M5 fan-out constraint (App.tsx/index.css are owned
+ * by parallel tickets this milestone); everything below reuses existing
+ * Retro Claude custom properties, no new palette.
+ *
+ * At integration: fold this file's rules into index.css next to the
+ * .recentmenu / .ctx-menu blocks it mirrors, and drop this import.
+ */
+
+.spacemenu { position: relative; margin-right: 8px; align-self: center; }
+
+.spacemenu-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 160px;
+  font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  background: var(--bg-panel); border: 1px solid var(--line);
+  padding: 5px 12px; border-radius: var(--radius); cursor: pointer;
+}
+.spacemenu-btn:hover { border-color: var(--clay); color: var(--clay); }
+.spacemenu-btn:focus-visible { outline: 2px solid var(--clay); outline-offset: 1px; }
+
+/* Long space names truncate rather than push the tab strip wider — same
+   fix KAN-33 applied to tab titles. */
+.spacemenu-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.spacemenu-dropdown {
+  position: absolute; top: 100%; left: 0; z-index: 60;
+  min-width: 220px; max-width: 320px;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  box-shadow: 3px 3px 0 var(--line);
+  padding: 4px 0;
+}
+
+.spacemenu-list { list-style: none; margin: 0; padding: 0; }
+.spacemenu-sep { height: 1px; margin: 4px 0; background: var(--line); }
+
+.spacemenu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  background: transparent; border: none; text-align: left;
+  padding: 6px 14px; cursor: pointer;
+}
+.spacemenu-item:hover, .spacemenu-item:focus-visible { background: var(--clay-soft); outline: none; }
+.spacemenu-item.active { color: var(--clay); }
+
+.spacemenu-check { flex: none; width: 1.2em; color: var(--clay); }
+
+.spacemenu-item-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.spacemenu-accel {
+  flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft);
+}
+
+.spacemenu-rename {
+  font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--clay); border-radius: 3px;
+  padding: 5px 12px; width: calc(100% - 24px); margin: 0 12px;
+}
