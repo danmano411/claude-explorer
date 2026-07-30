@@ -116,6 +116,20 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+  // Without this, mainWindow stays a truthy-but-destroyed BrowserWindow after
+  // the user closes it, for as long as will-quit's flushAll() keeps the
+  // process alive. second-instance / sendPendingCli / registerPtyHandlers'
+  // and registerSearchHandlers' getWindow() callbacks all read the same
+  // global; every one of them already guards with `?.` or `if (mainWindow)`,
+  // which only works when null actually means null.
+  mainWindow.on('closed', () => { mainWindow = null })
+  // ponytail: this closes the throw, not the underlying hang — while the
+  // primary is alive-but-windowless (mid-flushAll, or a throw before
+  // createWindow()), the lock is still held and a new launch's
+  // requestSingleInstanceLock() fails, so it app.exit(0)s with nothing to
+  // show. The app is unlaunchable until the zombie process is killed. Accepted
+  // per review; recreate the window on second-instance-with-no-mainWindow if
+  // this is ever reported for real.
   mainWindow.webContents.once('did-finish-load', () => {
     windowReady = true
     sendPendingTrashWarn()
@@ -153,8 +167,10 @@ app.whenReady().then(() => {
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
   buildMenu()
-  // Parsed here, acted on only once the renderer says did-finish-load, so a
-  // cold-start argv path can never jump ahead of sweep() above.
+  // Parsed here, but sweep() above is fire-and-forget (`void sweep().then(...)`)
+  // and did-finish-load routinely fires before it settles, so this can in fact
+  // land before sweep() finishes. That is harmless: opening a tab pushes
+  // nothing onto the undo stack, which is the only thing D-1 cares about.
   pendingCli = resolveCliIntent(parseCliArgs(process.argv, process.cwd()))
   createWindow()
   initUpdater()

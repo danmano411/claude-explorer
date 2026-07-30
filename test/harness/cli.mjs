@@ -109,11 +109,18 @@ console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
 
   // A FileBrowser is only mounted while the active tab is a files view, so
   // .entry rows on screen prove it is one — and .entry-open is the existing
-  // one-click launch affordance the staging design hands the user.
+  // one-click launch affordance the staging design hands the user. Bound to
+  // ROOT specifically, not just "some files view": the previously active tab
+  // (checked in step 3) is ALSO a files view full of .entry rows and
+  // .entry-open arrows — it's `src`, which has no package.json — so if
+  // --new-session were a total no-op this check would still pass without the
+  // package.json witness. package.json lives at ROOT but not under ROOT/src.
   const rows = await win.locator('.entry').count();
   const arrows = await win.locator('.entry-open').count();
-  check('--new-session (b) the visible pane is a files view with its launch arrows',
-    rows > 5 && arrows > 0, `${rows} entries, ${arrows} launch arrows`);
+  const onRoot = await win.locator('.entry-label', { hasText: 'package.json' }).count();
+  check('--new-session (b) the visible pane is a files view of ROOT (not the still-active src tab), with its launch arrows',
+    rows > 5 && arrows > 0 && onRoot > 0,
+    `${rows} entries, ${arrows} launch arrows, package.json present: ${onRoot > 0}`);
 
   const panesAfter = await win.locator('.pane').count();
   const xtermAfter = await win.locator('.xterm').count();

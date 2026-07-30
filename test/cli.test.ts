@@ -1,16 +1,22 @@
 // KAN-4 — the argv reader for `--open` / `--new-session`.
 //
-// Only parseCliArgs is tested here: it is pure, so it needs no electron mock,
-// no fs and no fixtures. The shapes below are the three real ones this has to
-// survive — electron-vite's dev spawn, the Playwright harness, and a packaged
-// launch — because every one of them puts junk in argv and none of them may
-// produce a tab.
+// parseCliArgs is pure, so it needs no electron mock, no fs and no fixtures.
+// The shapes below are the three real ones this has to survive —
+// electron-vite's dev spawn, the Playwright harness, and a packaged launch —
+// because every one of them puts junk in argv and none of them may produce a
+// tab.
 //
-// resolveCliIntent is deliberately absent: asserting on it means a real
-// canonicalize() + statSync() against real paths, which test/harness/cli.mjs
-// already does end to end against a live app.
+// resolveCliIntent touches real disk (canonicalize + statSync), but that does
+// not require fixtures: this test file is itself a real file, and its own
+// directory is a real directory, so both a "file" and a "folder" input are
+// free. test/harness/cli.mjs covers it end to end against a live app; the
+// cases below are the two branches that are stated acceptance criteria and
+// had zero coverage anywhere — most importantly --new-session on a file,
+// which is the C13 boundary: the one branch whose job is to refuse an
+// unauthenticated caller.
 import { describe, it, expect } from 'vitest'
-import { parseCliArgs } from '../src/main/cli'
+import { fileURLToPath } from 'node:url'
+import { parseCliArgs, resolveCliIntent } from '../src/main/cli'
 
 const EXE = 'C:\\Program Files\\Claude Explorer\\Claude Explorer.exe'
 const CWD = 'C:\\base'
@@ -107,3 +113,21 @@ describe('parseCliArgs: path resolution', () => {
 // quotes before process.argv exists, so parseCliArgs can never observe them and
 // the assertion would be vacuous. The drive-root case above is the one that
 // actually needed covering, because %V produces it.
+
+describe('resolveCliIntent', () => {
+  // Real paths, no fixtures needed: this file and its containing directory.
+  const HERE = fileURLToPath(new URL('.', import.meta.url))
+  const THIS_FILE = fileURLToPath(import.meta.url)
+
+  it('--open <folder> -> open-path', () => {
+    expect(resolveCliIntent({ cmd: 'open', path: HERE })).toMatchObject({ cmd: 'open-path' })
+  })
+
+  it('--open <file> -> open-file (spec §9 acceptance criterion 3)', () => {
+    expect(resolveCliIntent({ cmd: 'open', path: THIS_FILE })).toMatchObject({ cmd: 'open-file' })
+  })
+
+  it('--new-session <file> is refused, not promoted to its parent folder (the C13 boundary)', () => {
+    expect(resolveCliIntent({ cmd: 'new-session', path: THIS_FILE })).toBeNull()
+  })
+})
