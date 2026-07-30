@@ -118,9 +118,11 @@ export function TabBar({
             }}
             onDragEnd={() => { setDragFrom(null); setOver(null); clearSpring(); }}
           >
-            {isClaude
-              ? <span className={'tab-status ' + st} />
-              : isTerminal ? '▶ ' : '📁 '}
+            <span className="tab-icon">
+              {isClaude
+                ? <span className={'tab-status ' + st} />
+                : isTerminal ? '▶' : '📁'}
+            </span>
             {renaming === t.id ? (
               <input
                 className="tab-rename"
@@ -136,7 +138,7 @@ export function TabBar({
                 }}
               />
             ) : (
-              t.title
+              <span className="tab-title">{t.title}</span>
             )}
             <span className="close" onClick={(e) => { e.stopPropagation(); onClose(t.id); }}>×</span>
           </button>
