@@ -50,14 +50,27 @@ export function Terminal({ ptyId }: { ptyId: string }) {
       fit.fit();
       window.api.ptyResize(ptyId, term.cols, term.rows);
     };
-    const ro = new ResizeObserver(resize);
+    // Coalesced to one fit per animation frame. This is a FLOODING fix, not a
+    // correctness one — resize() was already idempotent and every fire produced
+    // the right size. But a split-view divider drag (KAN-46) re-writes the grid
+    // template on every pointermove, so this observer fires ~8x per drag and
+    // each fire was one more `ptyResize` IPC and one more ConPTY screen-buffer
+    // resize. One per frame is all a 60Hz drag can show.
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(resize);
+    });
     ro.observe(ref.current);
     resize();
     // Re-fit once layout/fonts have settled so column count accounts for the
     // reserved scrollbar gutter (prevents text drawing under the scrollbar).
     const settle = setTimeout(resize, 60);
 
-    return () => { clearTimeout(settle); offData(); offExit(); ro.disconnect(); term.dispose(); };
+    return () => {
+      clearTimeout(settle); cancelAnimationFrame(raf);
+      offData(); offExit(); ro.disconnect(); term.dispose();
+    };
   }, [ptyId]);
 
   return <div className="terminal" ref={ref} style={{ width: '100%', height: '100%' }} />;

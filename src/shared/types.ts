@@ -157,19 +157,27 @@ export interface Space {
   id: string
   name: string
   tabIds: string[] // ordered; membership of this space
-  // ponytail: nothing in App.tsx (closeTab/onDeleteSpace) or spaces.ts's
-  // withoutTab/addTabToSpace prunes `layout.cells` when a tab it names closes
-  // or moves to another space (KAN-45 integration review #4, CONFIRMED, fix
-  // deferred to whichever ticket wires gridPlacement() into App.tsx — nothing
-  // renders `layout` yet on this branch, so a stale cell is inert today).
-  // `gridPlacement()` does not repair this either: it drops out-of-bounds and
-  // overlapping cells but not ones naming a dead tab. Whoever wires the grid
-  // render path needs to prune on the same "a tab leaves this space" paths
-  // this comment is attached to — likely `withoutTab` in spaces.ts, which
-  // would need `GridCell`/`gridlayout.remove`, currently NOT imported there
-  // on purpose (the module doc: "nothing here imports Space and this file
-  // stays a leaf") — that tradeoff needs revisiting at the same time.
+  // A cell naming a tab that has left this space is pruned in TWO places, both
+  // of them chokepoints, so no caller carries the obligation (KAN-45
+  // integration review #4): `sanitize()` (src/main/workspace.ts) drops it on
+  // every read and write, and App.tsx re-tiles the layout it RENDERS against
+  // the space's live membership. That is why neither `closeTab` nor
+  // `spaces.ts`'s `withoutTab` touches `layout` — keeping spaces.ts a leaf that
+  // never imports gridlayout was worth more than repairing the same thing in a
+  // third place.
   layout: GridLayout | null
+  /**
+   * Track sizes from divider drags, one entry per column / row of `layout`.
+   *
+   * Beside `layout` rather than inside it because every `gridlayout` op returns
+   * a rebuilt layout and would have to thread these through as well. The
+   * length is the only coupling: `splitgrid.normalizeFractions` falls back to
+   * an even split the moment it stops matching `layout.cols`/`rows`, which is
+   * exactly what a split or a pane close should do to sizes the user set for a
+   * different number of tracks.
+   */
+  colFractions?: number[]
+  rowFractions?: number[]
   /** The tab that had focus when this space was last left, so a restart lands
    *  where you were instead of on tab 1. Optional: a workspace.json written by
    *  v0.4.0 has no such field and must still load. sanitize() guarantees it

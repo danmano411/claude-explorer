@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { GridCell, GridLayout } from '../src/shared/types'
 import {
+  closePane,
   compact,
   findFree,
   inBounds,
@@ -8,7 +9,9 @@ import {
   overlaps,
   place,
   remove,
+  showIn,
   single,
+  split,
 } from '../src/renderer/gridlayout'
 
 const cell = (tabId: string, col: number, row: number, colSpan = 1, rowSpan = 1): GridCell => ({
@@ -148,6 +151,143 @@ describe('compact', () => {
   })
   it('never goes below 1x1', () => {
     expect(compact(layout(3, 3))).toEqual({ cols: 1, rows: 1, cells: [] })
+  })
+})
+
+/**
+ * Every grid position covered by exactly one cell — the thing a user sees as
+ * "the panes tile with no gaps and nothing stacked". Returned as the list of
+ * offending positions so a failure names them.
+ */
+const untiled = (l: GridLayout) => {
+  const count = new Map<string, number>()
+  for (const c of l.cells) for (const k of occupies(c)) count.set(k, (count.get(k) ?? 0) + 1)
+  const bad: string[] = []
+  for (let r = 0; r < l.rows; r++)
+    for (let c = 0; c < l.cols; c++) {
+      const n = count.get(`${c},${r}`) ?? 0
+      if (n !== 1) bad.push(`${c},${r}=${n}`)
+    }
+  return bad
+}
+
+describe('compact: interior gaps, not just the bounds', () => {
+  // The one that matters: close the MIDDLE pane of a 1x3 and the survivors are
+  // at columns 0 and 2. Trimming the bounds alone keeps `cols: 3` and paints a
+  // third of the window as an empty gap between two panes.
+  it('drops a track that emptied out in the middle', () => {
+    const l = compact(layout(3, 1, [cell('a', 0, 0), cell('c', 2, 0)]))
+    expect([l.cols, l.rows]).toEqual([2, 1])
+    expect(l.cells).toEqual([cell('a', 0, 0), cell('c', 1, 0)])
+    expect(untiled(l)).toEqual([])
+  })
+
+  it('keeps a span whose tracks are still occupied — by itself, if nothing else', () => {
+    // Column 1 is used only by 'a', which spans it. Dropping it would tear a
+    // 3-wide pane down to 2 for no reason and un-tile the row below.
+    const l = compact(layout(3, 2, [cell('a', 0, 0, 3, 1), cell('b', 0, 1, 3, 1)]))
+    expect([l.cols, l.rows]).toEqual([3, 2])
+    expect(untiled(l)).toEqual([])
+  })
+})
+
+describe('split', () => {
+  it('turns a single pane into two side by side', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    expect([l.cols, l.rows]).toEqual([2, 1])
+    expect(l.cells).toContainEqual(cell('b', 1, 0))
+    expect(untiled(l)).toEqual([])
+  })
+
+  it('and stacked, on the row axis', () => {
+    const l = split(single('a'), 'a', 'b', 'row')
+    expect([l.cols, l.rows]).toEqual([1, 2])
+    expect(l.cells).toContainEqual(cell('b', 0, 1))
+    expect(untiled(l)).toEqual([])
+  })
+
+  // The case an append-a-column implementation gets wrong: growing the grid to
+  // 3 columns fills only the split pane's own row, and the other row is left
+  // with a hole where the new column crosses it.
+  it('leaves no hole when one pane of a 2x2 is split', () => {
+    const l = split(
+      layout(2, 2, [cell('a', 0, 0), cell('b', 1, 0), cell('c', 0, 1), cell('d', 1, 1)]),
+      'a', 'e', 'col',
+    )
+    expect([l.cols, l.rows]).toEqual([3, 2])
+    expect(untiled(l)).toEqual([])
+    // 'c' was below the split and absorbed the new column at its own row.
+    expect(l.cells.find((x) => x.tabId === 'c')).toMatchObject({ col: 0, colSpan: 2 })
+    expect(l.cells.find((x) => x.tabId === 'a')).toMatchObject({ col: 0, colSpan: 1 })
+  })
+
+  it('stays tiled through a chain of splits on both axes', () => {
+    let l = single('a')
+    l = split(l, 'a', 'b', 'col')
+    l = split(l, 'a', 'c', 'row')
+    l = split(l, 'b', 'd', 'row')
+    l = split(l, 'd', 'e', 'col')
+    expect(l.cells).toHaveLength(5)
+    expect(untiled(l)).toEqual([])
+  })
+
+  it('refuses a tab that already has a pane, and an unfocused grid', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    expect(split(l, 'a', 'b', 'col')).toBe(l)
+    expect(split(l, 'nobody', 'z', 'col')).toBe(l)
+    expect(split(l, 'a', '', 'col')).toBe(l)
+  })
+})
+
+describe('closePane', () => {
+  it('hands the rectangle to the neighbour beside it', () => {
+    let l = split(single('a'), 'a', 'b', 'col')
+    l = split(l, 'b', 'c', 'col')            // a | b | c
+    const after = closePane(l, 'b')!
+    expect(untiled(after)).toEqual([])
+    expect(after.cells.map((x) => x.tabId).sort()).toEqual(['a', 'c'])
+  })
+
+  // No single cell is the right shape here: the pane being closed is two
+  // columns wide and the row below it is two separate panes. Absorbing per
+  // slice is what keeps this tiled.
+  it('splits the rectangle between several neighbours when no one cell fits', () => {
+    const l = layout(3, 2, [
+      cell('a', 0, 0, 1, 2), cell('b', 1, 0, 2, 1),
+      cell('d', 1, 1), cell('e', 2, 1),
+    ])
+    expect(untiled(l)).toEqual([])
+    const after = closePane(l, 'b')!
+    expect(untiled(after)).toEqual([])
+    expect(after.cells.find((x) => x.tabId === 'd')).toMatchObject({ row: 0, rowSpan: 2 })
+    expect(after.cells.find((x) => x.tabId === 'e')).toMatchObject({ row: 0, rowSpan: 2 })
+  })
+
+  it('is null once fewer than two panes are left — one pane is not a split', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    expect(closePane(l, 'b')).toBeNull()
+  })
+
+  it('is a no-op for a tab with no pane', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    expect(closePane(l, 'zzz')).toBe(l)
+  })
+})
+
+describe('showIn', () => {
+  it('puts the clicked tab in the focused pane, evicting the tab that was there', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    const after = showIn(l, 'b', 'c')
+    expect(after.cells.map((x) => x.tabId).sort()).toEqual(['a', 'c'])
+    expect(after.cells.find((x) => x.tabId === 'c')).toMatchObject({ col: 1, row: 0 })
+    expect(untiled(after)).toEqual([])
+  })
+
+  it('leaves a tab that already has a pane alone — that click is just focus', () => {
+    const l = split(single('a'), 'a', 'b', 'col')
+    expect(showIn(l, 'a', 'b')).toBe(l)
+    expect(showIn(l, 'a', 'a')).toBe(l)
+    expect(showIn(l, 'nobody', 'c')).toBe(l)
   })
 })
 

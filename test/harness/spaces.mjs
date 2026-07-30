@@ -359,10 +359,19 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   await deleteSpace(win);
   check('deleting a space moves you to a surviving one', (await spaceName(win)) === 'Space',
     await spaceName(win));
+  // Counted in XTERMS, not in `.pane` elements. The claim is about the deleted
+  // space's TERMINAL still being mounted somewhere, and since KAN-46 a files
+  // tab gets a `.pane` wrapper too (it needs a grid area like any other pane) —
+  // so the surviving space's own files tab makes the pane count 1, forever, no
+  // matter what happened to the doomed one. An xterm exists only for a terminal
+  // tab, which is exactly the thing that had to go.
+  const mounted = () => win.evaluate(() => ({
+    xterms: document.querySelectorAll('.xterm').length,
+    panes: document.querySelectorAll('.pane').length,
+  }));
   check('its tabs are closed, not merely hidden — nothing of it is left mounted',
-    (await win.evaluate(() => document.querySelectorAll('.pane').length)) === 0
-      && (await titles(win)).length === 1,
-    `${await win.evaluate(() => document.querySelectorAll('.pane').length)} panes, tabs: ${(await titles(win)).join(' | ')}`);
+    (await mounted()).xterms === 0 && (await titles(win)).length === 1,
+    `${JSON.stringify(await mounted())}, tabs: ${(await titles(win)).join(' | ')}`);
 
   await win.waitForTimeout(1500);      // let any in-flight write land
   const settled = beats();

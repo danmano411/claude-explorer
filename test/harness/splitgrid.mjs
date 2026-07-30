@@ -2,12 +2,15 @@
 //   node test/harness/splitgrid.mjs            (no npm run build needed)
 //   node test/harness/splitgrid.mjs --show     leave the window open to look at it
 //
-// Split view is deliberately NOT wired into App.tsx yet (three other M5 tickets
-// own App.tsx/index.css this milestone), so this cannot drive the real app the
-// way test/harness/tabvisuals.mjs does. Instead it bundles the component with
-// esbuild and renders it in a bare Electron BrowserWindow: the same Chromium
-// that ships the app, so CSS Grid, ResizeObserver and pointer capture all
-// behave exactly as they will in production.
+// This is the GEOMETRY harness: it drives splitgrid.ts + SplitDividers directly,
+// over layouts the app's own split/close actions cannot always produce, in a
+// bare Electron BrowserWindow bundled with esbuild — the same Chromium that
+// ships the app, so CSS Grid, ResizeObserver and pointer capture all behave
+// exactly as they will in production.
+//
+// test/harness/splitview.mjs is the other half: the same claims against the REAL
+// app, with a live terminal in a pane. Keep both — this one can pose layouts the
+// app cannot reach, and that one can prove things about a running pty.
 //
 // splitgrid.entry.tsx reproduces App.tsx's real DOM shape — one flat container,
 // every tab mounted once forever as an absolutely positioned `.pane` sibling —
