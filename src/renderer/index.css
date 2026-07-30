@@ -96,6 +96,31 @@ body {
 .tab .close:hover { color: #fff; background: var(--clay); }
 .tab.add { color: var(--ink-soft); font-size: 18px; padding: 4px 12px; }
 
+/* ===== Tab folders (KAN-44) =====
+   A group is a contiguous run of this same strip, wrapped in one flex box so
+   the 2px colour bar spans exactly the run. The wrapper deliberately repeats
+   .tabbar's `align-items: flex-end; gap: 2px` — it is a nested flex line, not a
+   new layout — which is what keeps a grouped tab byte-identical in height to an
+   ungrouped one (KAN-33's one line-height still does all the work). --group-color
+   is set inline from TabGroup.color, which is a `var()` NAME, so dark mode
+   follows the existing palette for free. */
+.tabgroup {
+  display: flex; align-items: flex-end; gap: 2px;
+  padding: 0 3px;
+  border-top: 2px solid var(--group-color);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: color-mix(in srgb, var(--group-color) 14%, transparent);
+}
+.group-label {
+  flex: none; align-self: center;
+  max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin: 2px 1px 4px 1px; padding: 1px 8px;
+  font-family: var(--font-serif); font-size: 13px; line-height: 1.4; color: var(--ink);
+  background: color-mix(in srgb, var(--group-color) 45%, var(--bg-panel));
+  border-radius: 999px; cursor: pointer;
+}
+.group-label:hover { background: color-mix(in srgb, var(--group-color) 70%, var(--bg-panel)); }
+
 /* ===== Content region ===== */
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--bg-panel); }
 
@@ -287,6 +312,10 @@ body {
 .ctx-item.disabled { color: var(--ink-soft); opacity: 0.5; cursor: default; }
 .ctx-item.disabled:hover { background: transparent; }
 .ctx-sep { height: 1px; margin: 4px 0; background: var(--line); }
+.ctx-swatch {
+  display: inline-block; width: 9px; height: 9px; margin-right: 7px;
+  border-radius: 50%; border: 1px solid var(--line); vertical-align: baseline;
+}
 
 /* delete-confirm modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(20, 15, 10, 0.38); display: flex; align-items: center; justify-content: center; z-index: 100; }
