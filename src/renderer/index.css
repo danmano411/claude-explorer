@@ -102,6 +102,16 @@ body {
 .tab .close:hover { color: #fff; background: var(--clay); }
 .tab.add { color: var(--ink-soft); font-size: 18px; padding: 4px 12px; }
 
+/* ===== Pinned tabs (KAN-53) =====
+   Icon only: TabBar renders no title and no close button, so all this has to do
+   is stop the box from being title-shaped. Symmetric padding centres the one
+   remaining child; the max-width cap is dropped to `none` so `.tab.active`'s
+   40ch growth rule cannot widen a pinned tab when it happens to be focused.
+   Everything else — height (KAN-33's line-height), border, radius, active
+   treatment, both colour schemes — is inherited from `.tab` unchanged, which is
+   the point: a pinned tab is the same tab, narrower. */
+.tab.pinned { padding-left: 8px; padding-right: 8px; gap: 0; max-width: none; }
+
 /* ===== Tab folders (KAN-44) =====
    A group is a contiguous run of this same strip, wrapped in one flex box so
    the 2px colour bar spans exactly the run. The wrapper deliberately repeats

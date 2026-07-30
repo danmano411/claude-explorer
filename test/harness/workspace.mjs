@@ -56,8 +56,12 @@ let activeBefore; // KAN-43: which tab had focus when run 1 was torn down
 
   const titles = await titlesOf(win);
   check('tabs restored after restart', titles.length === 2, titles.join(' | '));
+  // The folder run 1 navigated to is ROOT, whatever that is — a git worktree
+  // checkout is not called "Claude Explorer", which is what the hardcoded name
+  // this used to assert on made it fail there (same worktree-safety fix cli.mjs
+  // already took). Deriving it keeps the assertion about the RESTORE.
   check('the folder tab came back by name',
-    titles.some((t) => /Claude Explorer/i.test(t)), titles.join(' | '));
+    titles.some((t) => t.includes(path.basename(ROOT))), titles.join(' | '));
 
   // KAN-43: restore used to hardcode `selectTab(restored[0].id)`, so every
   // restart threw away which tab you were on. Equality against run 1's recorded

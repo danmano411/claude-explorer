@@ -23,6 +23,9 @@ export interface Tab {
   /** The tab folder this tab belongs to (TabGroup.id), or absent for a loose
    *  tab. Makes `Tab` satisfy groups.ts's `Grouped` structurally. */
   groupId?: string
+  /** Chrome-style pinned: icon-only, held at the left end of the strip, and
+   *  never a group member (KAN-53). The other half of `Grouped`. */
+  pinned?: boolean
 }
 
 export function toPersisted(t: Tab): PersistedTab {
@@ -33,6 +36,7 @@ export function toPersisted(t: Tab): PersistedTab {
     title: t.title,
     renamed: t.renamed,
     groupId: t.groupId,
+    pinned: t.pinned,
     terminalKind: t.terminalKind,
     resumeSessionId: t.sessionId,
     filePath: t.filePath,
@@ -61,6 +65,7 @@ export function fromPersisted(p: PersistedTab): Tab | null {
       title: p.title,
       renamed: p.renamed,
       groupId: p.groupId,
+      pinned: p.pinned,
       terminalKind: p.terminalKind ?? 'claude',
       sessionId: p.resumeSessionId,
     }
@@ -73,6 +78,7 @@ export function fromPersisted(p: PersistedTab): Tab | null {
     title: p.title,
     renamed: p.renamed,
     groupId: p.groupId,
+    pinned: p.pinned,
     filePath: p.filePath,
     viewerMode: p.viewerMode,
   }

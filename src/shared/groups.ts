@@ -9,7 +9,7 @@ import { reorder } from './tabreorder'
  * function here already accepts it with zero changes: `Tab` will satisfy
  * `Grouped` structurally. Deliberately not a duplicate `Tab` interface.
  */
-export type Grouped = { id: string; groupId?: string }
+export type Grouped = { id: string; groupId?: string; pinned?: boolean }
 
 /**
  * The only non-structural, non-semantic-alias color custom properties Retro
@@ -28,6 +28,53 @@ export const GROUP_COLORS = ['var(--clay)', 'var(--diff-add)', 'var(--clay-soft)
 function stripGroupId<T extends Grouped>(t: T): T {
   const { groupId: _drop, ...rest } = t
   return rest as T
+}
+
+function stripPinned<T extends Grouped>(t: T): T {
+  const { pinned: _drop, ...rest } = t
+  return rest as T
+}
+
+/**
+ * The seam between the two regions of the strip: the index of the first
+ * unpinned tab, i.e. the one position that is simultaneously "after every
+ * pinned tab" and "before every unpinned one". Both `setPinned` directions
+ * insert exactly here, and `reorderWithGroups` clamps against it.
+ *
+ * Assumes the pinned-first invariant already holds — repairing a list that has
+ * pinned tabs scattered through it is `normalize()`'s job, not this one's,
+ * exactly as `groupRun` leaves contiguity repair to `normalize()`.
+ */
+function pinBoundary<T extends Grouped>(tabs: T[]): number {
+  const i = tabs.findIndex((t) => !t.pinned)
+  return i === -1 ? tabs.length : i
+}
+
+/**
+ * Pins or unpins `tabId` (KAN-53). Pinning is a STATE change, not a position:
+ * the tab relocates to the seam either way — pinning makes it the last pinned
+ * tab, unpinning makes it the first unpinned one — because pinned-before-
+ * unpinned is an ordering invariant of the strip, not something the user drags
+ * their way into.
+ *
+ * Pinning also DROPS the tab's groupId, and that is structural rather than
+ * stylistic: a group is a contiguous run (see `normalize`) and a pinned tab is
+ * forced to the left of every unpinned one, so a pinned member could only ever
+ * break its group's run or drag the whole group leftward with it. Chrome
+ * resolves it the same way. The group keeps its other members, still one run:
+ * pulling one element out of a contiguous block leaves a contiguous block, and
+ * the tab lands in the pinned region, ahead of every group.
+ *
+ * No-op (same reference) for an unknown tabId or a state that already holds.
+ */
+export function setPinned<T extends Grouped>(tabs: T[], tabId: string, pinned: boolean): T[] {
+  const idx = tabs.findIndex((t) => t.id === tabId)
+  if (idx === -1 || !!tabs[idx].pinned === pinned) return tabs
+
+  const rest = [...tabs.slice(0, idx), ...tabs.slice(idx + 1)]
+  const at = pinBoundary(rest)
+  const moved = pinned ? { ...stripGroupId(tabs[idx]), pinned: true } : stripPinned(tabs[idx])
+  return [...rest.slice(0, at), moved, ...rest.slice(at)]
 }
 
 /**
@@ -90,14 +137,16 @@ export function groupRun<T extends Grouped>(tabs: T[], groupId: string): { start
  * split that other group. When that happens it hops to just past the old
  * run instead, the same landing spot `removeFromGroup` would choose.
  *
- * An unknown tabId is a no-op: returns `tabs` unchanged. `groupId` itself is
- * not validated against a groups list (this module keeps membership and the
- * group registry separate) — pass a live TabGroup id, or clean up later with
- * `normalize()`.
+ * An unknown tabId is a no-op: returns `tabs` unchanged. So is a PINNED one
+ * (KAN-53) — a pinned tab lives left of every group, so joining one would mean
+ * leaving the pinned block, and pinning is a state change the user makes
+ * explicitly. Unpin first. `groupId` itself is not validated against a groups
+ * list (this module keeps membership and the group registry separate) — pass a
+ * live TabGroup id, or clean up later with `normalize()`.
  */
 export function addToGroup<T extends Grouped>(tabs: T[], tabId: string, groupId: string): T[] {
   const idx = tabs.findIndex((t) => t.id === tabId)
-  if (idx === -1) return tabs
+  if (idx === -1 || tabs[idx].pinned) return tabs
 
   const oldGroupId = tabs[idx].groupId
   const rest = [...tabs.slice(0, idx), ...tabs.slice(idx + 1)]
@@ -206,11 +255,18 @@ export function segments<T extends Grouped>(tabs: T[], groups: TabGroup[]): Segm
 }
 
 /**
- * Repairs a tab list so every group is one contiguous run again, and clears
- * any groupId that no longer names a real group. Used after a raw
- * drag-reorder (which knows nothing about groups) and after restoring
- * `workspace.json` (which might have been hand-edited into an inconsistent
- * state).
+ * Repairs a tab list so both ordering invariants of the rendered strip hold:
+ * every pinned tab sits left of every unpinned one, and every group is one
+ * contiguous run. Also clears any groupId that no longer names a real group,
+ * or that a pinned tab is carrying (pinning and grouping are mutually
+ * exclusive — see `setPinned`). Used after a raw drag-reorder (which knows
+ * nothing about groups) and after restoring `workspace.json` (which might have
+ * been hand-edited into an inconsistent state).
+ *
+ * Pinned-first runs BEFORE the contiguity pass, and as a stable partition, so
+ * the two repairs cannot fight: once every pinned tab has been hoisted (and
+ * un-grouped), no group has a member in the pinned region, so gathering runs
+ * can only ever move tabs around within the unpinned tail.
  *
  * Order is otherwise preserved as much as possible: walking the list left to
  * right, the first time a group is encountered is where its whole run ends
@@ -222,16 +278,21 @@ export function segments<T extends Grouped>(tabs: T[], groups: TabGroup[]): Segm
  */
 export function normalize<T extends Grouped>(tabs: T[], groups: TabGroup[]): T[] {
   const validIds = new Set(groups.map((g) => g.id))
-  const cleaned = tabs.map((t) => (t.groupId !== undefined && !validIds.has(t.groupId) ? stripGroupId(t) : t))
+  const cleaned = tabs.map((t) =>
+    t.groupId !== undefined && (t.pinned || !validIds.has(t.groupId)) ? stripGroupId(t) : t,
+  )
+  const partitioned = cleaned.some((t) => t.pinned)
+    ? [...cleaned.filter((t) => t.pinned), ...cleaned.filter((t) => !t.pinned)]
+    : cleaned
 
   const placed = new Set<string>()
   const result: T[] = []
-  for (const tab of cleaned) {
+  for (const tab of partitioned) {
     if (placed.has(tab.id)) continue
     result.push(tab)
     placed.add(tab.id)
     if (tab.groupId !== undefined) {
-      for (const other of cleaned) {
+      for (const other of partitioned) {
         if (other.groupId === tab.groupId && !placed.has(other.id)) {
           result.push(other)
           placed.add(other.id)
@@ -265,14 +326,26 @@ export function normalize<T extends Grouped>(tabs: T[], groups: TabGroup[]): T[]
  * index into the list AFTER `from` has been spliced out (see dropIndex's
  * doc comment in tabreorder.ts). Out-of-range `from`/`insert` are clamped
  * rather than thrown on, per this module's no-throw rule.
+ *
+ * KAN-53: that clamp also confines the drag to the tab's own REGION. A pinned
+ * tab may land anywhere in [0, boundary] and an unpinned one anywhere in
+ * [boundary, end] — so a drag can reorder within a region but never carry a
+ * tab across the seam, because pinning is a state change, not a position.
+ * A pinned tab is likewise never given a groupId: it sits left of every group,
+ * so "touching" one is an artefact of the clamp, not a real drop onto its run.
  */
 export function reorderWithGroups<T extends Grouped>(tabs: T[], from: number, insert: number): T[] {
   if (from < 0 || from >= tabs.length) return tabs
-  const clampedInsert = Math.max(0, Math.min(insert, tabs.length - 1))
 
   const rest = [...tabs.slice(0, from), ...tabs.slice(from + 1)]
+  // `rest.length === tabs.length - 1`, so both bounds stay inside the old
+  // clamp's range and this only ever narrows it.
+  const boundary = pinBoundary(rest)
+  const [lo, hi] = tabs[from].pinned ? [0, boundary] : [boundary, rest.length]
+  const clampedInsert = Math.max(lo, Math.min(insert, hi))
+
   const candidateGroupIds = new Set<string>()
-  for (const t of rest) if (t.groupId !== undefined) candidateGroupIds.add(t.groupId)
+  if (!tabs[from].pinned) for (const t of rest) if (t.groupId !== undefined) candidateGroupIds.add(t.groupId)
 
   const touching = [...candidateGroupIds].filter((gid) => {
     const run = groupRun(rest, gid)

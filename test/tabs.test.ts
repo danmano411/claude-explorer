@@ -77,6 +77,24 @@ describe('persistence round trip', () => {
     expect(fromPersisted(toPersisted(newFilesTab('C:\\repo')))!.groupId).toBeUndefined()
   })
 
+  // KAN-53, same failure mode as the groupId cases above: both fromPersisted
+  // branches build their result field-by-field, so a pin would survive until
+  // the next restart and no further if either one forgot the field.
+  it('carries pinned through persist -> restore, on a files tab', () => {
+    const t = { ...newFilesTab('C:\\repo'), pinned: true }
+    expect(toPersisted(t).pinned).toBe(true)
+    expect(fromPersisted(toPersisted(t))!.pinned).toBe(true)
+  })
+
+  it('carries pinned through persist -> restore, on a terminal tab', () => {
+    const t = { ...newTerminalTab('C:\\repo', 'claude', 'pty-1', 'repo', 'sess-abc'), pinned: true }
+    expect(fromPersisted(toPersisted(t))!.pinned).toBe(true)
+  })
+
+  it('leaves an unpinned tab unpinned', () => {
+    expect(fromPersisted(toPersisted(newFilesTab('C:\\repo')))!.pinned).toBeUndefined()
+  })
+
   it('round-trips a viewer tab with its mode', () => {
     const back = fromPersisted(toPersisted(newViewerTab('C:\\repo\\a.ts', 'diff')))!
     expect(back.view).toBe('viewer')

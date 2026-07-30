@@ -65,6 +65,13 @@ export function sanitize(raw: unknown): Workspace {
   // contiguous run — for the space slices below, which is where contiguity
   // actually matters now (one strip per space); doing it here too keeps
   // `tabs` self-consistent for anything reading it as a flat list.
+  //
+  // KAN-53 folded pinned-before-unpinned in there as well, for the same reason
+  // the group repairs live there: it is an ordering invariant of the rendered
+  // strip, and this is the single place a hand-editable file gets repaired. So
+  // a workspace.json with a pinned tab in the middle (or a pinned tab still
+  // tagged with a groupId) comes back fixed, and the renderer does not need a
+  // second repair path — nor a sort on every render.
   const tabs = normalize(
     w.tabs.filter((t) => t && typeof t.id === 'string' && typeof t.cwd === 'string'),
     groups,

@@ -13,10 +13,12 @@ import {
   reorderWithGroups,
   segments,
   setCollapsed,
+  setPinned,
   type Grouped,
 } from '../src/shared/groups'
 
 const tab = (id: string, groupId?: string): Grouped => (groupId ? { id, groupId } : { id })
+const pinned = (id: string): Grouped => ({ id, pinned: true })
 
 const group = (id: string, name = id, color = GROUP_COLORS[0], collapsed = false): TabGroup => ({
   id,
@@ -37,6 +39,20 @@ function isContiguous(tabs: Grouped[]): boolean {
     spans.set(t.groupId, s)
   })
   return [...spans.values()].every((s) => s.last - s.first + 1 === s.count)
+}
+
+/** KAN-53: every pinned tab sits left of every unpinned one. The second
+ *  ordering invariant of the rendered strip, enforced beside contiguity. */
+function isPinnedFirst(tabs: Grouped[]): boolean {
+  const lastPinned = tabs.map((t) => !!t.pinned).lastIndexOf(true)
+  const firstLoose = tabs.findIndex((t) => !t.pinned)
+  return lastPinned === -1 || firstLoose === -1 || lastPinned < firstLoose
+}
+
+/** Pinning and grouping are mutually exclusive: a pinned tab is forced left of
+ *  the strip, so it could only ever break its group's contiguous run. */
+function noPinnedMembers(tabs: Grouped[]): boolean {
+  return tabs.every((t) => !(t.pinned && t.groupId !== undefined))
 }
 
 describe('GROUP_COLORS', () => {
@@ -119,6 +135,10 @@ describe('addToGroup', () => {
     const tabs = [tab('a'), tab('b')]
     expect(addToGroup(tabs, 'nope', 'g1')).toBe(tabs)
   })
+  it('refuses a PINNED tab — it would have to be dragged out of the pinned block to join a run', () => {
+    const tabs = [pinned('p1'), tab('a', 'g1'), tab('b', 'g1')]
+    expect(addToGroup(tabs, 'p1', 'g1')).toBe(tabs)
+  })
   it('does not mutate its input', () => {
     const tabs = [tab('a'), tab('b'), tab('c', 'g1')]
     const snapshot = structuredClone(tabs)
@@ -162,6 +182,53 @@ describe('removeFromGroup', () => {
     const tabs = [tab('b'), tab('c', 'g1'), tab('a', 'g1'), tab('d')]
     const snapshot = structuredClone(tabs)
     removeFromGroup(tabs, 'c')
+    expect(tabs).toEqual(snapshot)
+  })
+})
+
+describe('setPinned', () => {
+  it('pinning moves the tab to the END of the pinned block, not to wherever it already sat', () => {
+    const tabs = [pinned('p1'), tab('a'), tab('b'), tab('c')]
+    const result = setPinned(tabs, 'c', true)
+    expect(result.map((t) => t.id)).toEqual(['p1', 'c', 'a', 'b'])
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('pinning the only tab of an unpinned strip puts it first', () => {
+    const tabs = [tab('a'), tab('b')]
+    expect(setPinned(tabs, 'b', true).map((t) => t.id)).toEqual(['b', 'a'])
+  })
+  it('pinning a GROUPED tab removes it from the group and the rest stay one contiguous run', () => {
+    const tabs = [tab('a'), tab('b', 'g1'), tab('c', 'g1'), tab('d', 'g1'), tab('e')]
+    const result = setPinned(tabs, 'c', true) // the middle member
+    expect(result.map((t) => t.id)).toEqual(['c', 'a', 'b', 'd', 'e'])
+    expect(result.find((t) => t.id === 'c')?.groupId).toBeUndefined()
+    expect(result.find((t) => t.id === 'c')?.pinned).toBe(true)
+    expect(isContiguous(result)).toBe(true)
+    expect(groupRun(result, 'g1')).toEqual({ start: 2, end: 4 })
+  })
+  it('unpinning drops the flag and lands the tab at the head of the unpinned region', () => {
+    const tabs = [pinned('p1'), pinned('p2'), tab('a'), tab('b')]
+    const result = setPinned(tabs, 'p1', false)
+    expect(result.map((t) => t.id)).toEqual(['p2', 'p1', 'a', 'b'])
+    expect(result.find((t) => t.id === 'p1')).toEqual({ id: 'p1' }) // no `pinned: false` residue
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('unpinning in front of a group does not split that group', () => {
+    const tabs = [pinned('p1'), tab('a', 'g1'), tab('b', 'g1')]
+    const result = setPinned(tabs, 'p1', false)
+    expect(result.map((t) => t.id)).toEqual(['p1', 'a', 'b'])
+    expect(isContiguous(result)).toBe(true)
+  })
+  it('is a no-op (same reference) for an unknown tabId or a state that already holds', () => {
+    const tabs = [pinned('p1'), tab('a')]
+    expect(setPinned(tabs, 'nope', true)).toBe(tabs)
+    expect(setPinned(tabs, 'p1', true)).toBe(tabs)
+    expect(setPinned(tabs, 'a', false)).toBe(tabs)
+  })
+  it('does not mutate its input', () => {
+    const tabs = [tab('a'), tab('b', 'g1'), tab('c', 'g1')]
+    const snapshot = structuredClone(tabs)
+    setPinned(tabs, 'b', true)
     expect(tabs).toEqual(snapshot)
   })
 })
@@ -283,6 +350,26 @@ describe('normalize', () => {
     const tabs = [tab('a'), tab('b'), tab('b')]
     expect(normalize(tabs, []).map((t) => t.id)).toEqual(['a', 'b'])
   })
+  // KAN-53: the same single repair path also owns pinned-before-unpinned, so a
+  // hand-edited workspace.json is fixed on read instead of in the renderer.
+  it('hoists pinned tabs to the front, keeping their relative order', () => {
+    const tabs = [tab('a'), pinned('p2'), tab('b'), pinned('p1')]
+    const result = normalize(tabs, [])
+    expect(result.map((t) => t.id)).toEqual(['p2', 'p1', 'a', 'b'])
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('clears the groupId of a pinned tab and leaves the rest of that group contiguous', () => {
+    const groups = [group('g1')]
+    const tabs = [tab('a', 'g1'), { id: 'p', groupId: 'g1', pinned: true }, tab('b', 'g1')]
+    const result = normalize(tabs, groups)
+    expect(result.map((t) => t.id)).toEqual(['p', 'a', 'b'])
+    expect(result[0].groupId).toBeUndefined()
+    expect(isContiguous(result)).toBe(true)
+  })
+  it('leaves an already pinned-first list untouched (same reference)', () => {
+    const tabs = [pinned('p1'), tab('a')]
+    expect(normalize(tabs, [])).toBe(tabs)
+  })
 })
 
 describe('reorderWithGroups', () => {
@@ -340,9 +427,34 @@ describe('reorderWithGroups', () => {
     reorderWithGroups(tabs, 3, 1)
     expect(tabs).toEqual(snapshot)
   })
+  // KAN-53: pinning is a state change, not a position — a drag may reorder
+  // WITHIN a region but never across the boundary between them.
+  it('a pinned tab dragged far right stops at the end of the pinned block', () => {
+    const tabs = [pinned('p1'), pinned('p2'), tab('a'), tab('b')]
+    const result = reorderWithGroups(tabs, 0, 3)
+    expect(result.map((t) => t.id)).toEqual(['p2', 'p1', 'a', 'b'])
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('an unpinned tab dragged to index 0 stops at the head of the unpinned region', () => {
+    const tabs = [pinned('p1'), pinned('p2'), tab('a'), tab('b')]
+    const result = reorderWithGroups(tabs, 3, 0)
+    expect(result.map((t) => t.id)).toEqual(['p1', 'p2', 'b', 'a'])
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('never tags a pinned tab with a group, even dropped at the very edge of one', () => {
+    const tabs = [pinned('p1'), tab('a', 'g1'), tab('b', 'g1')]
+    const result = reorderWithGroups(tabs, 0, 2)
+    expect(result.find((t) => t.id === 'p1')?.groupId).toBeUndefined()
+    expect(isPinnedFirst(result)).toBe(true)
+    expect(isContiguous(result)).toBe(true)
+  })
+  it('still reorders freely within the pinned block', () => {
+    const tabs = [pinned('p1'), pinned('p2'), pinned('p3'), tab('a')]
+    expect(reorderWithGroups(tabs, 2, 0).map((t) => t.id)).toEqual(['p3', 'p1', 'p2', 'a'])
+  })
 })
 
-describe('contiguity invariant sweep', () => {
+describe('strip ordering invariant sweep', () => {
   // Deterministic PRNG (mulberry32) so the sweep is reproducible, not flaky.
   function mulberry32(seed: number) {
     let a = seed
@@ -355,7 +467,7 @@ describe('contiguity invariant sweep', () => {
     }
   }
 
-  it('every group stays contiguous after any sequence of addToGroup/removeFromGroup/reorderWithGroups', () => {
+  it('every group stays contiguous and every pinned tab stays left after any sequence of addToGroup/removeFromGroup/setPinned/reorderWithGroups', () => {
     const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
     const groupIds = ['g1', 'g2', 'g3']
 
@@ -364,7 +476,7 @@ describe('contiguity invariant sweep', () => {
       let tabs: Grouped[] = ids.map((id) => tab(id))
 
       for (let step = 0; step < 40; step++) {
-        const op = Math.floor(rand() * 3)
+        const op = Math.floor(rand() * 4)
         if (op === 0) {
           const id = ids[Math.floor(rand() * ids.length)]
           const gid = groupIds[Math.floor(rand() * groupIds.length)]
@@ -372,6 +484,9 @@ describe('contiguity invariant sweep', () => {
         } else if (op === 1) {
           const id = ids[Math.floor(rand() * ids.length)]
           tabs = removeFromGroup(tabs, id)
+        } else if (op === 2) {
+          const id = ids[Math.floor(rand() * ids.length)]
+          tabs = setPinned(tabs, id, rand() < 0.5)
         } else {
           const from = Math.floor(rand() * tabs.length)
           const insert = Math.floor(rand() * tabs.length)
@@ -379,6 +494,8 @@ describe('contiguity invariant sweep', () => {
         }
 
         expect(isContiguous(tabs)).toBe(true)
+        expect(isPinnedFirst(tabs)).toBe(true)
+        expect(noPinnedMembers(tabs)).toBe(true)
         // No operation may drop or duplicate a tab.
         expect(tabs.map((t) => t.id).sort()).toEqual([...ids].sort())
       }
