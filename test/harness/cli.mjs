@@ -175,10 +175,17 @@ console.log('\ninstance 2 — relaunch with --open, expect restore + one appende
   const kept = beforeRestart.every((t) => ts.includes(t));
   check('every previously-open tab is still present', kept,
     kept ? '' : `missing: ${beforeRestart.filter((t) => !ts.includes(t)).join(', ')}`);
-  const act = await activeTitle(win);
+  // NOT `act === 'Claude Explorer'`: this run's titles have THREE tabs sharing
+  // that name (home's folder name can coincide, plus the earlier --new-session
+  // tab, plus this argv tab), so a title-string match would pass even if the
+  // persisted (restored) tab kept focus instead of the argv one — exactly the
+  // regression this check exists to catch. Assert the active tab's INDEX is
+  // last instead, which is unambiguous regardless of duplicate titles.
+  const activeIndex = await win.locator('.tab:not(.add)')
+    .evaluateAll((els) => els.findIndex((e) => e.classList.contains('active')));
   check('and the argv tab is the focused one',
-    ts[ts.length - 1] === 'Claude Explorer' && act === 'Claude Explorer',
-    `last "${ts[ts.length - 1]}", active "${act}"`);
+    ts[ts.length - 1] === 'Claude Explorer' && activeIndex === ts.length - 1,
+    `last "${ts[ts.length - 1]}", active index ${activeIndex} of ${ts.length}`);
 
   await close();
 }

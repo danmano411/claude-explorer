@@ -1,6 +1,8 @@
 export type MenuItem =
   | { separator: true }
-  | { label: string; onClick: () => void; disabled?: boolean };
+  /** `swatch` is any CSS colour (in practice a GROUP_COLORS `var()` name) shown
+   *  as a chip before the label — a colour menu with no colour in it is unusable. */
+  | { label: string; onClick: () => void; disabled?: boolean; swatch?: string };
 
 export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
   return (
@@ -15,6 +17,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
               className={it.disabled ? 'ctx-item disabled' : 'ctx-item'}
               onClick={() => { if (!it.disabled) { it.onClick(); onClose(); } }}
             >
+              {it.swatch && <span className="ctx-swatch" style={{ background: it.swatch }} />}
               {it.label}
             </li>
           )

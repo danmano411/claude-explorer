@@ -41,6 +41,10 @@ export type FileMode = 'explorer' | 'developer'
 export interface Settings {
   ideCommand: string // e.g. "code"; launched as `<ideCommand> <folder>`
   mode: FileMode // 'explorer' (default) hides risk; 'developer' unlocks it
+  /** Auto-link a tab opened FROM another tab into that tab's group (KAN-47).
+   *  Default true: opening a file from a grouped repo tab keeps them together,
+   *  which is the whole point of the grouping. */
+  groupWithSource: boolean
 }
 
 /**
@@ -154,6 +158,11 @@ export interface Space {
   name: string
   tabIds: string[] // ordered; membership of this space
   layout: GridLayout | null
+  /** The tab that had focus when this space was last left, so a restart lands
+   *  where you were instead of on tab 1. Optional: a workspace.json written by
+   *  v0.4.0 has no such field and must still load. sanitize() guarantees it
+   *  names a member of `tabIds` (or is absent). */
+  activeTabId?: string
 }
 
 /**

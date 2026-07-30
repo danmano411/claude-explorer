@@ -3,7 +3,11 @@ import {
   newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
-import { reorder } from './tabreorder';
+import {
+  addToGroup, deleteGroup, newGroup, recolorGroup, removeFromGroup,
+  renameGroup, reorderWithGroups, setCollapsed,
+} from '../shared/groups';
+import type { TabGroup } from '../shared/types';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -11,12 +15,13 @@ import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { RecentMenu } from './components/RecentMenu';
 import { SettingsModal } from './components/SettingsModal';
-import { TabBar } from './TabBar';
+import { TabBar, type GroupActions } from './TabBar';
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
 export function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
+  const [groups, setGroups] = useState<TabGroup[]>([]);
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
   const status = usePtyStatus();
@@ -38,8 +43,18 @@ export function App() {
     (async () => {
       const w = await window.api.workspaceGet();
       const restored = w.tabs.map(fromPersisted).filter((t): t is Tab => t !== null);
-      if (restored.length) { setTabs(restored); selectTab(restored[0].id); }
-      else {
+      // sanitize() already ran normalize() over w.tabs, so every surviving
+      // groupId names a real group and every group is one contiguous run —
+      // exactly what segments() renders against. Nothing to repair here.
+      setGroups(w.groups);
+      if (restored.length) {
+        // Land on the tab you left, not tab 1. sanitize() guarantees activeTabId
+        // names a member of the space, but not that the tab was *renderable* —
+        // fromPersisted can still drop it — so fall back to the first tab.
+        const space = w.spaces.find((s) => s.id === w.activeSpaceId);
+        const focus = restored.find((t) => t.id === space?.activeTabId) ?? restored[0];
+        setTabs(restored); selectTab(focus.id);
+      } else {
         const home = await window.api.fsHome();
         const t = newFilesTab(home);
         setTabs([t]); selectTab(t.id);
@@ -85,22 +100,59 @@ export function App() {
       .finally(() => spawning.current.delete(t.id));
   }, [active, tabs]);
 
+  // Persist which tab is focused IMMEDIATELY, not debounced. A tab click is
+  // user-paced, not keystroke-fast, so there is no churn to batch away — and
+  // there is no other flush that would catch it: will-quit only flushes the
+  // trash, there is no beforeunload write, so a click-then-quit inside a
+  // debounce window used to lose the selection outright (KAN-43 review D-1).
+  //
+  // Must also write `tabs`/`tabIds` here, not just `activeTabId`: sanitize()
+  // rejects an activeTabId that isn't in that write's own tab membership, so
+  // writing activeTabId alone against a brand-new tab that the (separately
+  // debounced) tabs-effect hasn't flushed to disk yet gets silently dropped
+  // back to undefined — verified by instrumenting workspace.json, it stuck at
+  // `undefined` through an entire add-tab + navigate sequence. `tabs` here is
+  // this render's closure value, not a dependency, so this still only *fires*
+  // on an `active` change — React batches the setTabs+selectTab pair that
+  // creates a new tab into one render, so the closure already has it.
+  useEffect(() => {
+    if (!tabs.length || !active) return;
+    window.api.workspaceGet().then((w) =>
+      window.api.workspaceSet({
+        ...w,
+        groups,
+        tabs: tabs.map(toPersisted),
+        spaces: w.spaces.map((s, i) =>
+          i === 0 ? { ...s, tabIds: tabs.map((t) => t.id), activeTabId: active } : s),
+      }));
+  }, [active]);
+
   // Persist the tab set so a restart puts you back where you were. Debounced:
   // navigating a folder retitles its tab, and writing the whole document on
-  // every keystroke-fast state change is pointless churn.
+  // every keystroke-fast state change is pointless churn. `active` is NOT a
+  // dependency here — it has its own immediate effect above.
+  //
+  // ponytail: still writes spaces[0] rather than the active space — there is only
+  // ever one until the spaces switcher (KAN-45) lands. Key off activeSpaceId when
+  // it does; the restore above already reads that way.
   useEffect(() => {
     if (!tabs.length) return;
     const timer = setTimeout(() => {
       window.api.workspaceGet().then((w) =>
         window.api.workspaceSet({
           ...w,
+          // `groups` must be written explicitly, not inherited from the `...w`
+          // read: a rename/recolor/collapse changes group state ONLY, so the
+          // spread would faithfully re-persist the stale copy it just read back
+          // off disk and the edit would vanish on restart.
+          groups,
           tabs: tabs.map(toPersisted),
           spaces: w.spaces.map((s, i) =>
             i === 0 ? { ...s, tabIds: tabs.map((t) => t.id) } : s),
         }));
     }, 400);
     return () => clearTimeout(timer);
-  }, [tabs]);
+  }, [tabs, groups]);
 
   // Application menu (File/Settings) posts commands; dispatch through a ref so
   // the subscription (mounted once) always calls the latest closures.
@@ -172,8 +224,74 @@ export function App() {
     });
   };
 
-  const reorderTabs = (from: number, insert: number) =>
-    setTabs((ts) => reorder(ts, from, insert));
+  // Group-aware: the same positional move, plus "did it land inside a group's
+  // span?" — the join/leave rule lives in groups.ts, not here.
+  //
+  // If that landing spot's group happens to be collapsed, expand it: a drop
+  // is one user gesture (same one-commit reasoning groupActions relies on
+  // above), and without this a tab dropped beside a collapsed group joins it
+  // per groups.ts's inclusive edge rule and then simply isn't rendered —
+  // reads as the tab vanishing, not as "it joined a group" (KAN-44 review #2).
+  const reorderTabs = (from: number, insert: number) => {
+    const moved = tabs[from];
+    const next = reorderWithGroups(tabs, from, insert);
+    setTabs(next);
+    const newGroupId = moved && next.find((t) => t.id === moved.id)?.groupId;
+    if (newGroupId !== undefined && newGroupId !== moved?.groupId) {
+      const g = groups.find((x) => x.id === newGroupId);
+      if (g?.collapsed) setGroups(setCollapsed(groups, newGroupId, false));
+    }
+  };
+
+  // A group with no members left is invisible (segments() only emits runs of
+  // real tabs) but would still clutter the "Add to …" menu forever. Prune it
+  // where every close path converges, rather than in each of them.
+  useEffect(() => {
+    setGroups((gs) => {
+      const live = new Set(tabs.map((t) => t.groupId));
+      return gs.every((g) => live.has(g.id)) ? gs : gs.filter((g) => live.has(g.id));
+    });
+  }, [tabs]);
+
+  // Menu-driven, so one user click per call: reading `tabs`/`groups` from this
+  // render's closure is safe here (KAN-37's composition hazard is about several
+  // updates issued before a single commit, which a context menu cannot do).
+  const groupActions: GroupActions = {
+    create: (tabId) => {
+      const g = newGroup('Group', groups);
+      setGroups([...groups, g]);
+      setTabs((ts) => addToGroup(ts, tabId, g.id));
+    },
+    add: (tabId, groupId) => setTabs((ts) => addToGroup(ts, tabId, groupId)),
+    remove: (tabId) => setTabs((ts) => removeFromGroup(ts, tabId)),
+    rename: (groupId, name) => setGroups((gs) => renameGroup(gs, groupId, name.trim() || 'Group')),
+    recolor: (groupId, color) => setGroups((gs) => recolorGroup(gs, groupId, color)),
+    toggleCollapsed: (groupId) =>
+      setGroups((gs) => setCollapsed(gs, groupId, !gs.find((g) => g.id === groupId)?.collapsed)),
+    ungroup: (groupId) => {
+      // deleteGroup returns BOTH halves precisely because un-grouping must not
+      // close anything — the tabs come back untagged, not removed.
+      const next = deleteGroup(groups, tabs, groupId);
+      setGroups(next.groups);
+      setTabs(next.tabs);
+    },
+    closeTabs: (groupId) => {
+      // closeTab already kills the pty and re-picks focus; it uses setTabs's
+      // functional form, so several calls in this loop compose (KAN-37). The
+      // empty-group prune above then drops the group itself.
+      //
+      // closeTab's re-pick, though, reads `active` from ITS OWN render
+      // closure — so only the FIRST call in this loop can win that race, and
+      // it picks from `remaining`, which still contains every other doomed
+      // member. Closing the focused member last means the call that actually
+      // sees `id === active` is the one running against the already-shrunk
+      // list, so it picks a real survivor instead of stranding `active` on a
+      // tab that no longer exists (KAN-44 review #1).
+      const doomed = tabs.filter((t) => t.groupId === groupId);
+      [...doomed.filter((t) => t.id !== active), ...doomed.filter((t) => t.id === active)]
+        .forEach((t) => closeTab(t.id));
+    },
+  };
 
   // A new conversation gets its id assigned here rather than discovered later:
   // reading back "whichever jsonl appeared in this folder" cannot tell two tabs
@@ -225,6 +343,8 @@ export function App() {
     <div className="app">
       <TabBar
         tabs={tabs}
+        groups={groups}
+        groupActions={groupActions}
         activeId={active}
         status={status}
         onSelect={selectTab}
