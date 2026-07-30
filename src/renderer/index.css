@@ -501,16 +501,19 @@ body {
 .viewer-code {
   flex: 1; min-height: 0; overflow: auto;
   background: var(--bg); color: var(--ink);
-  /* 1.4 — same value KAN-33 already settled on for .tab; code is read in runs
-     of adjacent lines, so looser leading (was 1.55) only hurts. Both the plain
-     viewer's CSS-counter gutter and the diff view's .dn column read this same
-     rule (no separate line-height anywhere else in this file), so they can
-     never drift out of sync with their line's content. */
-  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.4;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
 }
 .viewer-code pre.shiki { margin: 0; padding: 8px 0; background: transparent; }
-.viewer-code code { display: block; width: max-content; min-width: 100%; counter-reset: line; }
-.viewer-code .line { display: block; padding-right: 16px; }
+/* KAN-51: `white-space: normal` on the wrapper, `pre` back on each line.
+   plainHtml() and Shiki both join the `<span class="line">` blocks with a
+   literal '\n', and under the <pre>'s inherited `white-space: pre` those
+   newlines are NOT collapsible — each lays out an empty anonymous block, so
+   every line rendered in two line boxes and the pitch came out at exactly 2x
+   line-height. Collapsing whitespace on the wrapper drops the phantom boxes;
+   `pre` on .line keeps the indentation and no-wrap where they're needed, which
+   is why the wrapper's `width: max-content` (and the h-scroll) is unaffected. */
+.viewer-code code { display: block; width: max-content; min-width: 100%; counter-reset: line; white-space: normal; }
+.viewer-code .line { display: block; padding-right: 16px; white-space: pre; }
 .viewer-code .line:hover { background: var(--sel); }
 
 /* Line numbers are a pure CSS counter — no JS, and they work on the plain-text
