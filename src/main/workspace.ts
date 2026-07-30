@@ -125,9 +125,16 @@ export function sanitize(raw: unknown): Workspace {
       // tab that exists: a cell naming a tab another space owns would paint
       // that space's tab into this one's pane, which is the same phantom the
       // one-owner rule exists to prevent.
-      layout: s.layout && Array.isArray(s.layout.cells)
-        ? { ...s.layout, cells: s.layout.cells.filter((c) => c && tabIds.includes(c.tabId)) }
-        : null,
+      //
+      // Empty (not just filtered) collapses to `null`: a layout whose cells all
+      // died is not a split any more, and leaving `{ cells: [] }` on disk (still
+      // truthy) is a permanent, silent dead end — splitPane bases off `s.layout`
+      // and never sees a reason to fall back to `single()` (KAN-46 review #1).
+      layout: (() => {
+        if (!s.layout || !Array.isArray(s.layout.cells)) return null
+        const cells = s.layout.cells.filter((c) => c && tabIds.includes(c.tabId))
+        return cells.length ? { ...s.layout, cells } : null
+      })(),
     }
   })
 

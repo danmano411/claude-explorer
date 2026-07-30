@@ -467,7 +467,20 @@ export function App() {
     const t = tabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
     lastActivated.current.delete(id);
-    setSpaces((ss) => removeTabFromSpace(ss, activeSpaceIdRef.current, id));
+    // Route the space's layout through closePaneIn too, exactly like the "Close
+    // pane" menu item — not just membership. Without this the render-time
+    // `layout` memo only ever `compact`s dead cells away, which can only drop a
+    // track that is empty on EVERY row/col; a hole whose track is still occupied
+    // by a neighbour (an L-shaped or T-shaped tiling) stays a hole forever
+    // (KAN-46 review #2). `closePaneIn` no-ops when `id` has no cell.
+    setSpaces((ss) => {
+      const removed = removeTabFromSpace(ss, activeSpaceIdRef.current, id);
+      if (removed === ss) return ss;
+      return removed.map((s) =>
+        s.id === activeSpaceIdRef.current && s.layout
+          ? { ...s, layout: closePaneIn(s.layout, id) }
+          : s);
+    });
     setTabs((ts) => {
       const remaining = closeTabList(ts, id);
       if (id === active) {
@@ -479,9 +492,24 @@ export function App() {
         // member last" fix still lands on a real survivor.
         const mine = new Set(activeSpace?.tabIds ?? []);
         const survivors = remaining.filter((x) => mine.has(x.id));
+        // Prefer a PLACED survivor (one with a pane) when a split is up. MRU
+        // alone can pick a tab with no cell — after a restore `lastActivated` is
+        // empty, every survivor ties at 0, and `reduce` takes the first one in
+        // `remaining`'s (tab-store) order, which is not necessarily one anyone
+        // can currently see. Reproduced with a 3-pane split where the strip's
+        // first tab is a member evicted from its cell by `showIn` (KAN-46 review
+        // #3): re-picking it left the active tab highlighted on the strip with
+        // no visible pane, and clicking it was a no-op (`showIn` treats
+        // `tabId === focusedTabId` as already-shown). With no split `layout` is
+        // null, `placedIds` is empty, and this falls through to plain MRU —
+        // byte-for-byte the old behaviour.
+        const placedIds = new Set(layout?.cells.map((c) => c.tabId) ?? []);
+        const pool = survivors.some((x) => placedIds.has(x.id))
+          ? survivors.filter((x) => placedIds.has(x.id))
+          : survivors;
         // Most-recently-activated survivor; '' only when the space is now empty.
-        setActive(survivors.length
-          ? survivors.reduce((a, b) =>
+        setActive(pool.length
+          ? pool.reduce((a, b) =>
             (lastActivated.current.get(b.id) ?? 0) > (lastActivated.current.get(a.id) ?? 0) ? b : a).id
           : '');
       }
@@ -754,10 +782,18 @@ export function App() {
    *
    * Fractions are dropped: the track count changed, so the old ones describe a
    * grid that no longer exists.
+   *
+   * Bases off the RENDERED `layout` memo, not `s.layout` — a layout whose cells
+   * all belonged to since-closed tabs is a corpse (`{cells: []}` before
+   * sanitize's KAN-46 review #1 fix, and a pre-fix workspace.json can still hand
+   * one to a fresh session): falling back to `s.layout` finds cells but no
+   * `focusedTabId` among them, `splitLayout` no-ops, and split view is dead for
+   * the rest of the space's life. `layout` has already had exactly that case
+   * pruned to `null`, which is what lets the `single(active)` fallback fire.
    */
   const splitPane = (tabId: string, axis: 'col' | 'row') => {
     mapActiveSpace((s) => {
-      const base = s.layout ?? (active ? single(active) : null);
+      const base = layout ?? (active ? single(active) : null);
       if (!base) return s;
       const next = splitLayout(base, active, tabId, axis);
       if (next === base) return s;
@@ -771,10 +807,12 @@ export function App() {
   const closePane = (tabId: string) => {
     const survivor = layout?.cells.find((c) => c.tabId !== tabId)?.tabId;
     mapActiveSpace((s) => {
-      if (!s.layout) return s;
+      // Same reasoning as `splitPane`: base off the pruned `layout` memo, not
+      // `s.layout`, or a corpse layout (all cells dead) leaves this a no-op too.
+      if (!layout) return s;
       return {
         ...s,
-        layout: closePaneIn(s.layout, tabId),
+        layout: closePaneIn(layout, tabId),
         colFractions: undefined,
         rowFractions: undefined,
       };

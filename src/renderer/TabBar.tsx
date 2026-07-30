@@ -269,6 +269,26 @@ export function TabBar({
       {menu && (() => {
         const t = tabs.find((x) => x.id === menu.id);
         const hasPane = splitActions.placed.includes(menu.id);
+        // Exactly one of these two is ever offered, because "does this tab have
+        // a pane" is the whole state machine: a tab with no pane can be split
+        // into one, a tab with a pane can lose it. Splitting a tab that is
+        // already on screen would just be a move, and closing the only pane
+        // there is is what `layout: null` already means.
+        //
+        // Empty for the common case — the active tab with no split up
+        // (`hasPane && !split`, "close pane" makes no sense with nothing to
+        // close). Its leading separator rides along with it: spread in below
+        // ONLY when there is something to separate, or an empty array between
+        // two unconditional separators renders a double rule (ContextMenu does
+        // not collapse runs of them) every time that common case hits.
+        const splitItems = hasPane
+          ? splitActions.split
+            ? [{ label: 'Close pane', onClick: () => splitActions.onClosePane(menu.id) }]
+            : []
+          : [
+            { label: 'Split right', onClick: () => splitActions.onSplit(menu.id, 'col' as const) },
+            { label: 'Split down', onClick: () => splitActions.onSplit(menu.id, 'row' as const) },
+          ];
         return (
           <ContextMenu
             x={menu.x}
@@ -279,20 +299,7 @@ export function TabBar({
               { label: 'Open in File Explorer', onClick: () => onOpenExplorer(menu.id) },
               { label: 'Open Terminal', onClick: () => onOpenTerminal(menu.id) },
               { label: 'Open in IDE', onClick: () => onOpenIde(menu.id) },
-              { separator: true },
-              // Exactly one of these two is ever offered, because "does this tab
-              // have a pane" is the whole state machine: a tab with no pane can
-              // be split into one, a tab with a pane can lose it. Splitting a
-              // tab that is already on screen would just be a move, and closing
-              // the only pane there is is what `layout: null` already means.
-              ...(hasPane
-                ? splitActions.split
-                  ? [{ label: 'Close pane', onClick: () => splitActions.onClosePane(menu.id) }]
-                  : []
-                : [
-                  { label: 'Split right', onClick: () => splitActions.onSplit(menu.id, 'col' as const) },
-                  { label: 'Split down', onClick: () => splitActions.onSplit(menu.id, 'row' as const) },
-                ]),
+              ...(splitItems.length ? [{ separator: true as const }, ...splitItems] : []),
               { separator: true },
               { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
               // KAN-45 integration review #2: `groups` is the whole workspace's
