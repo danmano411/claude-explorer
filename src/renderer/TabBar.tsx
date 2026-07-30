@@ -98,18 +98,15 @@ interface Props {
   onOpenExplorer: (id: string) => void;
   onOpenTerminal: (id: string) => void;
   onOpenIde: (id: string) => void;
-  /** Rendered at the very left edge, before the File menu (KAN-45). Same
-   *  slot-shaped prop as `fileMenu` — the strip stays presentational and App
-   *  owns the space state. */
+  /** Rendered at the very left edge — the only control there. The File menu
+   *  (New Tab / Open Recent) used to live in this strip too, but KAN-55 moved
+   *  it into the native app menu, so `spaceMenu` is on its own now. */
   spaceMenu: ReactNode;
-  /** The File menu (KAN-54), which swallowed the old standalone Open Recent
-   *  button. These two are the ONLY controls at the strip's left edge. */
-  fileMenu: ReactNode;
 }
 
 export function TabBar({
   tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
-  onReorderGroup, onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu, fileMenu,
+  onReorderGroup, onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
   let drag: DragPayload = null;
@@ -438,7 +435,6 @@ export function TabBar({
       onDragEnd={cancelDrag}
     >
       {spaceMenu}
-      {fileMenu}
       {/* Chrome's model: a group is a contiguous run of the one horizontal
           strip. segments() does the chopping; groups.ts guarantees contiguity,
           so there is no layout maths here — an ungrouped run renders exactly as

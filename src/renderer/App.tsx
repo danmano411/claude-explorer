@@ -908,11 +908,6 @@ export function App() {
             onDelete={onDeleteSpace}
           />
         }
-        // File ▾ (New Tab / Open Recent) moved to the native app menu (KAN-55);
-        // TabBar's `fileMenu` slot is out of scope for this task (owned by the
-        // tab-strip work, not touched here), so it's handed null rather than
-        // ripped out of TabBar's props.
-        fileMenu={null}
       />
       <div className="content" ref={contentRef} style={placement.container}>
         {/* Files and viewer panes are mounted only while visible, exactly as

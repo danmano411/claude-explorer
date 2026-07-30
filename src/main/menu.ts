@@ -38,7 +38,7 @@ function sendSession(path: string, resumeId?: string) {
  * with an ellipsized session title.
  */
 export function relTime(ms: number, now = Date.now()): string {
-  const s = Math.max(0, Math.round((now - ms) / 1000))
+  const s = Math.round((now - ms) / 1000)
   if (s < 60) return 'just now'
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ago`
@@ -87,7 +87,8 @@ export interface FileMenuActions {
  *     New Tab            Ctrl+T
  *     Close Tab          Ctrl+W
  *     ---
- *     Open Recent >  <folder path> >  + New session
+ *     Open Recent >  <folder path> >  Open Folder
+ *                                     + New session
  *                                     ---
  *                                     <session title>   2h ago
  *     ---
@@ -95,14 +96,15 @@ export interface FileMenuActions {
  *
  * Electron menu templates are STATIC — there is no per-submenu lazy-open hook
  * on Windows, so every session of every recent folder is read before the user
- * has clicked anything. That is exactly why listSessions() caps at 20 and
- * memoises by path+mtime.
+ * has clicked anything. That is exactly why buildMenu() caps listSessions() at
+ * 20 and sessions.ts memoises by path+size+mtime.
  *
- * ponytail: on Windows a submenu parent cannot be activated by a user click —
- * clicking `<folder path>` opens its submenu and never fires the handler below,
- * so the folder-open action is reachable from the harness (by id) but not from
- * a mouse. Give the folder submenu its own "Open Folder" row if that turns out
- * to matter; it is not in the tree the ticket froze.
+ * The `<folder path>` row carries NO click handler on purpose: on Windows a
+ * menu item that owns a submenu is never activated by the mouse — hovering or
+ * clicking it opens the popup and the callback never fires. So "open a files
+ * tab on this folder" has to be its own row inside the submenu ("Open Folder"),
+ * or it is dead code that only a programmatic caller can reach. Do not move it
+ * back onto the parent.
  */
 export function fileSubmenu(
   folders: FolderSessions[],
@@ -124,8 +126,8 @@ export function fileSubmenu(
           return {
             id: `recent:${i}`,
             label: amp(f.path),
-            click: () => actions.command('open-path', f.path),
             submenu: [
+              { id: `recent:${i}:open`, label: 'Open Folder', click: () => actions.command('open-path', f.path) },
               { id: `recent:${i}:new`, label: '+ New session', click: () => actions.session(f.path) },
               { type: 'separator' },
               ...sessions,
@@ -152,8 +154,11 @@ let lastBuilt = 0
 
 export async function buildMenu(): Promise<void> {
   const mine = ++generation
+  // The cap lives HERE, not in listSessions' default: it is a menu concern (past
+  // a screenful a menu is the wrong control), and sessions:list is also the
+  // resume oracle, which must see every conversation. See sessions.ts.
   const folders: FolderSessions[] = await Promise.all(
-    listRecents().map(async (r) => ({ path: r.path, sessions: await listSessions(r.path) })),
+    listRecents().map(async (r) => ({ path: r.path, sessions: await listSessions(r.path, 20) })),
   )
   if (mine !== generation) return
   lastBuilt = Date.now()
@@ -208,15 +213,26 @@ export async function buildMenu(): Promise<void> {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+let pendingRebuild: ReturnType<typeof setTimeout> | null = null
+
 /**
  * Refresh on window focus, at most once every 5s. Focus is the only signal we
  * get that sessions changed under us (a Claude tab appends to its jsonl the
- * whole time it runs, and nothing tells the main process), but it also fires on
- * every alt-tab. Leading edge and SKIP rather than defer: a skipped rebuild is
- * one stale timestamp for a few seconds, and the next focus picks it up — a
- * trailing timer would rebuild the menu while the user is in another app.
+ * whole time it runs, and nothing tells the main process; recents:add fires
+ * from claudeSpawn, i.e. BEFORE Claude has written a transcript to find).
+ *
+ * TRAILING edge: a focus inside the window defers the rebuild to the end of it
+ * rather than dropping it. Dropping meant a user who focused once, early, kept
+ * that menu until they alt-tabbed again — the list converges here instead.
+ *
+ * ponytail: a user who focuses the window once and never leaves it still sees
+ * whatever the last rebuild found; sessions started after it are missing until
+ * the next focus. Watch ~/.claude/projects/<slug> if that becomes a complaint —
+ * a watcher per recent folder is a lot of machinery for a timestamp.
  */
 export function buildMenuThrottled(): void {
-  if (Date.now() - lastBuilt < 5000) return
-  void buildMenu()
+  if (pendingRebuild) return
+  const wait = 5000 - (Date.now() - lastBuilt)
+  if (wait <= 0) { void buildMenu(); return }
+  pendingRebuild = setTimeout(() => { pendingRebuild = null; void buildMenu() }, wait)
 }

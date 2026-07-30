@@ -58,7 +58,8 @@ fs.mkdirSync(EMPTY_DIR, { recursive: true });
 const PROFILE = path.join(os.tmpdir(), `claude-explorer-filemenu-${process.pid}`);
 fs.rmSync(PROFILE, { recursive: true, force: true });
 
-const CAP = 20; // src/main/sessions.ts listSessions' default
+const CAP = 20; // what src/main/menu.ts buildMenu() passes listSessions (whose
+                // own default is uncapped — sessions:list is the resume oracle).
 const MARKER_RE = /RESUME-OK-\d{6}|PROBE-OK-\d{6}/;
 
 const slugFor = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
@@ -159,6 +160,24 @@ const clickItem = (id) => app.evaluate(({ Menu }, wanted) => {
   return true;
 }, id);
 
+/**
+ * Focus the visible terminal, optionally type, then send a key. Every Playwright
+ * call is caught, for the same reason paneText() is: a pane that never opened
+ * (or a spawn that died) must be reported by the assertions below as FAILs, not
+ * thrown out of the run — an escaping rejection skips every remaining check, the
+ * N/M summary, close(), and the EMPTY_DIR cleanup, and reports as a stack trace.
+ */
+const typeIntoPane = async (text, key = 'Enter') => {
+  try {
+    await win.locator(VIS + '.xterm-screen').click({ timeout: 5_000 });
+    if (text) {
+      await win.keyboard.type(text);
+      await win.waitForTimeout(300);
+    }
+    await win.keyboard.press(key);
+  } catch { /* the assertion that depends on this reports it */ }
+};
+
 /** buildMenu() is async and fire-and-forget from its triggers; poll for it. */
 const menuWhere = async (pred, ms = 10_000) => {
   let tree = null;
@@ -242,44 +261,73 @@ let ei = folderIndex(tree, EMPTY_DIR);
 // --- 4. inside a folder row ----------------------------------------------
 {
   const kids = recentSub(tree)[ci]?.submenu ?? [];
-  check('+ New session leads the folder’s submenu, then a separator, then sessions',
-    kids[0]?.label === '+ New session' && kids[0]?.id === `recent:${ci}:new`
-    && kids[1]?.type === 'separator',
-    kids.slice(0, 3).map((k) => k.label || k.type).join(' | '));
+  check('the folder’s submenu leads with Open Folder, then + New session, then a separator',
+    kids[0]?.label === 'Open Folder' && kids[0]?.id === `recent:${ci}:open`
+    && kids[1]?.label === '+ New session' && kids[1]?.id === `recent:${ci}:new`
+    && kids[2]?.type === 'separator',
+    kids.slice(0, 4).map((k) => k.label || k.type).join(' | '));
 
   const rows = sessionRows(tree, ci);
   check('the folder lists its sessions, ids contiguous from 0',
     rows.length > 0 && rows.every((r, j) => r.id === `recent:${ci}:session:${j}`),
     `${rows.length} rows`);
+  // A row is `<title>   <relative time>` — menu.ts joins them with exactly three
+  // spaces, and that gap is the only thing separating the two fields in a single
+  // flat label. Matched WHOLE and anchored, because the previous form split on
+  // the gap and tested the halves: when the separator breaks, split() yields ONE
+  // element, so [0] and .pop() are the same string and a title containing any
+  // digit satisfied the "time" half. Proven vacuous — with the gap sabotaged to
+  // a single space the harness ran 29/30 with that assertion PASSING. This one
+  // fails on a broken separator, a missing time, and a missing title alike.
   // `rows.length > 0 &&` is load-bearing: [].every() is true, so without it this
   // reports PASS for a menu with no session rows at all.
-  check('every session row is a title plus a relative time',
-    rows.length > 0 && rows.every((r) => /\S/.test(r.label.split('   ')[0] ?? '')
-      && /(ago|just now|yesterday|\d)/.test(r.label.split('   ').pop() ?? '')),
-    rows[0]?.label ?? '(no rows)');
-  // The cap has to BITE for this to mean anything: say so in the detail.
-  check(`the list is capped at ${CAP}`,
-    rows.length === Math.min(CAP, jsonls.length) && rows.length === ranked.length,
-    `${rows.length} rows from ${jsonls.length} transcripts on disk`);
+  const TIME = String.raw`(?:just now|yesterday|\d+[mhd] ago|\d{1,4}[./-]\d{1,2}[./-]\d{1,4})`;
+  const ROW_RE = new RegExp(String.raw`^\S(?:.*\S)? {3}${TIME}$`);
+  const malformed = rows.filter((r) => !ROW_RE.test(r.label ?? ''));
+  check('every session row is a title, three spaces, then a relative time',
+    rows.length > 0 && malformed.length === 0,
+    malformed.length ? `${malformed.length} malformed, e.g. "${malformed[0].label}"`
+      : rows[0]?.label ?? '(no rows)');
+  // Only meaningful when the fixture holds MORE transcripts than the cap. Below
+  // that, `rows.length === jsonls.length` is what a RAISED or REMOVED cap
+  // produces too, so a green here would prove nothing — hence a skip that says
+  // so rather than a check that cannot fail. (The old second clause,
+  // `rows.length === ranked.length`, was the first one restated: ranked IS this
+  // same array sliced to CAP, so it was structurally guaranteed.)
+  if (jsonls.length > CAP) {
+    check(`the list is capped at ${CAP}`, rows.length === CAP,
+      `${rows.length} rows from ${jsonls.length} transcripts on disk`);
+  } else {
+    console.log(`  SKIP  the ${CAP}-row cap cannot bite: only ${jsonls.length} transcripts in ${dir}`);
+  }
 
   const empties = recentSub(tree)[ei]?.submenu ?? [];
+  // "No session rows at all" stated as sessionRows().length, not as a count of
+  // id-carrying rows: the latter moves whenever the fixed rows above do.
   check('a folder with no sessions gets a DISABLED "No sessions" row, not an empty submenu',
-    empties.filter((r) => r.id).length === 1
+    sessionRows(tree, ei).length === 0
     && empties.some((r) => r.label === 'No sessions' && r.enabled === false),
     empties.map((r) => r.label || r.type).join(' | '));
-  check('…and it still leads with + New session — "no sessions" is about the list, not the action',
-    empties[0]?.label === '+ New session' && empties[0]?.id === `recent:${ei}:new`,
-    empties[0]?.label ?? '(none)');
+  check('…and it still leads with Open Folder and + New session — "no sessions" is about the list, not the actions',
+    empties[0]?.id === `recent:${ei}:open` && empties[0]?.label === 'Open Folder'
+    && empties[1]?.id === `recent:${ei}:new` && empties[1]?.label === '+ New session',
+    empties.slice(0, 2).map((r) => r.label || r.type).join(' | ') || '(none)');
 }
 
-// --- 5. clicking a folder row opens a files tab --------------------------
+// --- 5. the Open Folder row opens a files tab ----------------------------
+// Aimed at `recent:<i>:open`, NOT at the `recent:<i>` folder row itself. On
+// Windows a menu item that owns a submenu is never activated by the mouse —
+// hover or click opens the popup and the callback never fires — so a handler on
+// the folder row is code no user can reach, and clicking it from here (which
+// this harness CAN do: item.click() in main bypasses the shell entirely) would
+// report PASS for a dead path. See fileSubmenu()'s doc comment in main/menu.ts.
 {
   const before = await tabCount(win);
-  const fired = await clickItem(`recent:${ei}`);
+  const fired = await clickItem(`recent:${ei}:open`);
   await win.waitForTimeout(1200);
   const after = await tabCount(win);
   const crumbs = (await win.locator(VIS + '.breadcrumb').first().textContent().catch(() => '')) ?? '';
-  check('clicking a folder row opens a FILE tab on that folder', fired && after === before + 1
+  check('the folder’s Open Folder row opens a FILE tab on that folder', fired && after === before + 1
     && crumbs.includes(path.basename(EMPTY_DIR)),
     `${before}→${after} tabs, crumbs "${crumbs.trim()}"`);
 }
@@ -347,10 +395,7 @@ console.log(`\nresuming rank ${target.rank} — ${target.marker} (${target.id}),
     await win.waitForTimeout(1000);
     rows = await paneText(win);
     if (rows.includes(target.marker)) break;
-    if (/trust/i.test(rows) && i === 8) {
-      await win.locator(VIS + '.xterm-screen').click();
-      await win.keyboard.press('Enter');
-    }
+    if (/trust/i.test(rows) && i === 8) await typeIntoPane('');
   }
 
   const resumed = rows.includes(target.marker);
@@ -412,8 +457,7 @@ const knownMarkers = [...new Set(meta.map((m) => m.marker).filter(Boolean))];
 
   // Defensive, same as resume.mjs: a first run in a folder can ask to trust it.
   if (/trust/i.test(rows)) {
-    await win.locator(VIS + '.xterm-screen').click();
-    await win.keyboard.press('Enter');
+    await typeIntoPane('');
     await win.waitForTimeout(3000);
   }
 
@@ -421,10 +465,7 @@ const knownMarkers = [...new Set(meta.map((m) => m.marker).filter(Boolean))];
   // not "a tab exists", the id on disk. A fresh marker (never seen before) also
   // rules out a resume falling back to some OTHER old, unmarked transcript.
   const PROBE = `PROBE-OK-${Date.now().toString().slice(-6)}`;
-  await win.locator(VIS + '.xterm-screen').click();
-  await win.keyboard.type(`Reply with exactly this and nothing else: ${PROBE}`);
-  await win.waitForTimeout(300);
-  await win.keyboard.press('Enter');
+  await typeIntoPane(`Reply with exactly this and nothing else: ${PROBE}`);
 
   let newFile = null;
   for (let i = 0; i < 30 && !newFile; i++) {

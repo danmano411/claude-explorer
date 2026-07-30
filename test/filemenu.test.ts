@@ -1,20 +1,29 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
 import type { ClaudeSession } from '../src/shared/types'
 
-// menu.ts imports `Menu`/`BrowserWindow` from 'electron' at module scope (used
-// by target()/buildMenu(), neither of which fileSubmenu/relTime touch) and
-// transitively imports `./recents`, which imports `app`. None of these are
-// actually invoked by the tests below — fileSubmenu is documented as pure
-// (no Electron calls, no disk, no clock) — but the module can't load outside
-// an Electron process without stubs for the names it destructures.
+// menu.ts imports `Menu`/`BrowserWindow` from 'electron' at module scope and
+// transitively imports `./recents`, which imports `app`. fileSubmenu and
+// relTime are pure (no Electron calls, no disk, no clock) and touch none of
+// it, but the module can't load outside an Electron process without stubs for
+// the names it destructures — and buildMenu/buildMenuThrottled (bottom of this
+// file) DO call through, so setApplicationMenu is a hoisted spy: it is the
+// only observable signal that a rebuild actually happened.
+//
+// `app.getPath` points listRecents() at a path with no recents.json, so it
+// returns [] and buildMenu does no disk work beyond that one existsSync.
+const el = vi.hoisted(() => ({
+  buildFromTemplate: vi.fn((t: unknown) => t),
+  setApplicationMenu: vi.fn(),
+}))
+
 vi.mock('electron', () => ({
-  Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
+  Menu: { buildFromTemplate: el.buildFromTemplate, setApplicationMenu: el.setApplicationMenu },
   BrowserWindow: { getFocusedWindow: () => undefined, getAllWindows: () => [] },
   app: { getPath: () => 'C:\\fake\\userData' },
 }))
 
-const { fileSubmenu, relTime } = await import('../src/main/menu')
+const { fileSubmenu, relTime, buildMenu, buildMenuThrottled } = await import('../src/main/menu')
 type FolderSessions = { path: string; sessions: ClaudeSession[] }
 
 const session = (id: string, title: string, updated: number): ClaudeSession =>
@@ -75,11 +84,22 @@ describe('fileSubmenu — folder rows', () => {
     expect(rows.map((r) => r.label)).toEqual(['C:\\repo-a', 'C:\\repo-b'])
   })
 
-  it('a folder row click fires command(open-path, <that folder path>)', () => {
-    const { command, actions } = actionSpy()
+  it('the folder row itself carries no click (Windows never mouse-activates a submenu owner)', () => {
+    const { actions } = actionSpy()
     const tree = fileSubmenu(folders, actions)
     const row = findById(tree, 'recent:1')!
-    ;(row.click as () => void)()
+    // If this were reachable, clicking it would silently do nothing on
+    // Windows — that's the bug "Open Folder" (below) exists to fix.
+    expect(row.click).toBeUndefined()
+  })
+
+  it('submenu[0] is an "Open Folder" row (id recent:<i>:open) that fires command(open-path, <that folder path>)', () => {
+    const { command, actions } = actionSpy()
+    const tree = fileSubmenu(folders, actions)
+    const submenu = findById(tree, 'recent:1')!.submenu as MenuItemConstructorOptions[]
+    expect(submenu[0].id).toBe('recent:1:open')
+    expect(submenu[0].label).toBe('Open Folder')
+    ;(submenu[0].click as () => void)()
     // Catches an off-by-one if the click closure captures the map callback's
     // index/array by reference instead of the closed-over `f` for this row.
     expect(command).toHaveBeenCalledWith('open-path', 'C:\\repo-b')
@@ -107,21 +127,40 @@ describe('fileSubmenu — session rows', () => {
     const tree = fileSubmenu(folders, actions, now)
     const submenu = findById(tree, 'recent:0')!.submenu as MenuItemConstructorOptions[]
 
-    expect(submenu[0].id).toBe('recent:0:new')
+    // submenu[0] is "Open Folder" (covered in its own test above); "+ New
+    // session" shifted to index 1 when that row was added.
+    expect(submenu[1].id).toBe('recent:0:new')
     // Plain ASCII "+" — the old renderer used the fullwidth U+FF0B; a
     // regression reintroducing that glyph would fail this exact match.
-    expect(submenu[0].label).toBe('+ New session')
-    expect(submenu[1].type).toBe('separator')
-    expect(submenu.slice(2).map((s) => s.id)).toEqual(['recent:0:session:0', 'recent:0:session:1'])
+    expect(submenu[1].label).toBe('+ New session')
+    expect(submenu[2].type).toBe('separator')
+    expect(submenu.slice(3).map((s) => s.id)).toEqual(['recent:0:session:0', 'recent:0:session:1'])
     // Row order mirrors input order (the caller, listSessions, is what sorts
     // newest-first and caps — covered in sessions.test.ts) — a regression
     // that resorted or reversed inside fileSubmenu would swap these two.
     // The three-space gap between title and relTime is exact per the frozen
     // label format; a single-space regression would fail this match too.
-    expect(submenu.slice(2).map((s) => s.label)).toEqual([
+    expect(submenu.slice(3).map((s) => s.label)).toEqual([
       'most recent   5m ago',
       'earlier   50m ago',
     ])
+  })
+
+  it('ellipsizes a session title past TITLE_MAX, leaving one exactly at the limit untouched', () => {
+    const { actions } = actionSpy()
+    const long = 'x'.repeat(60) // well past TITLE_MAX (48) — a real prompt runs this long routinely
+    const atLimit = 'y'.repeat(48) // exactly TITLE_MAX — the boundary must NOT be touched
+    const folders: FolderSessions[] = [{
+      path: 'C:\\repo',
+      sessions: [session('long', long, 0), session('at-limit', atLimit, 0)],
+    }]
+    const tree = fileSubmenu(folders, actions, 0)
+    const rows = (findById(tree, 'recent:0')!.submenu as MenuItemConstructorOptions[]).slice(3)
+    // 47 real chars + the ellipsis glyph = 48 total; an off-by-one would
+    // either cut the 47th/48th real character or omit the ellipsis.
+    expect(rows[0].label).toBe(`${'x'.repeat(47)}…   just now`)
+    // Exactly at the boundary: no truncation, no ellipsis.
+    expect(rows[1].label).toBe(`${atLimit}   just now`)
   })
 
   it('caps at whatever length the caller passed, without adding or dropping rows', () => {
@@ -129,11 +168,11 @@ describe('fileSubmenu — session rows', () => {
     const many = Array.from({ length: 20 }, (_, i) => session(`s${i}`, `title ${i}`, i))
     const tree = fileSubmenu([{ path: 'C:\\repo', sessions: many }], actions)
     const submenu = findById(tree, 'recent:0')!.submenu as MenuItemConstructorOptions[]
-    // "+ New session" + separator + 20 rows. Off-by-one here would mean the
-    // template builder itself is truncating or duplicating, independent of
-    // whatever cap listSessions already applied to its input.
-    expect(submenu).toHaveLength(22)
-    expect(submenu.slice(2).map((s) => s.id)).toEqual(
+    // "Open Folder" + "+ New session" + separator + 20 rows. Off-by-one here
+    // would mean the template builder itself is truncating or duplicating,
+    // independent of whatever cap listSessions already applied to its input.
+    expect(submenu).toHaveLength(23)
+    expect(submenu.slice(3).map((s) => s.id)).toEqual(
       Array.from({ length: 20 }, (_, i) => `recent:0:session:${i}`),
     )
   })
@@ -177,12 +216,13 @@ describe('fileSubmenu — empty states', () => {
     const { actions } = actionSpy()
     const tree = fileSubmenu([{ path: 'C:\\repo', sessions: [] }], actions)
     const submenu = findById(tree, 'recent:0')!.submenu as MenuItemConstructorOptions[]
-    // "+ New session" and its separator still show — only the session list
-    // itself collapses to the placeholder.
-    expect(submenu[0].id).toBe('recent:0:new')
-    expect(submenu[1].type).toBe('separator')
-    expect(submenu[2]).toEqual({ label: 'No sessions', enabled: false })
-    expect(submenu).toHaveLength(3)
+    // "Open Folder", "+ New session" and its separator still show — only the
+    // session list itself collapses to the placeholder.
+    expect(submenu[0].id).toBe('recent:0:open')
+    expect(submenu[1].id).toBe('recent:0:new')
+    expect(submenu[2].type).toBe('separator')
+    expect(submenu[3]).toEqual({ label: 'No sessions', enabled: false })
+    expect(submenu).toHaveLength(4)
   })
 })
 
@@ -203,8 +243,36 @@ describe('relTime', () => {
   it('falls back to a date past a week', () => {
     expect(ago(30 * DAY)).toBe(new Date(now - 30 * DAY).toLocaleDateString())
   })
+  // FP-1: "never reads as negative when a clock skews forward" removed — the
+  // clamp it exercised was unreachable (a 200,001-input differential found
+  // zero cases where it changed the output) and has since been deleted from
+  // relTime; this assertion never failed against the unmodified build.
+})
 
-  it('never reads as negative when a clock skews forward', () => {
-    expect(relTime(now + 10 * MIN, now)).toBe('just now')
+describe('buildMenuThrottled', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    el.setApplicationMenu.mockClear()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('DEFERS a call landing inside the 5s window to the end of it instead of dropping it', async () => {
+    // Prime the throttle's `lastBuilt`: an unthrottled build, so the clock is
+    // now at the start of a fresh 5s window.
+    await buildMenu()
+    expect(el.setApplicationMenu).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1000) // 1s in — well inside the window
+    buildMenuThrottled()
+    // Nothing yet: the point of the throttle is that it does NOT rebuild here.
+    expect(el.setApplicationMenu).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(4000) // …to the end of the window
+
+    // The regression: the pre-fix shape was leading-edge DROP — a focus inside
+    // the window returned early and scheduled nothing, so a user who focused
+    // once, early, kept that stale menu until they alt-tabbed again. That shape
+    // leaves this at 1; only a trailing edge converges to 2.
+    expect(el.setApplicationMenu).toHaveBeenCalledTimes(2)
   })
 })
