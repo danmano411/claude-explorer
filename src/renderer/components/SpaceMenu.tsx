@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Space } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
-import './SpaceMenu.css'
+// Styles live in index.css (the .spacemenu block, next to .recentmenu), matching
+// every other component here — the separate stylesheet only existed because
+// index.css was owned by a parallel M5 ticket during the fan-out.
 
 /**
  * Props for SpaceMenu — the named button + dropdown at the left edge of the
@@ -30,12 +32,12 @@ import './SpaceMenu.css'
  * operation without a tab living in two spaces at once. "New empty space"
  * covers starting a second one.
  *
- * Does NOT implement the Ctrl+1..9 global shortcut — see integration note in
- * the file's task description. This component renders the accelerator
- * LABELS only ("Ctrl+1" etc, via `acceleratorLabel`); wiring the actual
- * keydown listener is a window-level concern for the integrator, who must
- * make it not fire while a terminal / address bar / search overlay / rename
- * input has focus (a terminal needs to receive Ctrl+1 itself).
+ * Does NOT implement the Ctrl+1..9 global shortcut; it renders the accelerator
+ * LABELS only ("Ctrl+1" etc, via `acceleratorLabel`). The keydown listener is a
+ * window-level concern and lives in App.tsx (KAN-45), guarded by
+ * `isTypingTarget` (renderer/keys.ts) so it never fires while a terminal /
+ * address bar / search overlay / rename input has focus — a terminal needs to
+ * receive Ctrl+1 itself.
  */
 export interface SpaceMenuProps {
   spaces: Space[]

@@ -28,6 +28,9 @@ export interface GroupActions {
 }
 
 interface Props {
+  /** The ACTIVE SPACE's ordered slice, not every tab that exists — the strip
+   *  renders one space (KAN-45). `segments()` and the `onReorder` indices below
+   *  are therefore space-relative; see the authority rule in renderer/spaces.ts. */
   tabs: Tab[];
   groups: TabGroup[];
   groupActions: GroupActions;
@@ -41,12 +44,16 @@ interface Props {
   onOpenExplorer: (id: string) => void;
   onOpenTerminal: (id: string) => void;
   onOpenIde: (id: string) => void;
+  /** Rendered at the very left edge, before the Recent menu (KAN-45). Same
+   *  slot-shaped prop as `recentMenu` — the strip stays presentational and App
+   *  owns the space state. */
+  spaceMenu: ReactNode;
   recentMenu: ReactNode;
 }
 
 export function TabBar({
   tabs, groups, groupActions, activeId, status, onSelect, onClose, onAdd, onReorder,
-  onRename, onOpenExplorer, onOpenTerminal, onOpenIde, recentMenu,
+  onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu, recentMenu,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
   let drag: DragPayload = null;
@@ -117,8 +124,9 @@ export function TabBar({
     />
   );
 
-  // Drag coordinates are indexes into the FLAT tab list, not into a segment —
-  // reorder()/reorderWithGroups() both speak that space. Collapsed members
+  // Drag coordinates are indexes into the FLAT `tabs` prop — the active space's
+  // slice (KAN-45), not into a segment. reorder()/reorderWithGroups()/
+  // reorderInSpace() all speak that space. Collapsed members
   // still occupy their indexes here, which is what keeps a drop next to a
   // collapsed group land in the same place it would if it were open.
   const indexOf = new Map(tabs.map((t, i) => [t.id, i] as const));
@@ -192,6 +200,7 @@ export function TabBar({
 
   return (
     <div className="tabbar">
+      {spaceMenu}
       {recentMenu}
       {/* Chrome's model: a group is a contiguous run of the one horizontal
           strip. segments() does the chopping; groups.ts guarantees contiguity,
@@ -247,8 +256,15 @@ export function TabBar({
               { label: 'Open in IDE', onClick: () => onOpenIde(menu.id) },
               { separator: true },
               { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
+              // KAN-45 integration review #2: `groups` is the whole workspace's
+              // list, not this strip's — filtered to groups that actually have a
+              // member ON THIS STRIP (`tabs` is the active space's slice), or a
+              // group that lives entirely in another space shows up here too,
+              // and picking it splits one group across two spaces: both strips
+              // draw a chip for it, and collapse/rename/recolor/ungroup act on
+              // both at once since those all run over the global `groups`/`tabs`.
               ...groups
-                .filter((g) => g.id !== t?.groupId)
+                .filter((g) => g.id !== t?.groupId && tabs.some((x) => x.groupId === g.id))
                 .map((g) => ({ label: `Add to “${g.name}”`, swatch: g.color, onClick: () => groupActions.add(menu.id, g.id) })),
               ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
               { separator: true },

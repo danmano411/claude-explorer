@@ -7,6 +7,7 @@ import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, OpError, 
 import { unwrap, type ConfirmRequest } from '../opresult';
 import { gutterMarks, markKey, type GutterMark } from '../diffparse';
 import { IDLE_MS } from '../ptystatus';
+import { isTypingTarget } from '../keys';
 import { useAppState } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
@@ -348,8 +349,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   // keyboard shortcuts
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const typing = tag === 'INPUT' || tag === 'TEXTAREA';
+      const typing = isTypingTarget(e.target);
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
       if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
