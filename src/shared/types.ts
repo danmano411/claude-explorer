@@ -157,6 +157,18 @@ export interface Space {
   id: string
   name: string
   tabIds: string[] // ordered; membership of this space
+  // ponytail: nothing in App.tsx (closeTab/onDeleteSpace) or spaces.ts's
+  // withoutTab/addTabToSpace prunes `layout.cells` when a tab it names closes
+  // or moves to another space (KAN-45 integration review #4, CONFIRMED, fix
+  // deferred to whichever ticket wires gridPlacement() into App.tsx — nothing
+  // renders `layout` yet on this branch, so a stale cell is inert today).
+  // `gridPlacement()` does not repair this either: it drops out-of-bounds and
+  // overlapping cells but not ones naming a dead tab. Whoever wires the grid
+  // render path needs to prune on the same "a tab leaves this space" paths
+  // this comment is attached to — likely `withoutTab` in spaces.ts, which
+  // would need `GridCell`/`gridlayout.remove`, currently NOT imported there
+  // on purpose (the module doc: "nothing here imports Space and this file
+  // stays a leaf") — that tradeoff needs revisiting at the same time.
   layout: GridLayout | null
   /** The tab that had focus when this space was last left, so a restart lands
    *  where you were instead of on tab 1. Optional: a workspace.json written by

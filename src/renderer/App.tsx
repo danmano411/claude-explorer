@@ -214,7 +214,20 @@ export function App() {
     if (!t || !needsSpawn(t) || spawning.current.has(t.id)) return;
     spawning.current.add(t.id);
     spawnFor(t)
-      .then((ptyId) => update(t.id, { ptyId }))
+      .then((ptyId) => {
+        // The tab (or its whole space) can have been closed while the spawn
+        // was in flight — a Claude spawn is the slowest thing this app does,
+        // easily ~2 minutes (resume.mjs's own comment). `update` no-ops on a
+        // missing id, which used to leak the process: no ptyId is ever
+        // recorded anywhere, so nothing can find it to kill it (KAN-45
+        // integration review #1). Checked against the list React is about to
+        // commit, not this closure's `tabs`, for the same KAN-37 reason every
+        // other functional updater here is.
+        setTabs((ts) => {
+          if (!ts.some((x) => x.id === t.id)) { window.api.ptyKill(ptyId); return ts; }
+          return ts.map((x) => (x.id === t.id ? { ...x, ptyId } : x));
+        });
+      })
       .finally(() => spawning.current.delete(t.id));
   }, [active, tabs]);
 
@@ -334,18 +347,22 @@ export function App() {
   // is an await, and an ungroup during it would otherwise tag the new tab with
   // a group its source has already left.
   //
-  // ponytail: the dedupe scans EVERY tab, not just this space's, so re-opening a
-  // file that a background space already has open moves that tab here rather
-  // than making a second one — addTabToSpace evicts it from the other space, so
-  // the exactly-one-owner rule holds either way. Viewer tabs own no process, so
-  // nothing dies; scope the `find` in openViewerTabList to the active space's
-  // membership if someone would rather have one viewer per space.
+  // KAN-45 integration review #3: the dedupe is scoped to the ACTIVE space's
+  // membership, not the whole store — re-opening a file a background space
+  // already has open makes a second viewer tab here instead of stealing that
+  // space's tab. The alternative (move it here, `expand` its groupId too) was
+  // rejected: a moved tab would still be tagged with a group the receiving
+  // space never showed a chip for, reproducing finding #2's cross-space split
+  // through a second door. Viewer tabs own no process, so a duplicate costs
+  // nothing to close. `activeSpace` is read from this render's closure, same
+  // as `applyToSlice` — menu/click-driven, one call per user action.
   const openViewerTab = async (filePath: string, mode: 'file' | 'diff' = 'file', sourceId?: string) => {
     const link = sourceId !== undefined && (await window.api.settingsGet()).groupWithSource;
+    const scope = new Set(activeSpace?.tabIds ?? []);
     setTabs((ts) => {
       const groupId = link ? ts.find((t) => t.id === sourceId)?.groupId : undefined;
       if (groupId !== undefined) expand(groupId);
-      const { tabs: next, id } = openViewerTabList(ts, filePath, mode, groupId);
+      const { tabs: next, id } = openViewerTabList(ts, filePath, mode, groupId, scope);
       placeInSpace(id, groupId, next);
       selectTab(id);
       return next;
@@ -548,9 +565,19 @@ export function App() {
     setActive(focus);
   };
 
+  // KAN-45 integration review #5: `spaces` (this render's closure) is used
+  // only to mint the new space's fixed id up front — `createSpace` calls
+  // `crypto.randomUUID()`, so it cannot be re-run against a fresher list
+  // without producing a SECOND id that `goToSpace` below would never match.
+  // The actual write is the functional form appending that one already-built
+  // object, which composes correctly no matter what else lands in `spaces`
+  // first: two `onCreateSpace` calls in one tick used to fight over the same
+  // stale snapshot and the loser's space vanished (`setSpaces(next)` on a
+  // closure read); appending by reference can't lose a sibling append.
   const onCreateSpace = (name: string) => {
-    const { spaces: next, id } = createSpace(spaces, name);
-    setSpaces(next);
+    const { spaces: withNew, id } = createSpace(spaces, name);
+    const created = withNew[withNew.length - 1];
+    setSpaces((ss) => [...ss, created]);
     goToSpace(id);
     setActive(''); // a new space is empty; `+` is how you fill it
   };
@@ -564,7 +591,18 @@ export function App() {
     for (const t of tabs) if (doomed.has(t.id) && t.ptyId) window.api.ptyKill(t.ptyId);
     for (const tid of r.closedTabIds) lastActivated.current.delete(tid);
     setTabs((ts) => ts.filter((t) => !doomed.has(t.id)));
-    setSpaces(r.spaces);
+    // The actual persisted array is recomputed against the list React is
+    // about to commit, not the `r` above (KAN-45 integration review #5) — `r`
+    // exists only to drive the synchronous side effects (which PTYs die,
+    // which space to land on), all of which are decided by `id` and this
+    // space's own membership and so hold regardless of what else is queued.
+    // `deleteSpace` refusing (LAST_SPACE) against a fresher list it can't
+    // currently reach is a real possibility under composition; falling back
+    // to `ss` unchanged is exactly its own no-op convention.
+    setSpaces((ss) => {
+      const rr = deleteSpace(ss, activeSpaceIdRef.current, id);
+      return rr.ok ? rr.spaces : ss;
+    });
     goToSpace(r.activeSpaceId);
     setActive(focusOf(r.spaces.find((s) => s.id === r.activeSpaceId)));
   };

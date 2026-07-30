@@ -132,12 +132,25 @@ export function closeTabList(ts: Tab[], id: string): Tab[] {
  * already does exactly "tag + move to the group's right edge", appending the
  * new tab first (ungrouped, at the far end) makes that the tab it operates
  * on, so no separate insertion logic is needed here.
+ *
+ * `scopeIds`, when given, restricts the dedupe search to that set of ids
+ * (KAN-45-integration review #3). Without it the "already open?" check scans
+ * every tab in the store, so re-opening a file that a background SPACE
+ * already has open relocates that tab into the caller's space instead of
+ * making a second one — fine for exactly-one-owner, but if that tab's
+ * groupId names a group that only exists in the other space, it arrives
+ * pre-tagged with a groupId the receiving space never showed a chip for, and
+ * a COLLAPSED source group hides it outright (no highlighted tab anywhere).
+ * A caller that wants dedupe scoped to one space's membership (one open
+ * viewer per space, matching that space's own groups) passes that space's
+ * tab ids here; omitting it keeps the old whole-store behaviour.
  */
 export function openViewerTabList(
-  ts: Tab[], filePath: string, mode: 'file' | 'diff', sourceGroupId?: string,
+  ts: Tab[], filePath: string, mode: 'file' | 'diff', sourceGroupId?: string, scopeIds?: ReadonlySet<string>,
 ): { tabs: Tab[]; id: string } {
   const open = ts.find(
-    (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode,
+    (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode &&
+      (scopeIds === undefined || scopeIds.has(t.id)),
   )
   if (open) return { tabs: ts, id: open.id }
   const t = newViewerTab(filePath, mode)

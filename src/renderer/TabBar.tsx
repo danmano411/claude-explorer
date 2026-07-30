@@ -256,8 +256,15 @@ export function TabBar({
               { label: 'Open in IDE', onClick: () => onOpenIde(menu.id) },
               { separator: true },
               { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
+              // KAN-45 integration review #2: `groups` is the whole workspace's
+              // list, not this strip's — filtered to groups that actually have a
+              // member ON THIS STRIP (`tabs` is the active space's slice), or a
+              // group that lives entirely in another space shows up here too,
+              // and picking it splits one group across two spaces: both strips
+              // draw a chip for it, and collapse/rename/recolor/ungroup act on
+              // both at once since those all run over the global `groups`/`tabs`.
               ...groups
-                .filter((g) => g.id !== t?.groupId)
+                .filter((g) => g.id !== t?.groupId && tabs.some((x) => x.groupId === g.id))
                 .map((g) => ({ label: `Add to “${g.name}”`, swatch: g.color, onClick: () => groupActions.add(menu.id, g.id) })),
               ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
               { separator: true },
