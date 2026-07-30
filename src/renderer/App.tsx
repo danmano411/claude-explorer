@@ -23,7 +23,7 @@ import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
-import { RecentMenu } from './components/RecentMenu';
+import { FileMenu } from './components/FileMenu';
 import { SettingsModal } from './components/SettingsModal';
 import { SpaceMenu } from './components/SpaceMenu';
 import { TabBar, type GroupActions, type SplitActions } from './TabBar';
@@ -618,8 +618,9 @@ export function App() {
     });
   };
 
-  // Feature 1: Open Recent launches Claude in a NEW tab (never overrides current).
-  // KAN-47: Recent Menu is tab-bar-global, not scoped to any tab — no source
+  // Feature 1: File ▸ Open Recent ▸ a project ▸ a session launches Claude in a
+  // NEW tab (never overrides current), resuming that session.
+  // KAN-47: the File menu is tab-bar-global, not scoped to any tab — no source
   // to inherit from. Stays far-right, same as today.
   const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
     const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
@@ -855,10 +856,11 @@ export function App() {
             onDelete={onDeleteSpace}
           />
         }
-        recentMenu={
-          <RecentMenu
-            onOpen={(p, resumeId) => openClaudeNewTab(p, resumeId)}
+        fileMenu={
+          <FileMenu
+            onNewTab={addTab}
             onOpenFolder={openFolderTab}
+            onOpenSession={(p, resumeId) => openClaudeNewTab(p, resumeId)}
           />
         }
       />
