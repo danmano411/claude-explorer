@@ -1,4 +1,5 @@
 import { winBasename, winDirname } from '../shared/pathutil'
+import { addToGroup } from '../shared/groups'
 import type { PersistedTab, TabView } from '../shared/types'
 
 export interface Tab {
@@ -123,14 +124,23 @@ export function closeTabList(ts: Tab[], id: string): Tab[] {
  * the "is it already open" check has to run against the list React is about
  * to commit, not a stale closure snapshot, or two rapid opens of the same
  * file both miss each other and both append (KAN-37).
+ *
+ * `sourceGroupId`, when given, is the opening tab's groupId (KAN-47:
+ * "opened from this tab" auto-link). Applied only on the fresh-tab path —
+ * re-focusing an already-open viewer must never relocate it just because it
+ * happened to be re-opened from a differently-grouped tab. `addToGroup`
+ * already does exactly "tag + move to the group's right edge", appending the
+ * new tab first (ungrouped, at the far end) makes that the tab it operates
+ * on, so no separate insertion logic is needed here.
  */
 export function openViewerTabList(
-  ts: Tab[], filePath: string, mode: 'file' | 'diff',
+  ts: Tab[], filePath: string, mode: 'file' | 'diff', sourceGroupId?: string,
 ): { tabs: Tab[]; id: string } {
   const open = ts.find(
     (t) => t.view === 'viewer' && t.filePath === filePath && t.viewerMode === mode,
   )
   if (open) return { tabs: ts, id: open.id }
   const t = newViewerTab(filePath, mode)
-  return { tabs: [...ts, t], id: t.id }
+  const tabs = sourceGroupId !== undefined ? addToGroup([...ts, t], t.id, sourceGroupId) : [...ts, t]
+  return { tabs, id: t.id }
 }

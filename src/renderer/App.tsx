@@ -186,12 +186,17 @@ export function App() {
   const update = (id: string, patch: Partial<Tab>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
 
+  // KAN-47: `+` / Ctrl+T has no source tab — it's the global "new tab" action,
+  // same as Chrome's own new-tab button never joining a group. Stays far-right.
   const addTab = async () => {
     const home = await window.api.fsHome();
     const t = newFilesTab(home);
     setTabs((ts) => [...ts, t]); selectTab(t.id);
   };
 
+  // KAN-47: called from the CLI/Explorer-context-menu 'open-path' arm and from
+  // the (tab-bar-global, not per-tab) Recent Menu — neither has a source tab
+  // to inherit from. Stays far-right, same as today.
   const openFolderTab = (p: string) => {
     const t = newFilesTab(p);
     setTabs((ts) => [...ts, t]); selectTab(t.id);
@@ -200,9 +205,18 @@ export function App() {
   // Opening a file gets its own first-class tab (never a split pane — a split
   // could not live inside a future tab group). Re-opening the same file focuses
   // the tab that already has it instead of piling up duplicates.
-  const openViewerTab = (filePath: string, mode: 'file' | 'diff' = 'file') => {
+  //
+  // KAN-47: the tab this viewer was opened FROM is whichever tab's FileBrowser
+  // is on screen, i.e. `active` at the moment of the click — captured here,
+  // before the settingsGet await, so a tab switch mid-flight can't retarget it.
+  // The settings round-trip only happens when there's a group to inherit;
+  // an ungrouped source is already the no-op fast path.
+  const openViewerTab = async (filePath: string, mode: 'file' | 'diff' = 'file') => {
+    const sourceGroupId = tabs.find((t) => t.id === active)?.groupId;
+    const groupId = sourceGroupId !== undefined && (await window.api.settingsGet()).groupWithSource
+      ? sourceGroupId : undefined;
     setTabs((ts) => {
-      const { tabs: next, id } = openViewerTabList(ts, filePath, mode);
+      const { tabs: next, id } = openViewerTabList(ts, filePath, mode, groupId);
       selectTab(id);
       return next;
     });
@@ -316,6 +330,8 @@ export function App() {
   };
 
   // Feature 1: Open Recent launches Claude in a NEW tab (never overrides current).
+  // KAN-47: Recent Menu is tab-bar-global, not scoped to any tab — no source
+  // to inherit from. Stays far-right, same as today.
   const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
     const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
     const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd), sessionId);
@@ -323,16 +339,24 @@ export function App() {
   };
 
   // Feature 5: open a plain shell terminal tab at a folder.
-  const openShellTab = async (cwd: string) => {
+  //
+  // KAN-47: `sourceId` is the tab whose context menu spawned this — the
+  // right-clicked tab, which is not necessarily `active` — so its groupId is
+  // captured up front, same reasoning as openViewerTab above.
+  const openShellTab = async (cwd: string, sourceId?: string) => {
+    const sourceGroupId = sourceId !== undefined ? tabs.find((t) => t.id === sourceId)?.groupId : undefined;
     const ptyId = await window.api.ptySpawn({ path: cwd, shell: true });
     const t = newTerminalTab(cwd, 'shell', ptyId, 'Terminal');
-    setTabs((ts) => [...ts, t]); selectTab(t.id);
+    const groupId = sourceGroupId !== undefined && (await window.api.settingsGet()).groupWithSource
+      ? sourceGroupId : undefined;
+    setTabs((ts) => (groupId !== undefined ? addToGroup([...ts, t], t.id, groupId) : [...ts, t]));
+    selectTab(t.id);
   };
 
   // Feature 4: tab context-menu actions (resolve the tab's cwd, then act).
   const cwdOf = (id: string) => tabs.find((t) => t.id === id)?.cwd;
   const onOpenExplorer = (id: string) => { const p = cwdOf(id); if (p) window.api.openPath(p); };
-  const onOpenTerminal = (id: string) => { const p = cwdOf(id); if (p) openShellTab(p); };
+  const onOpenTerminal = (id: string) => { const p = cwdOf(id); if (p) openShellTab(p, id); };
   const onOpenIde = (id: string) => { const p = cwdOf(id); if (p) window.api.ideOpen(p); };
   const onRename = (id: string, title: string) =>
     update(id, { title: title.trim() || (cwdOf(id) ? basename(cwdOf(id)!) : 'Tab'), renamed: true });
