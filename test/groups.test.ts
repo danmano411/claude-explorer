@@ -5,6 +5,7 @@ import {
   addToGroup,
   deleteGroup,
   groupRun,
+  moveGroupRun,
   newGroup,
   normalize,
   recolorGroup,
@@ -454,6 +455,52 @@ describe('reorderWithGroups', () => {
   })
 })
 
+describe('moveGroupRun', () => {
+  const ids = (ts: Grouped[]) => ts.map((t) => t.id).join('')
+
+  it('moves every member together and keeps their internal order', () => {
+    const tabs = [tab('a'), tab('b', 'g1'), tab('c', 'g1'), tab('d')]
+    expect(ids(moveGroupRun(tabs, 'g1', 2))).toBe('adbc')
+  })
+  it('lands the run contiguous wherever it goes', () => {
+    const tabs = [tab('a'), tab('b'), tab('c', 'g1'), tab('d', 'g1'), tab('e')]
+    for (let insert = 0; insert <= 3; insert++) {
+      expect(isContiguous(moveGroupRun(tabs, 'g1', insert))).toBe(true)
+    }
+  })
+  it('keeps every member in the group', () => {
+    const tabs = [tab('a'), tab('b', 'g1'), tab('c', 'g1')]
+    expect(moveGroupRun(tabs, 'g1', 0).filter((t) => t.groupId === 'g1')).toHaveLength(2)
+  })
+  it('gathers a shredded run back into one block', () => {
+    const tabs = [tab('a', 'g1'), tab('b'), tab('c', 'g1')]
+    expect(ids(moveGroupRun(tabs, 'g1', 1))).toBe('bac')
+    expect(isContiguous(moveGroupRun(tabs, 'g1', 1))).toBe(true)
+  })
+  it('cannot be dropped among the pinned tabs', () => {
+    const tabs = [pinned('p1'), pinned('p2'), tab('a'), tab('b', 'g1'), tab('c', 'g1')]
+    const result = moveGroupRun(tabs, 'g1', 0)
+    expect(ids(result)).toBe('p1p2bca')
+    expect(isPinnedFirst(result)).toBe(true)
+  })
+  it('clamps past the end rather than throwing', () => {
+    const tabs = [tab('a', 'g1'), tab('b'), tab('c')]
+    expect(ids(moveGroupRun(tabs, 'g1', 99))).toBe('bca')
+  })
+  it('snaps OUT of another group’s span rather than shredding it', () => {
+    // insert 2 is strictly inside g2's run [1,3): nearer edge is 1 (distance 1)
+    // vs 3 (distance 1) — tie goes to the far edge, and either way g2 survives.
+    const tabs = [tab('a'), tab('b', 'g2'), tab('c', 'g2'), tab('d', 'g1')]
+    const result = moveGroupRun(tabs, 'g1', 2)
+    expect(isContiguous(result)).toBe(true)
+    expect(groupRun(result, 'g2')!.end - groupRun(result, 'g2')!.start).toBe(2)
+  })
+  it('is a no-op (same reference) for a group with no members', () => {
+    const tabs = [tab('a'), tab('b')]
+    expect(moveGroupRun(tabs, 'nope', 1)).toBe(tabs)
+  })
+})
+
 describe('strip ordering invariant sweep', () => {
   // Deterministic PRNG (mulberry32) so the sweep is reproducible, not flaky.
   function mulberry32(seed: number) {
@@ -467,7 +514,7 @@ describe('strip ordering invariant sweep', () => {
     }
   }
 
-  it('every group stays contiguous and every pinned tab stays left after any sequence of addToGroup/removeFromGroup/setPinned/reorderWithGroups', () => {
+  it('every group stays contiguous and every pinned tab stays left after any sequence of addToGroup/removeFromGroup/setPinned/reorderWithGroups/moveGroupRun', () => {
     const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
     const groupIds = ['g1', 'g2', 'g3']
 
@@ -476,7 +523,7 @@ describe('strip ordering invariant sweep', () => {
       let tabs: Grouped[] = ids.map((id) => tab(id))
 
       for (let step = 0; step < 40; step++) {
-        const op = Math.floor(rand() * 4)
+        const op = Math.floor(rand() * 5)
         if (op === 0) {
           const id = ids[Math.floor(rand() * ids.length)]
           const gid = groupIds[Math.floor(rand() * groupIds.length)]
@@ -487,6 +534,9 @@ describe('strip ordering invariant sweep', () => {
         } else if (op === 2) {
           const id = ids[Math.floor(rand() * ids.length)]
           tabs = setPinned(tabs, id, rand() < 0.5)
+        } else if (op === 3) {
+          const gid = groupIds[Math.floor(rand() * groupIds.length)]
+          tabs = moveGroupRun(tabs, gid, Math.floor(rand() * (tabs.length + 1)))
         } else {
           const from = Math.floor(rand() * tabs.length)
           const insert = Math.floor(rand() * tabs.length)

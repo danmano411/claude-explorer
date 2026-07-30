@@ -9,7 +9,7 @@ import {
 import { gridPlacement } from './splitgrid';
 import { SplitDividers } from './components/SplitDividers';
 import {
-  addToGroup, deleteGroup, newGroup, recolorGroup, removeFromGroup,
+  addToGroup, deleteGroup, moveGroupRun, newGroup, recolorGroup, removeFromGroup,
   renameGroup, reorderWithGroups, setCollapsed, setPinned,
 } from '../shared/groups';
 import {
@@ -548,6 +548,13 @@ export function App() {
     if (newGroupId !== undefined) expand(newGroupId);
   };
 
+  // Drag-by-head (KAN-52). `applyToSlice` already does exactly the right thing:
+  // moveGroupRun is a permutation of the slice that changes no record, so only
+  // the space's `tabIds` actually moves. Nothing to expand — a collapsed run
+  // drags as the one thing it looks like.
+  const reorderGroup = (groupId: string, insert: number) =>
+    applyToSlice((sl) => moveGroupRun(sl, groupId, insert));
+
   // A group with no members left is invisible (segments() only emits runs of
   // real tabs) but would still clutter the "Add to …" menu forever. Prune it
   // where every close path converges, rather than in each of them.
@@ -860,6 +867,7 @@ export function App() {
         onClose={closeTab}
         onAdd={addTab}
         onReorder={reorderTabs}
+        onReorderGroup={reorderGroup}
         onTogglePin={togglePin}
         onRename={onRename}
         onOpenExplorer={onOpenExplorer}

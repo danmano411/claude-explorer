@@ -1,12 +1,8 @@
-// Where a dragged tab lands. `over` is the hovered tab's current index; `side`
-// is which half of it the cursor is on. Returns the insert index to use AFTER
-// the dragged item has been spliced out (so it feeds straight into `reorder`).
-export function dropIndex(from: number, over: number, side: 'left' | 'right'): number {
-  let insert = side === 'right' ? over + 1 : over
-  if (from < insert) insert -= 1
-  return insert
-}
-
+// Move one item within a list. `insert` is a POST-SPLICE index: a position in
+// the list with `from` already removed, which is the coordinate space every
+// caller here speaks (groups.reorderWithGroups, groups.moveGroupRun,
+// spaces.reorderInSpace) and the one the sliding drag computes directly from
+// pointer geometry.
 export function reorder<T>(list: T[], from: number, insert: number): T[] {
   const a = [...list]
   const [moved] = a.splice(from, 1)

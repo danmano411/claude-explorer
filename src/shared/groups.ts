@@ -312,6 +312,46 @@ export function normalize<T extends Grouped>(tabs: T[], groups: TabGroup[]): T[]
 }
 
 /**
+ * Moves a whole group's run to `insert` — the drag-by-head twin of
+ * `reorderWithGroups` (KAN-52), and the reason the sliding drag does not have
+ * to hand-compute indices in the component.
+ *
+ * `insert` is a post-splice index: a position in the list with the run already
+ * removed, the same coordinate space `reorderWithGroups` and `reorder` use.
+ * Members keep their groupId and their relative order and are re-inserted as
+ * one block, so the run is contiguous by construction — this is also the only
+ * operation that can REPAIR a shredded run without `normalize()`.
+ *
+ * The landing spot is clamped twice, both for the same reason `reorderWithGroups`
+ * clamps: an invariant of the strip must not be reachable by dragging.
+ *  - Into the unpinned region. A group can never own a pinned tab (`setPinned`
+ *    strips the groupId), so a run parked among the pinned tabs would put a
+ *    group's chrome left of tabs that are forbidden from ever joining it.
+ *  - Out of any OTHER group's span, snapping to whichever edge of that span is
+ *    nearer. Dropping one run into the middle of another would shred the one
+ *    being landed on — the drop has to lose, because the dragged run is the
+ *    thing the user is aiming.
+ *
+ * No-op (same reference) for a group with no members.
+ */
+export function moveGroupRun<T extends Grouped>(tabs: T[], groupId: string, insert: number): T[] {
+  const members = tabs.filter((t) => t.groupId === groupId)
+  if (members.length === 0) return tabs
+  const rest = tabs.filter((t) => t.groupId !== groupId)
+
+  let at = Math.max(pinBoundary(rest), Math.min(insert, rest.length))
+  for (const gid of new Set(rest.map((t) => t.groupId))) {
+    if (gid === undefined) continue
+    const run = groupRun(rest, gid)!
+    if (run.start < at && at < run.end) {
+      at = at - run.start < run.end - at ? run.start : run.end
+      break
+    }
+  }
+  return [...rest.slice(0, at), ...members, ...rest.slice(at)]
+}
+
+/**
  * Group-aware wrapper around tabreorder's `reorder()`. Performs the same
  * positional move (composes with it rather than re-deriving the splice
  * logic), then decides the moved tab's new groupId from where it landed:
@@ -323,8 +363,8 @@ export function normalize<T extends Grouped>(tabs: T[], groups: TabGroup[]): T[]
  *   leaves it ungrouped.
  *
  * `insert` uses the same coordinate space `reorder()` itself expects: the
- * index into the list AFTER `from` has been spliced out (see dropIndex's
- * doc comment in tabreorder.ts). Out-of-range `from`/`insert` are clamped
+ * index into the list AFTER `from` has been spliced out (see tabreorder.ts).
+ * Out-of-range `from`/`insert` are clamped
  * rather than thrown on, per this module's no-throw rule.
  *
  * KAN-53: that clamp also confines the drag to the tab's own REGION. A pinned
