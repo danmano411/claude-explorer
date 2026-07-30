@@ -1,0 +1,72 @@
+/* KAN-46 split view.
+ *
+ * ponytail: this lives beside the component instead of in index.css because
+ * three other M5 tickets (KAN-43/44/47) own index.css right now. It uses only
+ * Retro Claude custom properties, so it inherits the existing
+ * prefers-color-scheme block in index.css for free and needs no dark-mode rules
+ * of its own. At integration, paste this block at the end of index.css under a
+ * `===== Split view =====` heading and delete the `import './SplitGrid.css'`
+ * line from SplitGrid.tsx — nothing else changes.
+ */
+
+.split-grid {
+  display: grid;
+  gap: 0; /* panes tile edge to edge; the seam is the panes' own 1px ring */
+  width: 100%;
+  height: 100%;
+  /* A grid item's default min-height is auto, which lets tall content push the
+     track past its fr share — a terminal would then overflow the window
+     instead of scrolling inside its pane. Same reason on the container: it is
+     itself a flex child at the call site. */
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  user-select: none;
+}
+
+.split-pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+  user-select: text;
+  /* An inset ring rather than a border: a border shrinks the content box, so
+     focusing a pane would change its content's pixel size and force every
+     terminal in the grid to re-fit on every focus change. box-shadow costs no
+     layout. */
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.split-pane.focused {
+  box-shadow: inset 0 0 0 2px var(--clay);
+  z-index: 1; /* the focus ring reads as continuous over the neighbour's ring */
+}
+
+/* Handles are grid items on the same grid as the panes (see dividerArea), so
+   they follow the template during a drag with no JS. Stacked above the panes
+   so the browser's own hit-testing picks them. */
+.split-divider {
+  z-index: 2;
+  background: transparent;
+  transition: background 90ms linear;
+  /* 9px of grab, centred on a seam the eye reads as 1px — the Fitts's-law
+     target has to be bigger than the thing it points at. */
+}
+.split-divider.col {
+  width: 9px;
+  margin-left: -4px;
+  justify-self: start;
+  cursor: col-resize;
+}
+.split-divider.row {
+  height: 9px;
+  margin-top: -4px;
+  align-self: start;
+  cursor: row-resize;
+}
+.split-divider:hover,
+.split-divider.dragging {
+  background: var(--clay-soft);
+}
