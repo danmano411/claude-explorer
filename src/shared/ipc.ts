@@ -109,7 +109,10 @@ export interface Api {
   settingsGet(): Promise<Settings>
   settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
   clipboardReadText(): string // sync; clipboard is reachable from the preload process
-  onMenuCommand(cb: (cmd: string) => void): () => void // 'new-tab' | 'close-tab' | 'open-settings'
+  // `arg` carries the path for the CLI/Explorer entry point ('open-path' |
+  // 'open-file'); the menu-click commands never set it.
+  onMenuCommand(cb: (cmd: string, arg?: string) => void): () => void
+  // 'new-tab' | 'close-tab' | 'open-settings' | 'toggle-mode' | 'open-path' | 'open-file'
   // --- M2 viewer + diff. Read-only: no policy gate, no OpResult, nothing throws;
   // every refusal (binary / too large / not a repo / no git) is a typed union arm.
   fsRead(path: string): Promise<ReadResult>

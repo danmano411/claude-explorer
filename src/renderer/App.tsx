@@ -21,6 +21,12 @@ export function App() {
   const status = usePtyStatus();
   const lastActivated = useRef<Map<string, number>>(new Map());
   const spawning = useRef<Set<string>>(new Set());
+  // An argv/Explorer open is APPENDED to whatever restore produces, never
+  // merged into it and never allowed to lose to it: the restore effect below
+  // ends in a *replacing* setTabs(restored), so a tab added before it resolves
+  // would be silently destroyed. Held here until restore has committed.
+  const restoreDone = useRef(false);
+  const pendingCli = useRef<[string, string] | null>(null); // [cmd, path]
 
   const selectTab = (id: string) => {
     lastActivated.current.set(id, Date.now());
@@ -31,10 +37,18 @@ export function App() {
     (async () => {
       const w = await window.api.workspaceGet();
       const restored = w.tabs.map(fromPersisted).filter((t): t is Tab => t !== null);
-      if (restored.length) { setTabs(restored); selectTab(restored[0].id); return; }
-      const home = await window.api.fsHome();
-      const t = newFilesTab(home);
-      setTabs([t]); selectTab(t.id);
+      if (restored.length) { setTabs(restored); selectTab(restored[0].id); }
+      else {
+        const home = await window.api.fsHome();
+        const t = newFilesTab(home);
+        setTabs([t]); selectTab(t.id);
+      }
+      // Both branches end in a replacing setTabs, so the gate is flushed here —
+      // after restore has committed — on either path.
+      restoreDone.current = true;
+      const p = pendingCli.current;
+      pendingCli.current = null;
+      if (p) applyCli(p[0], p[1]);
     })();
   }, []);
 
@@ -89,13 +103,32 @@ export function App() {
 
   // Application menu (File/Settings) posts commands; dispatch through a ref so
   // the subscription (mounted once) always calls the latest closures.
-  const menuHandler = useRef<(cmd: string) => void>(() => {});
-  menuHandler.current = (cmd) => {
+  // The CLI / Explorer context menu rides the same fire-and-forget channel the
+  // app menu uses (main/index.ts sendPendingCli), with the path in arg 2.
+  // There is deliberately NO arm that spawns Claude: an unauthenticated OS
+  // caller can only ever reach openFolderTab / openViewerTab from here. See
+  // main/cli.ts for the full reasoning — do not add a 'new-session' arm.
+  //
+  // ponytail: always appends + focuses, never dedupes against an identical
+  // restored tab. Two tabs on the same folder is the price; match on cwd and
+  // focus the existing one when someone complains.
+  const applyCli = (cmd: string, path: string) => {
+    if (cmd === 'open-path') openFolderTab(path);
+    else if (cmd === 'open-file') openViewerTab(path);
+  };
+
+  const menuHandler = useRef<(cmd: string, arg?: string) => void>(() => {});
+  menuHandler.current = (cmd, arg) => {
     if (cmd === 'new-tab') addTab();
     else if (cmd === 'close-tab') { if (active) closeTab(active); }
     else if (cmd === 'open-settings') setShowSettings(true);
+    else if (arg && (cmd === 'open-path' || cmd === 'open-file')) {
+      // Before restore commits, queue: setTabs(restored) would wipe this tab.
+      if (!restoreDone.current) { pendingCli.current = [cmd, arg]; return; }
+      applyCli(cmd, arg);
+    }
   };
-  useEffect(() => window.api.onMenuCommand((cmd) => menuHandler.current(cmd)), []);
+  useEffect(() => window.api.onMenuCommand((cmd, arg) => menuHandler.current(cmd, arg)), []);
 
   const update = (id: string, patch: Partial<Tab>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
