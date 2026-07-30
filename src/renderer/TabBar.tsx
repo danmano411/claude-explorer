@@ -214,7 +214,14 @@ export function TabBar({
             >
               {gRenaming === seg.group.id
                 ? renameInput(commitGroupRename, () => setGRenaming(null))
-                : seg.group.collapsed ? `${seg.group.name} (${seg.tabs.length})` : seg.group.name}
+                : (
+                  <>
+                    <span className="group-label-name">{seg.group.name}</span>
+                    {seg.group.collapsed && (
+                      <span className="group-label-count"> ({seg.tabs.length})</span>
+                    )}
+                  </>
+                )}
             </span>
             {/* ponytail: a collapsed group hides its members even when one of
                 them is the active tab — the pane still shows it, but its tab is

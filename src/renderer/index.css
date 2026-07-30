@@ -37,6 +37,12 @@ body {
 .app { display: flex; flex-direction: column; height: 100vh; }
 
 /* ===== Tab strip (boxy file-folder tabs) ===== */
+/* ponytail: no overflow-x here, so a strip wide enough (several groups, or
+   enough loose tabs) pushes the `+` button off-screen with no scrollbar and
+   no way back — pre-existing (tabs already silently overflowed before
+   KAN-44), but groups add real width per run (padding + border + label chip)
+   and make it easier to hit. Add `overflow-x: auto` (+ likely a fade/scroll
+   affordance so the cut-off is visible) when someone does. */
 .tabbar {
   display: flex; align-items: flex-end; gap: 2px;
   padding: 6px 8px 0 8px;
@@ -112,14 +118,19 @@ body {
   background: color-mix(in srgb, var(--group-color) 14%, transparent);
 }
 .group-label {
-  flex: none; align-self: center;
-  max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: none; align-self: center; display: flex; align-items: baseline;
+  max-width: 16ch;
   margin: 2px 1px 4px 1px; padding: 1px 8px;
   font-family: var(--font-serif); font-size: 13px; line-height: 1.4; color: var(--ink);
   background: color-mix(in srgb, var(--group-color) 45%, var(--bg-panel));
-  border-radius: 999px; cursor: pointer;
+  border-radius: var(--radius); cursor: pointer;
 }
 .group-label:hover { background: color-mix(in srgb, var(--group-color) 70%, var(--bg-panel)); }
+/* The name is the thing that shrinks (same min-width:0 + ellipsis pattern as
+   .tab-title); the "(n)" count is fixed-size chrome that must survive the
+   16ch cap intact — collapsing exists specifically to preserve that number. */
+.group-label-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-label-count { flex: none; white-space: nowrap; }
 
 /* ===== Content region ===== */
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--bg-panel); }

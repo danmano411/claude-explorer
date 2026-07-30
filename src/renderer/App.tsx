@@ -226,8 +226,22 @@ export function App() {
 
   // Group-aware: the same positional move, plus "did it land inside a group's
   // span?" — the join/leave rule lives in groups.ts, not here.
-  const reorderTabs = (from: number, insert: number) =>
-    setTabs((ts) => reorderWithGroups(ts, from, insert));
+  //
+  // If that landing spot's group happens to be collapsed, expand it: a drop
+  // is one user gesture (same one-commit reasoning groupActions relies on
+  // above), and without this a tab dropped beside a collapsed group joins it
+  // per groups.ts's inclusive edge rule and then simply isn't rendered —
+  // reads as the tab vanishing, not as "it joined a group" (KAN-44 review #2).
+  const reorderTabs = (from: number, insert: number) => {
+    const moved = tabs[from];
+    const next = reorderWithGroups(tabs, from, insert);
+    setTabs(next);
+    const newGroupId = moved && next.find((t) => t.id === moved.id)?.groupId;
+    if (newGroupId !== undefined && newGroupId !== moved?.groupId) {
+      const g = groups.find((x) => x.id === newGroupId);
+      if (g?.collapsed) setGroups(setCollapsed(groups, newGroupId, false));
+    }
+  };
 
   // A group with no members left is invisible (segments() only emits runs of
   // real tabs) but would still clutter the "Add to …" menu forever. Prune it
@@ -265,7 +279,17 @@ export function App() {
       // closeTab already kills the pty and re-picks focus; it uses setTabs's
       // functional form, so several calls in this loop compose (KAN-37). The
       // empty-group prune above then drops the group itself.
-      tabs.filter((t) => t.groupId === groupId).forEach((t) => closeTab(t.id));
+      //
+      // closeTab's re-pick, though, reads `active` from ITS OWN render
+      // closure — so only the FIRST call in this loop can win that race, and
+      // it picks from `remaining`, which still contains every other doomed
+      // member. Closing the focused member last means the call that actually
+      // sees `id === active` is the one running against the already-shrunk
+      // list, so it picks a real survivor instead of stranding `active` on a
+      // tab that no longer exists (KAN-44 review #1).
+      const doomed = tabs.filter((t) => t.groupId === groupId);
+      [...doomed.filter((t) => t.id !== active), ...doomed.filter((t) => t.id === active)]
+        .forEach((t) => closeTab(t.id));
     },
   };
 

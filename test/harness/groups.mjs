@@ -10,7 +10,12 @@
 //   3. dragging a loose tab into the group's span joins it, and dragging a
 //      member out to open space leaves it ungrouped;
 //   4. name, colour and collapsed state survive a restart;
-//   5. Ungroup keeps every tab OPEN.
+//   5. Ungroup keeps every tab OPEN;
+//   6. Close group's tabs never strands `active` on a closed tab, even when
+//      the focused tab is a group member other than the last one in the loop
+//      (KAN-44 review #1 — closeTab's re-pick reads `active` from its own
+//      render closure, so only the first of several closeTab calls in a loop
+//      can win that race).
 //
 // Drag is dispatched as real DragEvents rather than via Playwright's mouse:
 // Chromium does not synthesise HTML5 drag-and-drop from raw mouse moves. The
@@ -18,6 +23,9 @@
 // `over`/`dragFrom` out of its render closure, so React has to commit the
 // dragstart/dragover state before the drop is dispatched or the drop is a no-op
 // (which is exactly what a single combined evaluate produces).
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 import { launchApp } from './app.mjs';
 
 const results = [];
@@ -109,6 +117,52 @@ const probe = (win) => win.evaluate(() => {
 const consecutive = (xs) => xs.length > 0 && xs.every((v, i) => i === 0 || v === xs[i - 1] + 1);
 
 let clayColor; let sageColor; let orderBeforeCollapse;
+
+// ===========================================================================
+// Run 0: closing a group's tabs must never strand `active` on a closed tab.
+// Its own throwaway profile, NOT the module-shared TMP_PROFILE that Run 1/
+// Run 2 deliberately reuse across their restart — sharing it here would leave
+// Run 1 to inherit this run's leftover tabs instead of the fresh single
+// home-folder tab it assumes it's starting from.
+// ===========================================================================
+{
+  const run0Profile = path.join(os.tmpdir(), `claude-explorer-harness-groups-run0-${process.pid}`);
+  fs.rmSync(run0Profile, { recursive: true, force: true });
+  const { win, close } = await launchApp({ userDataDir: run0Profile });
+  await win.waitForSelector('.entry');
+  for (let i = 0; i < 3; i++) { await win.click('.tab.add'); await win.waitForTimeout(700); }
+  for (const [i, n] of [[0, 'A'], [1, 'B'], [2, 'C'], [3, 'D']]) await renameTab(win, i, n);
+
+  // Group A and B. Then: click B (bumps its lastActivated ahead of C/D, so
+  // it's the "most recently activated remaining tab" once A closes), THEN
+  // click A to actually focus it — A is FIRST in doomed-iteration order, so
+  // closeTab(A) is the call that matches `id === active` and does the
+  // re-pick, and B (still un-closed at that point) is what it wrongly picks:
+  // exactly the failure mode of the loop calling closeTab against a shared
+  // render closure instead of the post-A-removal tab list.
+  await tabMenu(win, 0, 'New group from this tab');
+  await tabMenu(win, 1, /^Add to /);
+  await win.locator('.tab:not(.add)').nth(1).click();
+  await win.waitForTimeout(200);
+  await win.locator('.tab:not(.add)').nth(0).click();
+  await win.waitForTimeout(200);
+
+  await groupMenu(win, "Close group's tabs");
+  await win.waitForTimeout(400);
+
+  const p = await win.evaluate(() => ({
+    activeCount: document.querySelectorAll('.tab.active').length,
+    contentChildren: document.querySelector('.content').children.length,
+  }));
+  const survivors = await titles(win);
+  check('closing a group never strands `active` on a closed tab',
+    p.activeCount === 1, JSON.stringify(p));
+  check('the content pane still renders something, not blank',
+    p.contentChildren > 0, JSON.stringify(p));
+  check('the two surviving tabs are C and D', survivors.join('') === 'CD', survivors.join(' '));
+
+  await close();
+}
 
 // ===========================================================================
 // Run 1: build a group, exercise collapse and drag, then set up the restart.
