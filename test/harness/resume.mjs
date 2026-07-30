@@ -87,9 +87,19 @@ console.log(`\nrun 1 — start a Claude session in ${CLAUDE_DIR}`);
   check('run 1: transcript saving is ON for the spawned session', !warned,
     warned ? 'inherited a Claude Code child-session marker — nothing will persist' : '');
 
+  // Leave a NON-terminal tab active before quitting. Since KAN-43 the restore
+  // lands on the tab you were last on, so a terminal left active would spawn on
+  // restore — correctly, but it would destroy this file's ability to observe
+  // laziness at all. Previously this held by accident (restore always landed on
+  // tab 1); now it has to be deliberate.
+  await win.locator('.tab:not(.add)').first().click();
   await win.waitForTimeout(1500);                 // the debounced save is 400ms
   const wsPath = path.join(userData, 'workspace.json');
   persisted = JSON.parse(fs.readFileSync(wsPath, 'utf8'));
+  const activeIsTerminal = persisted.spaces?.[0]?.activeTabId
+    === persisted.tabs.find((t) => t.view === 'terminal')?.id;
+  check('run 1: a non-terminal tab was left active, so run 2 can observe lazy spawn',
+    !activeIsTerminal, activeIsTerminal ? 'the terminal is the persisted active tab' : '');
   await close();
 }
 
