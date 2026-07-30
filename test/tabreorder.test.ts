@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dropIndex, reorder } from '../src/renderer/tabreorder'
+import { dropIndex, reorder } from '../src/shared/tabreorder'
 
 describe('dropIndex', () => {
   it('drops to the right of the target (dragging rightward)', () => {

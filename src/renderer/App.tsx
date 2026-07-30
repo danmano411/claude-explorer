@@ -3,7 +3,7 @@ import {
   newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
-import { reorder } from './tabreorder';
+import { reorder } from '../shared/tabreorder';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -91,9 +91,36 @@ export function App() {
       .finally(() => spawning.current.delete(t.id));
   }, [active, tabs]);
 
-  // Persist the tab set *and which tab is focused* so a restart puts you back
-  // where you were. Debounced: navigating a folder retitles its tab, and writing
-  // the whole document on every keystroke-fast state change is pointless churn.
+  // Persist which tab is focused IMMEDIATELY, not debounced. A tab click is
+  // user-paced, not keystroke-fast, so there is no churn to batch away — and
+  // there is no other flush that would catch it: will-quit only flushes the
+  // trash, there is no beforeunload write, so a click-then-quit inside a
+  // debounce window used to lose the selection outright (KAN-43 review D-1).
+  //
+  // Must also write `tabs`/`tabIds` here, not just `activeTabId`: sanitize()
+  // rejects an activeTabId that isn't in that write's own tab membership, so
+  // writing activeTabId alone against a brand-new tab that the (separately
+  // debounced) tabs-effect hasn't flushed to disk yet gets silently dropped
+  // back to undefined — verified by instrumenting workspace.json, it stuck at
+  // `undefined` through an entire add-tab + navigate sequence. `tabs` here is
+  // this render's closure value, not a dependency, so this still only *fires*
+  // on an `active` change — React batches the setTabs+selectTab pair that
+  // creates a new tab into one render, so the closure already has it.
+  useEffect(() => {
+    if (!tabs.length || !active) return;
+    window.api.workspaceGet().then((w) =>
+      window.api.workspaceSet({
+        ...w,
+        tabs: tabs.map(toPersisted),
+        spaces: w.spaces.map((s, i) =>
+          i === 0 ? { ...s, tabIds: tabs.map((t) => t.id), activeTabId: active } : s),
+      }));
+  }, [active]);
+
+  // Persist the tab set so a restart puts you back where you were. Debounced:
+  // navigating a folder retitles its tab, and writing the whole document on
+  // every keystroke-fast state change is pointless churn. `active` is NOT a
+  // dependency here — it has its own immediate effect above.
   //
   // ponytail: still writes spaces[0] rather than the active space — there is only
   // ever one until the spaces switcher (KAN-45) lands. Key off activeSpaceId when
@@ -106,11 +133,11 @@ export function App() {
           ...w,
           tabs: tabs.map(toPersisted),
           spaces: w.spaces.map((s, i) =>
-            i === 0 ? { ...s, tabIds: tabs.map((t) => t.id), activeTabId: active } : s),
+            i === 0 ? { ...s, tabIds: tabs.map((t) => t.id) } : s),
         }));
     }, 400);
     return () => clearTimeout(timer);
-  }, [tabs, active]);
+  }, [tabs]);
 
   // Application menu (File/Settings) posts commands; dispatch through a ref so
   // the subscription (mounted once) always calls the latest closures.

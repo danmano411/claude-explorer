@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from 'react';
 import type { Tab } from './tabs';
 import type { PtyStatus } from '../shared/types';
 import { useAppState, type DragPayload } from './appstate';
-import { dropIndex } from './tabreorder';
+import { dropIndex } from '../shared/tabreorder';
 import { ContextMenu } from './components/ContextMenu';
 
 const TAB_MIME = 'application/x-ce-tab';

@@ -14,7 +14,7 @@ import {
   segments,
   setCollapsed,
   type Grouped,
-} from '../src/renderer/groups'
+} from '../src/shared/groups'
 
 const tab = (id: string, groupId?: string): Grouped => (groupId ? { id, groupId } : { id })
 
@@ -273,6 +273,15 @@ describe('normalize', () => {
     const snapshot = structuredClone(tabs)
     normalize(tabs, groups)
     expect(tabs).toEqual(snapshot)
+  })
+  // KAN-43 review D-3: the no-op guard used to be `result.every((t,i) => t ===
+  // tabs[i])`, which is true whenever `result` is a PREFIX of `tabs` — and a
+  // trailing duplicate id always produces exactly that (the dedupe pass drops
+  // the second occurrence, which was already at the end). So the duplicate
+  // silently survived through the "nothing to repair, return original" branch.
+  it('dedupes a trailing duplicate id', () => {
+    const tabs = [tab('a'), tab('b'), tab('b')]
+    expect(normalize(tabs, []).map((t) => t.id)).toEqual(['a', 'b'])
   })
 })
 
