@@ -616,3 +616,63 @@ body {
   outline-offset: -2px;
   z-index: 1; /* the ring reads as continuous over the neighbour's edge */
 }
+
+/* ===== M5: direct manipulation (KAN-56) ===== */
+
+/* Where a drop would land. One permanently mounted element; App.tsx writes its
+   `display`/geometry straight to the DOM per zone change, never per pointer
+   move. Absolutely positioned with NO grid placement, so it takes `.content`'s
+   padding box rather than becoming a grid item, and `pointer-events: none` so
+   it can never eat the dragover that is positioning it.
+
+   Deliberately the same visual language as the file-drop affordance
+   (`.entry.drop-target`): clay wash, clay rule, nothing new in the palette. */
+.drop-indicator {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  display: none;
+  background: var(--clay-soft);
+  box-shadow: inset 0 0 0 2px var(--clay);
+  opacity: 0.55;
+}
+
+/* The lifted pane. Opacity + outline ONLY — a `transform` on an ancestor of an
+   xterm changes its containing block and its getBoundingClientRect, which
+   breaks fit and selection maths, and creates a stacking context that can hide
+   the divider handles. Pointing is the indicator's job, not the pane's. */
+.pane-dragging { opacity: 0.55; outline: 2px dashed var(--clay); outline-offset: -2px; }
+.content.dragging-pane { cursor: grabbing; user-select: none; }
+
+/* The MxN arrangement picker (Ctrl+Shift+G). Fixed and centred over `.content`
+   by App.tsx — see the render comment there for why it must not live inside it.
+   Same hard drop shadow as .ctx-menu / .modal. */
+.gridpick {
+  position: fixed;
+  transform: translate(-50%, -50%);
+  z-index: 110;
+  padding: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  box-shadow: 4px 4px 0 var(--line);
+  font-family: var(--font-serif);
+  color: var(--ink);
+  outline: none;
+}
+.gridpick-grid { display: grid; grid-template-columns: repeat(5, 22px); gap: 3px; }
+.gridpick-cell {
+  width: 22px; height: 22px; padding: 0;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.gridpick-cell.on { background: var(--clay-soft); border-color: var(--clay); }
+/* Refused by canReflow: it cannot tile the panes that exist, so it is shown as
+   unavailable rather than silently doing nothing when clicked. */
+.gridpick-cell.invalid { opacity: 0.35; cursor: default; }
+.gridpick-cell.invalid.on { background: var(--bg-sunken); border-color: var(--line); }
+.gridpick-size {
+  margin-top: 8px; text-align: center;
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft);
+}

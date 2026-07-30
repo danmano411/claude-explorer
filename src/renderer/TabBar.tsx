@@ -5,7 +5,17 @@ import { useAppState, type DragPayload } from './appstate';
 import { GROUP_COLORS, moveGroupRun, reorderWithGroups, segments } from '../shared/groups';
 import { ContextMenu } from './components/ContextMenu';
 
-const TAB_MIME = 'application/x-ce-tab';
+export const TAB_MIME = 'application/x-ce-tab';
+/**
+ * Set, with no value, only when the dragged tab ALREADY HAS a pane (KAN-56).
+ *
+ * `dataTransfer.getData()` is blocked during `dragover` but `types` is
+ * readable, so this is how the pane area picks its drop zones without knowing
+ * which tab it is: a placed tab is offered no seam zones, because vacating it
+ * compacts the grid and re-ranks the very track indices a seam is identified
+ * by (see `placeAtSeam`).
+ */
+export const PLACED_MIME = 'application/x-ce-tab-placed';
 /** Dragging a group by its label chip carries the group id, not a tab id — the
  *  two drags land through different model calls, so they need different types. */
 const GROUP_MIME = 'application/x-ce-tabgroup';
@@ -366,6 +376,11 @@ export function TabBar({
         onDragStart={(e) => {
           beginDrag({ kind: 'tab', id: t.id, ids: new Set([t.id]), moveKeys: [t.id] }, e, e.currentTarget);
           e.dataTransfer.setData(TAB_MIME, t.id);
+          // A flag, read from `types` during dragover (KAN-56). Its VALUE is
+          // never read — the tab id already rides on TAB_MIME — but it is not
+          // empty, because an empty payload is not worth relying on across
+          // Chromium's DataTransfer implementations.
+          if (splitActions.placed.includes(t.id)) e.dataTransfer.setData(PLACED_MIME, t.id);
         }}
         onDragEnter={(e) => {
           // File drag from a FileBrowser → spring-load this tab after a hover.

@@ -25,6 +25,36 @@
 //   (c) The layout AND the dragged fractions survive a restart.
 //   (d) `layout: null` is today's behaviour: `.content` is not a grid, there are
 //       no dividers, no focus ring, and exactly one visible pane.
+//   (e) KAN-56 DIRECT MANIPULATION (run 4): a tab dragged off the strip onto a
+//       pane's edge quarter splits that pane on that axis and lands in the new
+//       cell; onto its centre it replaces the occupant; a pane Alt+dragged onto
+//       another swaps them, and onto an edge moves it with the grid still
+//       tiling exactly. Ctrl+Shift+G's picker applies an MxN arrangement in
+//       strip order, refuses every pick that cannot tile exactly, and Escapes
+//       with no state change. THE SAME LIVE TERMINAL, with the scrollback it
+//       printed before any of this, survives every one of those gestures.
+//
+// HOW THE DRAGS ARE DRIVEN, because HTML5 DnD and pointer DnD are not the same
+// problem and this harness uses both:
+//
+//   * A PANE drag is Alt + primary button on pointer events, so Playwright's
+//     real mouse drives it end to end and the DOM is readable THROUGHOUT — the
+//     mid-drag `.drop-indicator` readings come from a real drag in flight.
+//   * A TAB drag off the strip is HTML5 DnD. Playwright's real mouse does
+//     perform it — verified: the drop lands and the layout changes — but on
+//     Windows the renderer is inside Chromium's drag loop while it is in
+//     flight, so an `evaluate()` sampled mid-drag reports the PRE-drag DOM. So:
+//     every tab drag whose OUTCOME is under test uses the real mouse (the whole
+//     native path, dragstart through drop), and the two assertions that must
+//     observe the drag BEFORE release — the indicator, and the abort — dispatch
+//     DragEvents with a shared DataTransfer instead. Those still run the real
+//     handlers: `dragstart` is fired on the real `.tab`, so TabBar populates the
+//     DataTransfer itself, and `dragover`/`drop` are fired on
+//     `elementFromPoint`, so App's capture-phase handlers face the same target
+//     and the same propagation the native path gives them.
+//
+// Every drag assertion states the PRE-state as well, so a drag that silently
+// did nothing fails instead of passing.
 //
 // A plain PowerShell tab, not Claude: the claim is about xterm/pty lifetime,
 // which is the same machinery either way, and this costs no tokens and no
@@ -180,6 +210,121 @@ async function dragDivider(win, n, dx, dy) {
   await win.mouse.up();
   await win.waitForTimeout(500);
 }
+
+// --- KAN-56 helpers --------------------------------------------------------
+
+/** Strip order, by tab id. `data-slide` is the id TabBar already puts on every
+ *  tab button (the `+` button has none), so no new hook was needed. */
+const stripIds = (win) => win.$$eval('.tab[data-slide]', (els) => els.map((e) => e.dataset.slide));
+
+/** id -> [left, top, width, height], whole pixels, relative to `.content`. The
+ *  unit of "nothing changed": comparing this map catches a swap, a move and a
+ *  reflow, and cannot be satisfied by a same-shaped grid with the panes
+ *  shuffled the way a bare cols/rows count can. */
+const rects = (g) => Object.fromEntries(g.panes.map((p) => [
+  p.id, [Math.round(p.left), Math.round(p.top), Math.round(p.width), Math.round(p.height)],
+]));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+const paneBox = (win, tabId) => win.locator(`[data-pane="${tabId}"]`).boundingBox();
+
+/**
+ * A client point inside `b` that `dropZone` resolves to `side` (or the centre).
+ *
+ * 12% in, floored at 24px: comfortably under EDGE_FRACTION (0.25) so the side
+ * is unambiguous, and comfortably outside the 12px seam grab band that sits on
+ * every pane boundary — a point that lands in a seam would be testing the seam
+ * zone instead of the edge zone.
+ */
+function edgePoint(b, side) {
+  const ix = Math.max(24, b.width * 0.12);
+  const iy = Math.max(24, b.height * 0.12);
+  if (side === 'left') return { x: b.x + ix, y: b.y + b.height / 2 };
+  if (side === 'right') return { x: b.x + b.width - ix, y: b.y + b.height / 2 };
+  if (side === 'top') return { x: b.x + b.width / 2, y: b.y + iy };
+  if (side === 'bottom') return { x: b.x + b.width / 2, y: b.y + b.height - iy };
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+}
+
+/** Drag tab `tabId` off the strip to a client point — REAL mouse, so this is
+ *  the whole native HTML5 path: Chromium starts the drag, TabBar's onDragStart
+ *  fills the DataTransfer, App's capture handlers take the drop. */
+async function dragTabTo(win, tabId, pt) {
+  const t = await win.locator(`.tab[data-slide="${tabId}"]`).boundingBox();
+  await win.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+  await win.mouse.down();
+  await win.mouse.move(t.x + t.width / 2 + 24, t.y + t.height / 2 + 10); // clear the press threshold
+  await win.waitForTimeout(150);
+  await win.mouse.move(pt.x, pt.y, { steps: 8 });
+  await win.waitForTimeout(250);
+  await win.mouse.up();
+  await win.waitForTimeout(800);
+}
+
+/** Alt+drag a PANE by its body. Pointer events, so the indicator is readable
+ *  while the drag is still in flight — returned, because "the target rect was
+ *  shown before release" is only provable from mid-drag. */
+async function dragPaneTo(win, tabId, pt) {
+  const b = await paneBox(win, tabId);
+  await win.keyboard.down('Alt');
+  await win.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await win.mouse.down();
+  await win.mouse.move(b.x + b.width / 2 + 12, b.y + b.height / 2 + 8); // past PANE_DRAG_PX
+  await win.waitForTimeout(150);
+  await win.mouse.move(pt.x, pt.y, { steps: 8 });
+  await win.waitForTimeout(250);
+  const mid = await indicator(win);
+  await win.mouse.up();
+  await win.keyboard.up('Alt');
+  await win.waitForTimeout(800);
+  return mid;
+}
+
+/** What `.drop-indicator` is showing right now, container-relative. */
+const indicator = (win) => win.evaluate(() => {
+  const el = document.querySelector('.drop-indicator');
+  const c = document.querySelector('.content').getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  return {
+    zone: el.dataset.zone,
+    shown: getComputedStyle(el).display !== 'none',
+    rect: [r.left - c.left, r.top - c.top, r.width, r.height].map(Math.round),
+  };
+});
+
+/**
+ * A tab drag driven by dispatched DragEvents sharing one DataTransfer — the
+ * only way to READ the DOM mid-drag (see the header note). `drop: false` ends
+ * the drag outside `.content`, which must leave everything as it was.
+ */
+const syntheticTabDrag = (win, tabId, pt, drop) => win.evaluate(({ tabId, x, y, drop }) => {
+  const dt = new DataTransfer();
+  const src = document.querySelector(`.tab[data-slide="${tabId}"]`);
+  const fire = (type, target, more = {}) => target.dispatchEvent(new DragEvent(type, {
+    bubbles: true, cancelable: true, composed: true, dataTransfer: dt, ...more,
+  }));
+  fire('dragstart', src, { clientX: 0, clientY: 0 });
+  const types = [...dt.types];
+  // The real element under the pointer, so App's capture handler competes with
+  // whatever FileBrowser row or xterm node is actually there.
+  const at = document.elementFromPoint(x, y);
+  fire('dragenter', at, { clientX: x, clientY: y });
+  fire('dragover', at, { clientX: x, clientY: y });
+  const el = document.querySelector('.drop-indicator');
+  const c = document.querySelector('.content').getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  const mid = {
+    zone: el.dataset.zone,
+    shown: getComputedStyle(el).display !== 'none',
+    rect: [r.left - c.left, r.top - c.top, r.width, r.height].map(Math.round),
+    target: at?.className ?? null,
+    types,
+  };
+  if (drop) fire('drop', at, { clientX: x, clientY: y });
+  else fire('dragleave', at, { clientX: 4, clientY: 4, relatedTarget: document.querySelector('.tabbar') });
+  fire('dragend', src, { clientX: x, clientY: y });
+  return mid;
+}, { tabId, x: pt.x, y: pt.y, drop });
 
 const PROFILE = path.join(os.tmpdir(), `claude-explorer-splitview-${process.pid}`);
 fs.rmSync(PROFILE, { recursive: true, force: true });
@@ -529,6 +674,305 @@ for (const [cols, rows] of [[2, 1], [2, 2], [3, 3]]) {
     g.focusRings === 1, String(g.focusRings));
 
   if (SHOW && cols === 3) { await win.waitForTimeout(600_000); }
+  await close();
+}
+
+// ===========================================================================
+// Run 4 — (e) KAN-56 direct manipulation, with a live terminal in the grid.
+//
+// One window, one shell, one uninterrupted scrollback: every gesture is applied
+// to the SAME session, so the survival probe at the end is a claim about all of
+// them and not about whichever one happened to run last.
+// ===========================================================================
+{
+  const PROFILE4 = path.join(os.tmpdir(), `claude-explorer-directmanip-${process.pid}`);
+  fs.rmSync(PROFILE4, { recursive: true, force: true });
+  const LIVE = `CE-LIVE2-${TAG}`;
+
+  const { win, close } = await launchApp({ userDataDir: PROFILE4 });
+  await win.waitForSelector('.entry');
+  await win.waitForTimeout(600);
+
+  await tabMenu(win, 0, 'Open Terminal');
+  await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 });
+  await win.waitForTimeout(1500);
+  await runInTerminal(win, `$t='${TAG}'; ${emit('CE-MARK')}`);
+  await win.waitForTimeout(1500);
+  check('dm: the shell printed a marker before any direct manipulation',
+    (await termText(win)).includes(MARKER));
+  await win.evaluate(() => { document.querySelector('.xterm').dataset.ceProbe = 'run4'; });
+
+  // Five tabs while `layout` is still null, so every one of them exists before
+  // the first pane does — `.tab.add` only retargets the focused pane once a
+  // split is up, and that would evict panes this run is about to place.
+  for (let i = 0; i < 3; i++) { await win.click('.tab.add'); await win.waitForTimeout(500); }
+
+  const ids = await stripIds(win);
+  const termId = await win.evaluate(() =>
+    document.querySelector('.xterm').closest('.pane').dataset.pane);
+  const homeId = await win.evaluate(() =>
+    document.querySelector('.pane:not([hidden])').dataset.pane);
+  const spare = ids.filter((id) => id !== termId && id !== homeId);
+  check('dm: five tabs, no grid yet — one visible pane and the terminal parked off screen',
+    ids.length === 5 && spare.length === 3 && (await geometry(win)).display !== 'grid',
+    `${ids.length} tabs, display ${(await geometry(win)).display}`);
+
+  // --- 1. a tab dropped on an EDGE QUARTER splits that pane -----------------
+  {
+    const g0 = await geometry(win);
+    const pre = g0.panes.length === 1 && g0.display !== 'grid'
+      && !g0.panes.some((p) => p.id === termId);
+    await dragTabTo(win, termId, edgePoint(await paneBox(win, homeId), 'right'));
+    const g = await geometry(win);
+    const home = g.panes.find((p) => p.id === homeId);
+    const term = g.panes.find((p) => p.id === termId);
+    check('dm: RIGHT quarter — a tab dragged onto the only pane creates the first split',
+      pre && g.display === 'grid' && g.cols === 2 && g.rows === 1 && g.panes.length === 2,
+      `pre-state ok: ${pre}; now ${g.display} ${g.cols}x${g.rows}, ${g.panes.length} panes`);
+    check('dm: RIGHT quarter — the dropped tab landed in the NEW cell, on the right',
+      !!term && !!home && term.left > home.left + EPS && Math.abs(term.left - home.right) <= 2
+        && tilingProblems(g).length === 0,
+      `${home ? `home@${Math.round(home.left)}` : 'no home'} ${term ? `term@${Math.round(term.left)}` : 'no term'}; ${tilingProblems(g).join('; ')}`);
+  }
+
+  // --- 2. the indicator paints the target rect BEFORE release ---------------
+  // Dispatched events, not the real mouse: see the header. The rect it must
+  // paint is the half of the target pane the drop would take — not the whole
+  // pane, which is what a centre drop paints, so the two cannot be confused.
+  {
+    const g = await geometry(win);
+    const box = g.panes.find((p) => p.id === homeId);
+    const before = await indicator(win);
+    const mid = await syntheticTabDrag(win, spare[0], edgePoint(await paneBox(win, homeId), 'right'), false);
+    const after = await indicator(win);
+    check('dm: nothing is painted until a drag is over the pane area',
+      !before.shown && before.zone === '', `${before.zone}/${before.shown}`);
+    check('dm: mid-drag the indicator names the zone it would drop into',
+      mid.shown && mid.zone === `edge:${homeId}:right`, `${mid.zone} (over ${mid.target})`);
+    check('dm: and paints the rectangle that pane would give up — its right half',
+      Math.abs(mid.rect[0] - (box.left + box.width / 2)) <= 2
+        && Math.abs(mid.rect[2] - box.width / 2) <= 2
+        && Math.abs(mid.rect[3] - box.height) <= 2,
+      `${mid.rect} vs half of ${[box.left, box.top, box.width, box.height].map(Math.round)}`);
+    check('dm: the drag carried the strip payload, so this exercised the real handlers',
+      mid.types.includes('application/x-ce-tab'), mid.types.join(','));
+    check('dm: a drag that ends outside .content leaves the layout and the indicator alone',
+      !after.shown && after.zone === '' && same(rects(await geometry(win)), rects(g)),
+      `${after.zone}/${after.shown}`);
+  }
+
+  // --- 3. the other three quarters, and a CENTRE replace --------------------
+  {
+    const pre = (await geometry(win)).panes.map((p) => p.id);
+    await dragTabTo(win, spare[0], edgePoint(await paneBox(win, homeId), 'left'));
+    const g = await geometry(win);
+    const home = g.panes.find((p) => p.id === homeId);
+    const dropped = g.panes.find((p) => p.id === spare[0]);
+    check('dm: LEFT quarter — the new cell is left of the pane that was split',
+      !pre.includes(spare[0]) && !!dropped && dropped.right <= home.left + 2
+        && g.cols === 3 && tilingProblems(g).length === 0,
+      `pre had ${pre.length} panes; ${g.cols}x${g.rows}; ${tilingProblems(g).join('; ')}`);
+  }
+  {
+    const g0 = await geometry(win);
+    const target = g0.panes.find((p) => p.id === homeId);
+    await dragTabTo(win, spare[1], edgePoint(await paneBox(win, homeId), 'centre'));
+    const g = await geometry(win);
+    const taken = g.panes.find((p) => p.id === spare[1]);
+    check('dm: CENTRE — the drop REPLACES the occupant, in exactly its rectangle',
+      !g0.panes.some((p) => p.id === spare[1]) && !!taken
+        && same([taken.left, taken.top, taken.width, taken.height].map(Math.round),
+          [target.left, target.top, target.width, target.height].map(Math.round))
+        && g.panes.length === g0.panes.length && !g.panes.some((p) => p.id === homeId),
+      `${g.panes.length} panes, displaced ${homeId.slice(0, 4)} gone: ${!g.panes.some((p) => p.id === homeId)}`);
+    // Both halves, or this passes against a drag that never happened: the tab
+    // must have LOST its pane and KEPT its slot, which is the whole distinction.
+    check('dm: CENTRE — the displaced tab lost its pane but kept its slot on the strip',
+      !g.panes.some((p) => p.id === homeId) && (await stripIds(win)).length === 5
+        && (await stripIds(win)).includes(homeId));
+  }
+  {
+    const g0 = await geometry(win);
+    const target = g0.panes.find((p) => p.id === spare[1]);
+    await dragTabTo(win, spare[2], edgePoint(await paneBox(win, spare[1]), 'bottom'));
+    const g = await geometry(win);
+    const dropped = g.panes.find((p) => p.id === spare[2]);
+    const now = g.panes.find((p) => p.id === spare[1]);
+    check('dm: BOTTOM quarter — the split is on the ROW axis and the new cell is below',
+      !g0.panes.some((p) => p.id === spare[2]) && !!dropped && dropped.top >= now.bottom - 2
+        && Math.abs(now.height - target.height / 2) < target.height / 4
+        && g.rows === 2 && tilingProblems(g).length === 0,
+      `${g.cols}x${g.rows}; ${tilingProblems(g).join('; ')}`);
+  }
+  {
+    const g0 = await geometry(win);
+    await dragTabTo(win, homeId, edgePoint(await paneBox(win, termId), 'top'));
+    const g = await geometry(win);
+    const dropped = g.panes.find((p) => p.id === homeId);
+    const term = g.panes.find((p) => p.id === termId);
+    check('dm: TOP quarter — the new cell is above the pane that was split',
+      !g0.panes.some((p) => p.id === homeId) && !!dropped && dropped.bottom <= term.top + 2
+        && Math.abs(dropped.left - term.left) <= 2 && g.panes.length === 5,
+      `${g.cols}x${g.rows}, ${g.panes.length} panes`);
+    check('dm: five panes placed by drag alone still tile the content box exactly',
+      g.panes.length === 5 && tilingProblems(g).length === 0,
+      `${g.panes.length} panes; ${tilingProblems(g).join('; ')}`);
+    // The pane area governs the drop, not the strip: TabBar's own reorder DnD
+    // uses the same TAB_MIME payload, so a drop that leaked back to it would
+    // shuffle the strip instead of (or as well as) placing a pane.
+    check('dm: none of those drops reordered the tab strip',
+      g.panes.length === 5 && same(await stripIds(win), ids),
+      (await stripIds(win)).map((s) => s.slice(0, 4)).join(','));
+  }
+
+  // --- 4. Alt+dragging a PANE: swap, then move --------------------------------
+  {
+    const g0 = await geometry(win);
+    const a = g0.panes.find((p) => p.id === spare[0]); // a full-height column
+    const b = g0.panes.find((p) => p.id === homeId);   // the small cell placed last
+    const mid = await dragPaneTo(win, a.id, edgePoint(await paneBox(win, b.id), 'centre'));
+    const g = await geometry(win);
+    const r0 = rects(g0); const r1 = rects(g);
+    const others = Object.keys(r0).filter((k) => k !== a.id && k !== b.id);
+    check('dm: a pane drag paints the whole target pane, so a swap cannot look like a split',
+      mid.shown && mid.zone === `centre:${b.id}`, mid.zone);
+    // ONE assertion, not two: "every other pane is untouched" is true of a drag
+    // that never happened, so on its own it could never go red.
+    check('dm: SWAP — Alt+dragging pane A onto pane B exchanges their rectangles and touches nothing else',
+      same(r1[a.id], r0[b.id]) && same(r1[b.id], r0[a.id]) && !same(r0[a.id], r0[b.id])
+        && others.every((k) => same(r0[k], r1[k])) && tilingProblems(g).length === 0,
+      `${a.id.slice(0, 4)} ${r0[a.id]} -> ${r1[a.id]}; ${tilingProblems(g).join('; ')}`);
+  }
+  {
+    const g0 = await geometry(win);
+    // Move the SMALLEST cell onto the right edge of the tallest one: its old
+    // rectangle has to be absorbed and the grid re-tiled, which is the claim.
+    const mover = g0.panes.reduce((m, p) => (p.width * p.height < m.width * m.height ? p : m));
+    const host = g0.panes.reduce((m, p) => (p.id !== mover.id && p.height > m.height ? p : m),
+      g0.panes.find((p) => p.id !== mover.id));
+    await dragPaneTo(win, mover.id, edgePoint(await paneBox(win, host.id), 'right'));
+    const g = await geometry(win);
+    const moved = g.panes.find((p) => p.id === mover.id);
+    const anchor = g.panes.find((p) => p.id === host.id);
+    // One assertion again: "it still tiles" is true of a grid nobody touched.
+    // The hole the move left has to be gone, and a leftover empty rectangle
+    // shows up as a shortfall in the AREA sum, which is what tilingProblems
+    // measures. ponytail: that is the only OBSERVABLE form of "compact ran" —
+    // `absorb` hands a vacated rectangle to a neighbour before `compact` ever
+    // sees it, so a track count never actually drops. Assert on the rect map,
+    // never on gridTemplateColumns, for anything that vacates.
+    check('dm: MOVE — Alt+dragging a pane to an edge re-places it there and leaves no hole',
+      !!moved && !!anchor && Math.abs(moved.left - anchor.right) <= 2
+        && moved.bottom > anchor.top && moved.top < anchor.bottom
+        && !same(rects(g0)[mover.id], rects(g)[mover.id])
+        && g.panes.length === 5 && tilingProblems(g).length === 0,
+      `${mover.id.slice(0, 4)} ${rects(g0)[mover.id]} -> ${rects(g)[mover.id]}; ${g.cols}x${g.rows}; ${tilingProblems(g).join('; ')}`);
+  }
+
+  // --- 5. the Ctrl+Shift+G arrangement picker --------------------------------
+  // Four panes, because that is the count whose valid picks are interesting:
+  // 2x2, 4x1, 1x4 and 3x2 tile exactly, and 3x3 / 2x1 cannot.
+  {
+    const strip = await titles(win);
+    const menus = [];
+    for (let i = 0; i < strip.length; i++) menus.push(await tabMenuItems(win, i));
+    const victim = menus.findIndex((m, i) => m.includes('Close pane') && strip[i] !== 'Terminal');
+    await tabMenu(win, victim, 'Close pane');
+    const g = await geometry(win);
+    check('dm: closed one pane to set up the picker — four left, still tiling exactly',
+      g.panes.length === 4 && tilingProblems(g).length === 0,
+      `${g.panes.length} panes; ${tilingProblems(g).join('; ')}`);
+  }
+
+  {
+    // Focus the terminal first: Ctrl+Shift+G has to be taken by the app and NOT
+    // reach the shell as a ^G, which is the whole reason it is a capture-phase
+    // listener at window rather than a preventDefault.
+    await win.locator(`[data-pane="${termId}"] .xterm-screen`).click();
+    await win.waitForTimeout(300);
+    const textBefore = await termText(win);
+    await win.keyboard.press('Control+Shift+G');
+    await win.waitForTimeout(400);
+    check('dm: Ctrl+Shift+G opens the picker',
+      await win.locator('.gridpick').isVisible());
+    check('dm: and it did not reach the focused shell as a ^G',
+      (await termText(win)) === textBefore);
+
+    const disabled = (c, r) =>
+      win.locator(`.gridpick-cell[data-cell="${c},${r}"]`).getAttribute('aria-disabled');
+    check('dm: 3x3 is REFUSED with four panes — it would leave a whole row empty',
+      (await disabled(2, 2)) === 'true', String(await disabled(2, 2)));
+    check('dm: a grid SMALLER than the pane count is refused too (2x1 cannot hold four)',
+      (await disabled(1, 0)) === 'true', String(await disabled(1, 0)));
+    check('dm: 3x2 IS offered — it is the pick that tiles four panes exactly',
+      (await disabled(2, 1)) !== 'true', String(await disabled(2, 1)));
+
+    // A refused pick must be inert, not merely ugly.
+    const g0 = await geometry(win);
+    // `force`, because the refused cell carries aria-disabled and Playwright's
+    // actionability check would wait it out forever — the point of the
+    // assertion is that a real click on it does nothing.
+    await win.locator('.gridpick-cell[data-cell="1,0"]').click({ force: true });
+    await win.waitForTimeout(500);
+    check('dm: clicking a refused cell changes nothing and leaves the picker open',
+      same(rects(await geometry(win)), rects(g0))
+        && (await geometry(win)).colTemplate === g0.colTemplate
+        && await win.locator('.gridpick').isVisible());
+
+    // Escape: arrow around first, so there IS a highlighted pick to discard.
+    await win.keyboard.press('ArrowRight');
+    await win.keyboard.press('ArrowDown');
+    await win.waitForTimeout(200);
+    await win.keyboard.press('Escape');
+    await win.waitForTimeout(400);
+    check('dm: Escape closes the picker',
+      (await win.locator('.gridpick').count()) === 0);
+    check('dm: and cancels with NO state change — same rectangles, same track template',
+      same(rects(await geometry(win)), rects(g0))
+        && (await geometry(win)).colTemplate === g0.colTemplate,
+      (await geometry(win)).colTemplate);
+  }
+
+  {
+    const placed = (await geometry(win)).panes.map((p) => p.id);
+    const wanted = (await stripIds(win)).filter((id) => placed.includes(id));
+    await win.keyboard.press('Control+Shift+G');
+    await win.waitForTimeout(400);
+    await win.click('.gridpick-cell[data-cell="2,1"]');
+    await win.waitForTimeout(800);
+    const g = await geometry(win);
+    check('dm: picking 3x2 reflows the four panes into a 3-column, 2-row grid, no overlap',
+      g.cols === 3 && g.rows === 2 && g.panes.length === 4 && tilingProblems(g).length === 0
+        && (await win.locator('.gridpick').count()) === 0,
+      `${g.cols}x${g.rows}, ${g.panes.length} panes; ${tilingProblems(g).join('; ')}`);
+    // Reading order, from the measured rectangles — nothing here asks the model
+    // what order it used.
+    const visual = g.panes.slice()
+      .sort((a, b) => (Math.round(a.top / 8) - Math.round(b.top / 8)) || (a.left - b.left))
+      .map((p) => p.id);
+    check('dm: and it laid them out in STRIP order, reading left-to-right, top-to-bottom',
+      same(visual, wanted),
+      `${visual.map((s) => s.slice(0, 4)).join(',')} vs strip ${wanted.map((s) => s.slice(0, 4)).join(',')}`);
+  }
+
+  // --- 6. the terminal, after every one of those gestures --------------------
+  {
+    const probe = await win.evaluate(() =>
+      document.querySelector('.xterm')?.dataset.ceProbe ?? null);
+    // The ONLY instrument that catches a re-parent: ConPTY repaints its whole
+    // screen buffer on the resize a remount triggers, so the two text checks
+    // below still pass against a terminal that was destroyed and rebuilt.
+    check('DIRECT MANIPULATION NEVER RE-PARENTED THE TERMINAL — same xterm instance (KAN-23)',
+      probe === 'run4', String(probe));
+    check('dm: and the scrollback from before the first drag is still there',
+      (await termText(win)).includes(MARKER));
+    await runInTerminal(win, `$t='${TAG}'; ${emit('CE-LIVE2')}`);
+    await win.waitForTimeout(2200);
+    check('dm: the shell still answers a new command after every drag, swap and reflow',
+      (await termText(win)).includes(LIVE));
+  }
+
+  if (SHOW) await win.waitForTimeout(600_000);
   await close();
 }
 

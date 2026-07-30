@@ -1,16 +1,22 @@
 import { describe, it, expect } from 'vitest'
 import type { GridCell, GridLayout } from '../src/shared/types'
+import type { PaneBox, SeamBox } from '../src/renderer/splitgrid'
 import {
+  EDGE_FRACTION,
   MIN_PANE_PX,
+  MIN_SPLIT_PX,
+  SEAM_HIT_PX,
   SEAM_PX,
   cellArea,
   dividerArea,
   dividerId,
   dividers,
+  dropZone,
   gridPlacement,
   gridTemplate,
   normalizeFractions,
   resizeFractions,
+  zoneId,
 } from '../src/renderer/splitgrid'
 
 const cell = (tabId: string, col: number, row: number, colSpan = 1, rowSpan = 1): GridCell => ({
@@ -33,6 +39,28 @@ const grid = (cols: number, rows: number): GridLayout => {
 }
 
 const sum = (a: number[]) => a.reduce((x, y) => x + y, 0)
+
+/** A measured pane box, container-relative px — what the caller reads off
+ *  `getBoundingClientRect()` for a `[data-pane]` element. */
+const pane = (tabId: string, left: number, top: number, width: number, height: number): PaneBox => ({
+  tabId,
+  left,
+  top,
+  width,
+  height,
+})
+
+/** A measured seam box — the DIVIDER's own grab area, pre-inflation. */
+const seamBox = (
+  axis: 'col' | 'row',
+  index: number,
+  start: number,
+  end: number,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): SeamBox => ({ axis, index, start, end, left, top, width, height })
 
 describe('normalizeFractions', () => {
   it('defaults to an even split', () => {
@@ -325,5 +353,83 @@ describe('gridPlacement', () => {
     // and there is no seam anywhere.
     const p = gridPlacement(layout(2, 2, [cell('a', 0, 0, 2, 2), cell('b', 1, 1)]))
     expect(p.dividers).toEqual([])
+  })
+})
+
+// KAN-56: hit-testing a pointer against the boxes the browser measured.
+// Priority is seam > edge > centre; see the module comment for the geometry.
+describe('dropZone', () => {
+  it('is none when the pointer is over no pane at all', () => {
+    expect(dropZone([pane('a', 0, 0, 800, 600)], [], 900, 300)).toEqual({ kind: 'none' })
+  })
+
+  it('is none for a zero-size pane, even where its box would contain the point', () => {
+    expect(dropZone([pane('a', 0, 0, 0, 0)], [], 0, 0)).toEqual({ kind: 'none' })
+  })
+
+  it('is centre for the pane middle, and still centre exactly at the [.25, .75] boundary', () => {
+    const p = pane('a', 0, 0, 800, 600)
+    expect(dropZone([p], [], 400, 300)).toMatchObject({ kind: 'centre', tabId: 'a' })
+    // dl = (800 * EDGE_FRACTION) / 800 === EDGE_FRACTION exactly: the centre
+    // zone is inclusive of its own boundary, not open.
+    expect(dropZone([p], [], 800 * EDGE_FRACTION, 300)).toMatchObject({ kind: 'centre', tabId: 'a' })
+    // One px inside that boundary tips into the edge zone.
+    expect(dropZone([p], [], 800 * EDGE_FRACTION - 1, 300)).toMatchObject({
+      kind: 'edge',
+      tabId: 'a',
+      side: 'left',
+    })
+  })
+
+  it('picks the nearest edge at each of the four midpoints', () => {
+    const p = pane('a', 0, 0, 800, 600)
+    expect(dropZone([p], [], 0, 300)).toMatchObject({ kind: 'edge', side: 'left' })
+    expect(dropZone([p], [], 800, 300)).toMatchObject({ kind: 'edge', side: 'right' })
+    expect(dropZone([p], [], 400, 0)).toMatchObject({ kind: 'edge', side: 'top' })
+    expect(dropZone([p], [], 400, 600)).toMatchObject({ kind: 'edge', side: 'bottom' })
+  })
+
+  it('resolves an exact corner tie by a fixed order — left, right, top, bottom', () => {
+    const p = pane('a', 0, 0, 800, 600)
+    expect(dropZone([p], [], 0, 0)).toMatchObject({ side: 'left' }) // top-left
+    expect(dropZone([p], [], 800, 0)).toMatchObject({ side: 'right' }) // top-right
+    expect(dropZone([p], [], 0, 600)).toMatchObject({ side: 'left' }) // bottom-left
+    expect(dropZone([p], [], 800, 600)).toMatchObject({ side: 'right' }) // bottom-right
+  })
+
+  it('degrades a too-narrow split axis to centre, without degrading the other axis', () => {
+    // 100px wide, well under MIN_SPLIT_PX: a left/right split here would leave
+    // a pane too small to grab a seam back from.
+    const p = pane('a', 0, 0, 100, 600)
+    expect(100).toBeLessThan(MIN_SPLIT_PX)
+    expect(dropZone([p], [], 5, 300)).toMatchObject({ kind: 'centre', tabId: 'a' })
+    // The row axis (600px) is nowhere near the floor, so it still splits.
+    expect(dropZone([p], [], 50, 5)).toMatchObject({ kind: 'edge', side: 'top' })
+  })
+
+  it('a seam wins inside its grab band, and yields to the edge zone just outside it', () => {
+    const a = pane('a', 0, 0, 400, 100)
+    // Seam sits at x=400-402; SEAM_HIT_PX inflates and centres the grab band
+    // around it, to [394, 406].
+    const s = seamBox('col', 0, 0, 1, 400, 0, 2, 100)
+    expect(dropZone([a], [s], 396, 50)).toMatchObject({ kind: 'seam', axis: 'col', index: 0 })
+    // Still inside `a`'s right quarter (x >= 300), but outside the grab band.
+    expect(dropZone([a], [s], 390, 50)).toMatchObject({ kind: 'edge', tabId: 'a', side: 'right' })
+  })
+})
+
+describe('zoneId', () => {
+  it('gives each zone kind its own stable string, seams reusing dividerId', () => {
+    expect(zoneId({ kind: 'none' })).toBe('none')
+    expect(
+      zoneId({ kind: 'centre', tabId: 'a', box: { left: 0, top: 0, width: 1, height: 1 } }),
+    ).toBe('centre:a')
+    expect(
+      zoneId({ kind: 'edge', tabId: 'a', side: 'left', box: { left: 0, top: 0, width: 1, height: 1 } }),
+    ).toBe('edge:a:left')
+    const d = { axis: 'col' as const, index: 0, start: 0, end: 1 }
+    expect(
+      zoneId({ kind: 'seam', ...d, box: { left: 0, top: 0, width: 1, height: 1 } }),
+    ).toBe(`seam:${dividerId(d)}`)
   })
 })

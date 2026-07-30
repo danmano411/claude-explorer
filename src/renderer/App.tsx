@@ -4,10 +4,15 @@ import {
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
 import {
-  closePane as closePaneIn, compact, showIn, single, split as splitLayout,
+  closePane as closePaneIn, compact, neighbour, occupy, placeAtSeam, placeBeside,
+  reflow, showIn, single, split as splitLayout, type Side,
 } from './gridlayout';
-import { gridPlacement } from './splitgrid';
+import {
+  dividerId, dropZone, gridPlacement, zoneId,
+  type Box, type DropZone, type PaneBox, type SeamBox,
+} from './splitgrid';
 import { SplitDividers } from './components/SplitDividers';
+import { GridPicker } from './components/GridPicker';
 import {
   addToGroup, deleteGroup, moveGroupRun, newGroup, recolorGroup, removeFromGroup,
   renameGroup, reorderWithGroups, setCollapsed, setPinned,
@@ -16,8 +21,8 @@ import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, switchSpace,
 } from './spaces';
-import type { Space, TabGroup } from '../shared/types';
-import { isTypingTarget } from './keys';
+import type { GridLayout, Space, TabGroup } from '../shared/types';
+import { isTextBox, isTypingTarget } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -25,9 +30,13 @@ import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { SettingsModal } from './components/SettingsModal';
 import { SpaceMenu } from './components/SpaceMenu';
-import { TabBar, type GroupActions, type SplitActions } from './TabBar';
+import { PLACED_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } from './TabBar';
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+
+/** How far the pointer must travel before an Alt+press on a pane becomes a
+ *  drag rather than the click-to-focus it would otherwise have been. */
+const PANE_DRAG_PX = 4;
 
 /** A space's ordered tab records: `tabIds` (the order) resolved against the tab
  *  store (the records). An id with no record is dropped rather than rendered as
@@ -50,11 +59,29 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  /** The Ctrl+Shift+G arrangement picker (KAN-56). Just open/closed — it stages
+   *  nothing, which is what makes Escape inert. */
+  const [picker, setPicker] = useState(false);
   const status = usePtyStatus();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
   // fractions against its box.
   const contentRef = useRef<HTMLDivElement>(null);
+  // --- direct manipulation (KAN-56) ---------------------------------------
+  /** The always-mounted drop indicator. Written to directly, never through
+   *  React — see `paint` below. */
+  const indicatorRef = useRef<HTMLDivElement>(null);
+  /** `zoneId` of what the indicator is currently showing, so a pointer move
+   *  that stays inside one zone touches the DOM zero times. */
+  const lastZone = useRef('none');
+  /** Pane and seam rectangles, measured ONCE per drag (they cannot move while
+   *  one is in flight) and container-relative, which is the coordinate space
+   *  `dropZone` and the indicator both speak. */
+  const dropGeom = useRef<{ panes: PaneBox[]; seams: SeamBox[]; origin: DOMRect } | null>(null);
+  /** An Alt+drag of a pane BODY, below or above the movement threshold. */
+  const paneDrag = useRef<
+    { tabId: string; x: number; y: number; moved: boolean; pointerId: number } | null
+  >(null);
   const lastActivated = useRef<Map<string, number>>(new Map());
   const spawning = useRef<Set<string>>(new Set());
   // An argv/Explorer open is APPENDED to whatever restore produces, never
@@ -823,6 +850,27 @@ export function App() {
     mapActiveSpace((s) => ({ ...s, colFractions: cols, rowFractions: rows }));
 
   /**
+   * A layout write, with the fraction rule in ONE place (KAN-56).
+   *
+   * Fractions describe TRACKS, not panes, so they survive an operation exactly
+   * when that axis's track count survives it — which is also
+   * `normalizeFractions`'s own fallback condition, so the two can never
+   * disagree. Cleared per AXIS, not per operation: a column split has no
+   * opinion about row heights, and the old "clear both on every split and every
+   * close" threw away heights the user had dragged.
+   *
+   * Never keep an array whose length disagrees with the count. Clearing on a
+   * count change is what stops a stale array resurrecting later, when the count
+   * happens to wander back to the length it was written for.
+   */
+  const withLayout = (s: Space, prev: GridLayout | null, next: GridLayout | null): Space => ({
+    ...s,
+    layout: next,
+    colFractions: prev && next && next.cols === prev.cols ? s.colFractions : undefined,
+    rowFractions: prev && next && next.rows === prev.rows ? s.rowFractions : undefined,
+  });
+
+  /**
    * Split the FOCUSED pane and show `tabId` in the half that appears.
    *
    * With no layout yet the focused pane is the whole content area, so the split
@@ -831,8 +879,8 @@ export function App() {
    * pane), and that no-op is what keeps a pointless menu click from
    * materialising a 1x1 grid where `layout: null` was.
    *
-   * Fractions are dropped: the track count changed, so the old ones describe a
-   * grid that no longer exists.
+   * Fractions go through `withLayout`, which drops only the axis whose track
+   * count actually changed — a "Split right" keeps the row heights you dragged.
    *
    * Bases off the RENDERED `layout` memo, not `s.layout` — a layout whose cells
    * all belonged to since-closed tabs is a corpse (`{cells: []}` before
@@ -848,7 +896,7 @@ export function App() {
       if (!base) return s;
       const next = splitLayout(base, active, tabId, axis);
       if (next === base) return s;
-      return { ...s, layout: next, colFractions: undefined, rowFractions: undefined };
+      return withLayout(s, base, next);
     });
     selectTab(tabId); // queued after the split, so `showIn` finds it placed and no-ops
   };
@@ -861,16 +909,298 @@ export function App() {
       // Same reasoning as `splitPane`: base off the pruned `layout` memo, not
       // `s.layout`, or a corpse layout (all cells dead) leaves this a no-op too.
       if (!layout) return s;
-      return {
-        ...s,
-        layout: closePaneIn(layout, tabId),
-        colFractions: undefined,
-        rowFractions: undefined,
-      };
+      return withLayout(s, layout, closePaneIn(layout, tabId));
     });
     // Closing the pane you were in leaves focus on a tab with nothing on screen.
     if (tabId === active && survivor) selectTab(survivor);
   };
+
+  // --- direct manipulation (KAN-56) ----------------------------------------
+  //
+  // Two gestures, one drop model. Dragging a tab off the STRIP into the pane
+  // area and Alt+dragging a pane BODY both end in `applyDrop` with a zone from
+  // `dropZone`: an edge quarter splits the pane under the pointer, a centre
+  // replaces or swaps its occupant, a divider inserts a full-run track.
+  //
+  // Nothing here re-parents a pane. Every operation is a pure
+  // GridLayout -> GridLayout transform, so `gridPlacement` still emits the same
+  // {container, panes} shape and the panes stay the flat, always-mounted list
+  // `.content` has always held — which is KAN-23 made structural, not a rule
+  // anyone has to remember (see the render comments below).
+
+  const paneEl = (tabId: string) =>
+    contentRef.current?.querySelector<HTMLElement>(`[data-pane="${CSS.escape(tabId)}"]`) ?? null;
+
+  /**
+   * Freeze the rectangles CSS Grid produced, container-relative — the
+   * coordinate space `dropZone` and the indicator both speak.
+   *
+   * ONCE per drag, not per move: nothing can resize a pane while one is in
+   * flight, and re-measuring 60x/second is exactly the cost this path exists to
+   * avoid. `placed` (the dragged thing already has a cell) suppresses the seam
+   * zones, because `placeAtSeam` refuses a placed tab — offering a zone the
+   * model will reject is worse than not offering it at all.
+   */
+  const measureDrop = (placed: boolean) => {
+    const node = contentRef.current;
+    if (!node) return null;
+    const origin = node.getBoundingClientRect();
+    const rel = (r: DOMRect): Box =>
+      ({ left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height });
+    // With no split there is exactly one pane — the active tab's, filling the
+    // whole content box. That is the case the first-split gesture starts from,
+    // which is why this is not gated on `placement.split`.
+    const ids = placement.split ? placement.cells.map((c) => c.tabId) : active ? [active] : [];
+    const panes: PaneBox[] = [];
+    for (const tabId of ids) {
+      const el = paneEl(tabId);
+      if (el) panes.push({ tabId, ...rel(el.getBoundingClientRect()) });
+    }
+    const seams: SeamBox[] = [];
+    if (!placed)
+      for (const d of placement.dividers) {
+        const el = node.querySelector<HTMLElement>(`[data-divider="${dividerId(d)}"]`);
+        if (el) seams.push({ ...d, ...rel(el.getBoundingClientRect()) });
+      }
+    const g = { panes, seams, origin };
+    dropGeom.current = g;
+    return g;
+  };
+
+  /**
+   * The drop indicator, written STRAIGHT to the DOM — the same precedent
+   * `SplitDividers` sets for a divider drag, and for the same reason: a
+   * setState per pointermove re-renders the whole app ~60x/second.
+   *
+   * A move that stays inside one zone costs nothing at all (the `zoneId`
+   * compare returns early); one that crosses a boundary costs exactly two
+   * attribute writes. `cssText` in one assignment rather than five property
+   * sets, which would be five separate mutation records for no gain.
+   */
+  const paint = (z: DropZone) => {
+    const el = indicatorRef.current;
+    const id = zoneId(z);
+    if (!el || id === lastZone.current) return;
+    lastZone.current = id;
+    el.dataset.zone = z.kind === 'none' ? '' : id;
+    el.style.cssText = z.kind === 'none'
+      ? ''
+      : `display:block;left:${z.box.left}px;top:${z.box.top}px;`
+        + `width:${z.box.width}px;height:${z.box.height}px`;
+  };
+
+  /** Every way a drag can stop mattering. Ref- and DOM-only on purpose, so the
+   *  mount-once listeners below can hold the first render's copy without ever
+   *  going stale. */
+  const endDrop = () => { dropGeom.current = null; paint({ kind: 'none' }); };
+
+  const endPaneDrag = () => {
+    const node = contentRef.current;
+    node?.classList.remove('dragging-pane');
+    node?.querySelector('.pane-dragging')?.classList.remove('pane-dragging');
+    endDrop();
+  };
+
+  /**
+   * Land `tabId` in zone `z`.
+   *
+   * ORDERING RULE: the layout is written first and `selectTab` second, or
+   * `selectTab`'s own `showIn` retargets the focused pane instead — the exact
+   * hazard `splitPane` documents. And focus only moves when the layout really
+   * changed, because a refused drop must not have a side effect either.
+   */
+  const applyDrop = (tabId: string, z: DropZone) => {
+    if (!tabId || z.kind === 'none') return;
+    // A centre drop with no grid up is just "show this tab". Materialising a
+    // 1x1 layout would turn `.content` into a grid for nothing visible, which
+    // is the same care `splitPane` takes about a pointless split.
+    if (z.kind === 'centre' && !layout) { selectTab(tabId); return; }
+    // An EDGE drop with no grid is the headline gesture — it is what creates
+    // the first split — so that one does start from `single(active)`.
+    const base = layout ?? (z.kind === 'edge' && active ? single(active) : null);
+    if (!base) return;
+    const next =
+      z.kind === 'centre' ? occupy(base, tabId, z.tabId)
+        : z.kind === 'edge' ? placeBeside(base, tabId, z.tabId, z.side)
+          : placeAtSeam(base, tabId, z.axis, z.index, z.start, z.end);
+    if (next === base) return; // refused
+    mapActiveSpace((s) => withLayout(s, layout, next));
+    selectTab(tabId);
+  };
+
+  const zoneAt = (
+    g: NonNullable<typeof dropGeom.current>, clientX: number, clientY: number,
+  ) => dropZone(g.panes, g.seams, clientX - g.origin.left, clientY - g.origin.top);
+
+  // A tab dragged off the strip.
+  //
+  // CAPTURE phase, and that is not cosmetic: FileBrowser's directory rows
+  // `stopPropagation()` on `drop` for ANY drag (`onDrop` there is gated on
+  // `e.isDirectory`, not on `app.drag`), so a bubbling handler here never sees
+  // a tab dropped onto a folder row — the single most likely place to drop one,
+  // since a file pane is mostly folder rows. Capture runs root->target, before
+  // that stop.
+  //
+  // Both handlers return untouched unless the drag carries TAB_MIME, so a FILE
+  // drag reaches FileBrowser's own handlers byte-for-byte as it does today.
+  // Inside that gate the tab drop DOES stop propagating: `dropInto` would only
+  // no-op on it, and letting it through would leave a row's drop-target
+  // highlight behind.
+  const contentDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const g = dropGeom.current ?? measureDrop(e.dataTransfer.types.includes(PLACED_MIME));
+    if (g) paint(zoneAt(g, e.clientX, e.clientY));
+  };
+
+  const contentDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    const g = dropGeom.current;
+    if (!e.dataTransfer.types.includes(TAB_MIME) || !g) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const z = zoneAt(g, e.clientX, e.clientY);
+    endDrop();
+    applyDrop(e.dataTransfer.getData(TAB_MIME), z);
+  };
+
+  /**
+   * Alt + primary drag on a pane BODY rearranges panes.
+   *
+   * CAPTURE phase on `.content`, and the same reasoning as `paneProps`'
+   * click-to-focus: xterm stops propagation on its own container, so a bubbling
+   * handler never sees a press inside a terminal. Stopping the synthetic event
+   * here — while the browser is still at the root — means it never reaches
+   * xterm or FileBrowser at all, and `preventDefault()` suppresses the
+   * compatibility `mousedown` that would otherwise start an xterm text
+   * selection or an HTML5 file drag on a FileBrowser row.
+   *
+   * WITHOUT Alt none of that happens: the event is not intercepted, so plain
+   * drags reach xterm and FileBrowser byte-for-byte as they do today. Alt is
+   * the only modifier this app has not already spent (Ctrl = copy /
+   * toggle-select, Shift = move / range-select), and Alt+drag-to-move is the
+   * tiling-WM idiom a split-pane user already knows.
+   */
+  const onPaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!placement.split || !e.altKey || e.button !== 0) return;
+    const tabId = (e.target as Element).closest?.('[data-pane]')?.getAttribute('data-pane');
+    if (!tabId || !placement.panes[tabId]) return;
+    e.preventDefault();
+    e.stopPropagation();
+    paneDrag.current = { tabId, x: e.clientX, y: e.clientY, moved: false, pointerId: e.pointerId };
+    // Same trick SplitDividers uses on its 9px handles: a drag that outruns the
+    // pane keeps delivering moves, with no window listeners to forget to remove.
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onPaneMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = paneDrag.current;
+    if (!g) return;
+    if (!g.moved) {
+      if (Math.abs(e.clientX - g.x) < PANE_DRAG_PX && Math.abs(e.clientY - g.y) < PANE_DRAG_PX) return;
+      g.moved = true;
+      measureDrop(true);
+      contentRef.current?.classList.add('dragging-pane');
+      // opacity + outline, NEVER a transform: a transformed ancestor changes an
+      // xterm's containing block and its getBoundingClientRect, which breaks
+      // fit and selection maths, and creates a stacking context that can hide
+      // the divider handles.
+      paneEl(g.tabId)?.classList.add('pane-dragging');
+    }
+    const geom = dropGeom.current;
+    if (geom) paint(zoneAt(geom, e.clientX, e.clientY));
+  };
+
+  const onPaneUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = paneDrag.current;
+    const geom = dropGeom.current;
+    paneDrag.current = null;
+    if (!g) return;
+    endPaneDrag();
+    // Below the threshold this was a click, and a click on a pane is the focus
+    // move `paneProps` would have made had the capture handler not swallowed it.
+    if (!g.moved) { selectTab(g.tabId); return; }
+    if (e.type === 'pointercancel' || !geom) return;
+    applyDrop(g.tabId, zoneAt(geom, e.clientX, e.clientY));
+  };
+
+  // Escape aborts a pane drag with no state change; `dragend` clears an
+  // indicator left over from a drag that ended somewhere else.
+  //
+  // Alt keyup must not pop the native menu bar out from under a drag.
+  // ponytail: Chromium already cancels menu activation once a mouse press
+  // intervenes, so this is only the belt. If some Windows build still flashes
+  // the menu, gate the drag on Alt at pointerdown only and drop the guard on
+  // the first pointermove.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (!paneDrag.current) return;
+      if (e.type === 'keyup') { if (e.key === 'Alt') e.preventDefault(); return; }
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      paneDrag.current = null;
+      endPaneDrag();
+    };
+    const done = () => endDrop();
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('keyup', key, true);
+    window.addEventListener('dragend', done, true);
+    return () => {
+      window.removeEventListener('keydown', key, true);
+      window.removeEventListener('keyup', key, true);
+      window.removeEventListener('dragend', done, true);
+    };
+  }, []);
+
+  /** Tab ids with a pane, in STRIP order — the order `reflow` tiles them in, so
+   *  a picked arrangement reads left-to-right like the strip does. */
+  const placedInStripOrder = spaceTabs
+    .filter((t) => (placement.split ? placement.panes[t.id] : t.id === active))
+    .map((t) => t.id);
+
+  const applyReflow = (cols: number, rows: number) => {
+    setPicker(false);
+    // Nothing to rearrange without a split, and `reflow([one], 1, 1)` would only
+    // materialise the pointless 1x1 that `layout: null` already means.
+    if (!layout) return;
+    const next = reflow(placedInStripOrder, cols, rows);
+    if (!next) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+  };
+
+  /** Ctrl+Arrow inside the picker: swap the focused pane with its neighbour.
+   *  Committed per press, exactly like SplitDividers' arrow-key resize, and
+   *  therefore explicitly NOT part of what Escape reverts. */
+  const movePane = (dir: Side) => {
+    if (!layout || !active) return;
+    const n = neighbour(layout, active, dir);
+    if (!n) return;
+    const next = occupy(layout, active, n);
+    if (next === layout) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+  };
+
+  // Ctrl+Shift+G — the grid picker. Registered in the CAPTURE phase at window
+  // and, unlike Ctrl+1..9 above, NOT gated by `isTypingTarget`.
+  //
+  // Ctrl+Shift+<letter> is not a distinct control code: xterm sends the same ^G
+  // for Ctrl+G and Ctrl+Shift+G, which is precisely why every terminal emulator
+  // reserves the Ctrl+Shift row for itself. A plain Ctrl+1 must reach the shell;
+  // this must not. Capture at window is the first thing in the event path, so
+  // xterm's own textarea listener never runs and no ^G reaches the pty —
+  // preventDefault alone would be too late.
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.key.toLowerCase() !== 'g') return;
+      if (isTextBox(e.target)) return; // rename / address / search boxes only
+      e.preventDefault();
+      e.stopPropagation();
+      setPicker((p) => !p);
+    };
+    window.addEventListener('keydown', h, true);
+    return () => window.removeEventListener('keydown', h, true);
+  }, []);
 
   const splitActions: SplitActions = {
     placed: placement.split ? Object.keys(placement.panes) : active ? [active] : [],
@@ -909,7 +1239,23 @@ export function App() {
           />
         }
       />
-      <div className="content" ref={contentRef} style={placement.container}>
+      <div
+        className="content"
+        ref={contentRef}
+        style={placement.container}
+        // KAN-56. The drag handlers govern TAB drags only, so a file drag
+        // reaches FileBrowser exactly as before; the pointer handlers do
+        // nothing at all without Alt held. Capture phase — see contentDrop.
+        onDragOverCapture={contentDragOver}
+        onDropCapture={contentDrop}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) endDrop();
+        }}
+        onPointerDownCapture={onPaneDown}
+        onPointerMove={onPaneMove}
+        onPointerUp={onPaneUp}
+        onPointerCancel={onPaneUp}
+      >
         {/* Files and viewer panes are mounted only while visible, exactly as
             they were before split view — a FileBrowser has no alt-screen mode
             and no scrollback to lose, so there is nothing to keep alive off
@@ -970,7 +1316,31 @@ export function App() {
           containerRef={contentRef}
           onResize={persistFractions}
         />
+        {/* The drop indicator (KAN-56). A SIBLING of the panes, never a
+            wrapper, and permanently mounted — conditional rendering would be a
+            React state change per drag, and the first-split gesture needs it
+            up before any split exists. Absolutely positioned with no grid
+            placement, so it takes `.content`'s padding box and does NOT become
+            a grid item; `pointer-events: none` guarantees it cannot eat a
+            dragover. Everything about it is written by `paint`. */}
+        <div className="drop-indicator" data-zone="" aria-hidden ref={indicatorRef} />
       </div>
+      {/* Rendered as a child of `.app`, NOT of `.content`, and that placement is
+          load-bearing: any in-flow child of a grid container is auto-placed into
+          the first free cell, so a popover inside `.content` would silently
+          claim a pane's rectangle (splitgrid.ts's container contract). */}
+      {picker && (
+        <GridPicker
+          // 0 with no split up: there is no arrangement to pick, so `canReflow`
+          // refuses every cell and the picker says so instead of offering a
+          // 1x1 that would only materialise the grid `layout: null` already is.
+          count={placement.split ? placedInStripOrder.length : 0}
+          anchor={contentRef.current?.getBoundingClientRect() ?? null}
+          onApply={applyReflow}
+          onMovePane={movePane}
+          onClose={() => setPicker(false)}
+        />
+      )}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );

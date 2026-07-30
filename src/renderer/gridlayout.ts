@@ -92,41 +92,98 @@ export function compact(layout: GridLayout): GridLayout {
   return { cols: Math.max(1, cols.length), rows: Math.max(1, rows.length), cells }
 }
 
+/** Which side of a cell a new one goes on. A renderer-level type: the grid
+ *  model in `shared/types.ts` has no notion of a direction, only of extents. */
+export type Side = 'left' | 'right' | 'top' | 'bottom'
+
 /**
- * Adds a track before index `at`, on behalf of a split of `keeper`'s cell.
+ * Adds a track before index `at`, claimed over the cross-axis run `[start, end)`.
  *
- * The tricky third case is what makes a split of one pane in a 2x2 tile. A cell
- * that STRADDLES the new line must widen — obviously — but so must every cell
- * that merely ENDS on it, because it was the thing covering the track the new
- * line was cut out of, at its own rows. `keeper` is the exception: the new pane
- * takes that track over exactly `keeper`'s extent, so `keeper` stays as it is.
+ * One rule decides every cell: OUTSIDE the run the new track belongs to nobody,
+ * so someone must absorb it or a hole opens; INSIDE the run it belongs to the
+ * incoming pane, so everyone yields it. Absorbing is always "span + 1" — the
+ * only question is from which side, and the cell that ENDS on the line is
+ * preferred (it was the thing covering the track the line was cut out of).
+ * A cell that STARTS on the line only absorbs when there is no such ender at its
+ * cross positions, which in a tiled grid means exactly one thing: the line is
+ * the grid's own leading edge, i.e. a left/top insert. Everything else shifts.
  *
- * That exception is safe because a tiled grid cannot contain a second cell that
- * touches the line inside `keeper`'s cross-extent: such a cell would have to
- * cover the track just before the line at one of `keeper`'s rows, which is
- * `keeper`'s own area. So "ends on the line and isn't the keeper" is exactly
- * "should absorb the new track", with no cross-axis test needed.
+ * This is the KAN-56 generalisation of "one keeper cell" to "a run", and it is
+ * the SAME set of cells for `split`: a tiled grid cannot contain a second cell
+ * that touches the line inside the keeper's cross-extent, because such a cell
+ * would have to cover the track just before the line at one of the keeper's
+ * rows, which is the keeper's own area. So `split` keeps its exact behaviour
+ * and the left/top and seam inserts fall out of the same rule, with no second
+ * geometry primitive.
  *
  * Private: an inserted track with nothing in it is precisely the gap `compact`
- * exists to remove, so `split` is the only sane way to reach this.
+ * exists to remove, so `insertAt` is the only sane way to reach this.
  */
 function insertTrack(
   layout: GridLayout,
   axis: 'col' | 'row',
   at: number,
-  keeper: string,
+  start: number,
+  end: number,
 ): GridLayout {
+  const col = axis === 'col'
+  const near = (c: GridCell) => (col ? c.col : c.row)
+  const nearSpan = (c: GridCell) => (col ? c.colSpan : c.rowSpan)
+  const far = (c: GridCell) => (col ? c.row : c.col)
+  const farSpan = (c: GridCell) => (col ? c.rowSpan : c.colSpan)
+  const grow = (c: GridCell) => (col ? { ...c, colSpan: c.colSpan + 1 } : { ...c, rowSpan: c.rowSpan + 1 })
+  const shift = (c: GridCell) => (col ? { ...c, col: c.col + 1 } : { ...c, row: c.row + 1 })
+  // Is some OTHER cell going to absorb the track from the left at c's cross
+  // positions? Asked per cell rather than assumed from `at > 0`, because this
+  // module's own ponytail note says a grid can carry a hole (see `closePane`),
+  // and over a hole there is nothing on the left to absorb anything.
+  const ender = (c: GridCell) =>
+    layout.cells.some(
+      (o) =>
+        o !== c &&
+        near(o) + nearSpan(o) === at &&
+        far(o) < far(c) + farSpan(c) &&
+        far(o) + farSpan(o) > far(c),
+    )
+
   const cells = layout.cells.map((c) => {
-    const start = axis === 'col' ? c.col : c.row
-    const span = axis === 'col' ? c.colSpan : c.rowSpan
-    if (start >= at) return axis === 'col' ? { ...c, col: c.col + 1 } : { ...c, row: c.row + 1 }
-    const widen = start + span > at || (start + span === at && c.tabId !== keeper)
-    if (!widen) return c
-    return axis === 'col' ? { ...c, colSpan: c.colSpan + 1 } : { ...c, rowSpan: c.rowSpan + 1 }
+    const inRun = far(c) >= start && far(c) + farSpan(c) <= end
+    if (near(c) + nearSpan(c) < at) return c // entirely before the line
+    if (near(c) + nearSpan(c) === at) return inRun ? c : grow(c) // ends on it
+    if (near(c) < at) return grow(c) // straddles it, so it must widen either way
+    if (near(c) === at && !inRun && !ender(c)) return grow(c) // absorbs leftwards
+    return shift(c)
   })
-  return axis === 'col'
+  return col
     ? { ...layout, cols: layout.cols + 1, cells }
     : { ...layout, rows: layout.rows + 1, cells }
+}
+
+/**
+ * Insert a track at grid line `at` on `axis`, spanning cross-axis `[start, end)`,
+ * and put `tabId` in it.
+ *
+ * Returns `layout` unchanged when the run is empty or out of bounds, when `at`
+ * is out of range, or when `tabId` is falsy. `at === <track count>` is legal and
+ * appends at the far edge.
+ */
+export function insertAt(
+  layout: GridLayout,
+  axis: 'col' | 'row',
+  at: number,
+  tabId: string,
+  start: number,
+  end: number,
+): GridLayout {
+  const along = axis === 'col' ? layout.cols : layout.rows
+  const across = axis === 'col' ? layout.rows : layout.cols
+  if (!tabId || end <= start || start < 0 || end > across || at < 0 || at > along) return layout
+  return place(
+    insertTrack(layout, axis, at, start, end),
+    axis === 'col'
+      ? { tabId, col: at, row: start, colSpan: 1, rowSpan: end - start }
+      : { tabId, col: start, row: at, colSpan: end - start, rowSpan: 1 },
+  )
 }
 
 /**
@@ -157,13 +214,9 @@ export function split(
 ): GridLayout {
   const f = layout.cells.find((c) => c.tabId === focusedTabId)
   if (!f || !tabId || layout.cells.some((c) => c.tabId === tabId)) return layout
-  const at = axis === 'col' ? f.col + f.colSpan : f.row + f.rowSpan
-  return place(
-    insertTrack(layout, axis, at, focusedTabId),
-    axis === 'col'
-      ? { tabId, col: at, row: f.row, colSpan: 1, rowSpan: f.rowSpan }
-      : { tabId, col: f.col, row: at, colSpan: f.colSpan, rowSpan: 1 },
-  )
+  return axis === 'col'
+    ? insertAt(layout, 'col', f.col + f.colSpan, tabId, f.row, f.row + f.rowSpan)
+    : insertAt(layout, 'row', f.row + f.rowSpan, tabId, f.col, f.col + f.colSpan)
 }
 
 /**
@@ -229,9 +282,184 @@ function absorb(cells: readonly GridCell[], hole: GridCell): GridCell[] | null {
 export function closePane(layout: GridLayout, tabId: string): GridLayout | null {
   const hole = layout.cells.find((c) => c.tabId === tabId)
   if (!hole) return layout
+  if (layout.cells.length - 1 < 2) return null
+  return vacate(layout, tabId)
+}
+
+/**
+ * Give `tabId`'s rectangle away and re-rank the tracks — `closePane`'s body,
+ * minus its "is there still a split" verdict. Moving a pane elsewhere has to do
+ * exactly this first, and doing it any other way leaves the hole `compact`
+ * cannot reach (see `closePane`).
+ *
+ * Unchanged (same reference) when `tabId` has no cell, or when it is the only
+ * cell — there is nobody to hand the rectangle to and an empty grid is not a
+ * layout this function is allowed to invent.
+ */
+function vacate(layout: GridLayout, tabId: string): GridLayout {
+  const hole = layout.cells.find((c) => c.tabId === tabId)
   const rest = layout.cells.filter((c) => c.tabId !== tabId)
-  if (rest.length < 2) return null
+  if (!hole || !rest.length) return layout
   return compact({ ...layout, cells: absorb(rest, hole) ?? rest })
+}
+
+/**
+ * Put `tabId` in a new cell on `side` of `targetTabId`'s cell.
+ *
+ * If `tabId` already has a cell it is VACATED first — so this is both "split
+ * that pane and show this tab in the new half" and "move this pane over there",
+ * which is why there is one function and not two. `place()` is not used
+ * directly: place() moves one cell into a FREE rectangle, and there is no free
+ * rectangle here — the new one has to be cut out of the grid.
+ *
+ * No-op (same reference) when the target has no cell (including the case where
+ * vacating `tabId` was what removed it), or when the two ids are the same.
+ */
+export function placeBeside(
+  layout: GridLayout,
+  tabId: string,
+  targetTabId: string,
+  side: Side,
+): GridLayout {
+  if (!tabId || tabId === targetTabId) return layout
+  const base = vacate(layout, tabId)
+  const t = base.cells.find((c) => c.tabId === targetTabId)
+  if (!t) return layout
+  const axis = side === 'left' || side === 'right' ? 'col' : 'row'
+  const at =
+    side === 'left' ? t.col
+    : side === 'right' ? t.col + t.colSpan
+    : side === 'top' ? t.row
+    : t.row + t.rowSpan
+  const next =
+    axis === 'col'
+      ? insertAt(base, 'col', at, tabId, t.row, t.row + t.rowSpan)
+      : insertAt(base, 'row', at, tabId, t.col, t.col + t.colSpan)
+  return next === base ? layout : next
+}
+
+/**
+ * Put `tabId` in a NEW full-run track at the seam `axis`/`index` identifies
+ * (splitgrid's `Divider.index` is the track BEFORE the seam, so the insert line
+ * is `index + 1`), over the cross-axis run `[start, end)` the same `Divider`
+ * carries.
+ *
+ * REFUSES (same reference) when `tabId` already has a cell: vacating compacts,
+ * and compaction re-ranks the very track indices this was told about, so the
+ * seam the user aimed at would not be the seam that got the track.
+ * ponytail: ceiling is "no seam drop for a placed pane" — the edge quarter
+ * already serves moving one. Re-derive the seam after the vacate if anyone
+ * wants both.
+ */
+export function placeAtSeam(
+  layout: GridLayout,
+  tabId: string,
+  axis: 'col' | 'row',
+  index: number,
+  start: number,
+  end: number,
+): GridLayout {
+  if (layout.cells.some((c) => c.tabId === tabId)) return layout
+  return insertAt(layout, axis, index + 1, tabId, start, end)
+}
+
+/**
+ * `tabId` takes over `targetTabId`'s rectangle. When `tabId` already has a cell
+ * the two EXCHANGE rectangles; otherwise `targetTabId` is displaced off screen
+ * and keeps its place on the strip, which is `showIn`'s existing meaning.
+ *
+ * Separate from `showIn` on purpose: `showIn` MUST keep no-opping on an
+ * already-placed tab, because `selectTab` calls it on every tab click and a
+ * click must be a focus move, never a swap. A drop is the explicit gesture that
+ * earns the swap.
+ *
+ * No-op (same reference) when either id is empty, when the target has no cell,
+ * or when the two are the same.
+ */
+export function occupy(layout: GridLayout, tabId: string, targetTabId: string): GridLayout {
+  if (!tabId || !targetTabId || tabId === targetTabId) return layout
+  const t = layout.cells.find((c) => c.tabId === targetTabId)
+  if (!t) return layout
+  const own = layout.cells.find((c) => c.tabId === tabId)
+  if (!own) return place(remove(layout, targetTabId), { ...t, tabId })
+  return {
+    ...layout,
+    cells: layout.cells.map((c) =>
+      c.tabId === tabId ? { ...t, tabId }
+      : c.tabId === targetTabId ? { ...own, tabId: targetTabId }
+      : c,
+    ),
+  }
+}
+
+/**
+ * The tab whose cell shares an edge with `tabId`'s on `dir` — the first cell
+ * touching the relevant grid line anywhere in `tabId`'s cross-extent, scanned
+ * from that extent's start so the answer is stable rather than array-order.
+ * `null` at the grid edge, or when `tabId` has no cell.
+ */
+export function neighbour(layout: GridLayout, tabId: string, dir: Side): string | null {
+  const c = layout.cells.find((x) => x.tabId === tabId)
+  if (!c) return null
+  const horiz = dir === 'left' || dir === 'right'
+  const back = dir === 'left' || dir === 'top'
+  const near = horiz ? c.col : c.row
+  const line = back ? near : near + (horiz ? c.colSpan : c.rowSpan)
+  const far = horiz ? c.row : c.col
+  const farSpan = horiz ? c.rowSpan : c.colSpan
+  return (
+    layout.cells
+      .filter((o) => {
+        if (o.tabId === tabId) return false
+        const on = horiz ? o.col : o.row
+        const os = horiz ? o.colSpan : o.rowSpan
+        const of = horiz ? o.row : o.col
+        const ofs = horiz ? o.rowSpan : o.colSpan
+        // Overlap, not containment: a wide neighbour still shares the edge.
+        return (back ? on + os === line : on === line) && of < far + farSpan && of + ofs > far
+      })
+      .sort((a, b) => (horiz ? a.row - b.row : a.col - b.col))[0]?.tabId ?? null
+  )
+}
+
+/**
+ * Can `count` panes tile EXACTLY `cols` x `rows` — every cell filled, every row
+ * and every column used, nothing dropped?
+ *
+ * The grid picker greys out precisely what this refuses and `reflow` returns
+ * null for precisely the same picks, so what was previewed and what gets built
+ * cannot drift apart. Three clauses: no empty column, a cell for every pane, no
+ * empty row.
+ */
+export function canReflow(count: number, cols: number, rows: number): boolean {
+  if (count < 1 || cols < 1 || rows < 1) return false
+  return cols <= count && cols * rows >= count && rows <= Math.ceil(count / cols)
+}
+
+/**
+ * Re-tile `tabIds` (STRIP ORDER) into `cols` x `rows`: row-major via `findFree`,
+ * then the last cell of each row stretched to the right edge so a short final
+ * row still tiles completely rather than leaving a hole. `null` when `canReflow`
+ * refuses, which the caller treats as "no state change".
+ *
+ * `findFree` + `place` + `compact` do all the work; there is no packer here.
+ */
+export function reflow(
+  tabIds: readonly string[],
+  cols: number,
+  rows: number,
+): GridLayout | null {
+  if (!canReflow(tabIds.length, cols, rows)) return null
+  let out: GridLayout = { cols, rows, cells: [] }
+  for (const tabId of tabIds) {
+    const free = findFree(out, 1, 1)
+    if (!free) break // unreachable: canReflow guarantees cols * rows >= count
+    out = place(out, { tabId, ...free, colSpan: 1, rowSpan: 1 })
+  }
+  const cells = out.cells.map((c) =>
+    out.cells.some((o) => o.row === c.row && o.col > c.col) ? c : { ...c, colSpan: cols - c.col },
+  )
+  return compact({ ...out, cells })
 }
 
 /**

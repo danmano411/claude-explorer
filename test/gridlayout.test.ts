@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { GridCell, GridLayout } from '../src/shared/types'
 import {
+  canReflow,
   closePane,
   compact,
   findFree,
@@ -8,6 +9,7 @@ import {
   occupies,
   overlaps,
   place,
+  reflow,
   remove,
   showIn,
   single,
@@ -294,6 +296,55 @@ describe('showIn', () => {
 describe('single', () => {
   it('is a 1x1 grid holding the tab', () => {
     expect(single('a')).toEqual({ cols: 1, rows: 1, cells: [cell('a', 0, 0)] })
+  })
+})
+
+// KAN-56: the grid picker greys out precisely what canReflow refuses, and
+// reflow returns null for precisely the same picks, so the two can never
+// drift apart from each other.
+describe('canReflow', () => {
+  it('accepts an exact tiling', () => {
+    expect(canReflow(4, 2, 2)).toBe(true)
+  })
+  it('refuses a grid with less area than panes', () => {
+    expect(canReflow(5, 2, 2)).toBe(false)
+    expect(canReflow(4, 3, 1)).toBe(false)
+    expect(canReflow(2, 1, 1)).toBe(false)
+  })
+  it('refuses more columns than there are panes, which would leave one empty', () => {
+    expect(canReflow(4, 5, 1)).toBe(false)
+  })
+  it('refuses a row count no pane reaches, which would leave one empty', () => {
+    expect(canReflow(4, 2, 3)).toBe(false)
+  })
+  it('refuses a degenerate count or grid', () => {
+    expect(canReflow(0, 2, 2)).toBe(false)
+    expect(canReflow(4, 0, 2)).toBe(false)
+    expect(canReflow(4, 2, 0)).toBe(false)
+  })
+})
+
+describe('reflow', () => {
+  it('tiles panes row-major in strip order, stretching only the last cell of a short row', () => {
+    const l = reflow(['a', 'b', 'c', 'd'], 3, 2)!
+    expect([l.cols, l.rows]).toEqual([3, 2])
+    expect(l.cells.find((c) => c.tabId === 'a')).toMatchObject({ col: 0, row: 0, colSpan: 1 })
+    expect(l.cells.find((c) => c.tabId === 'b')).toMatchObject({ col: 1, row: 0, colSpan: 1 })
+    expect(l.cells.find((c) => c.tabId === 'c')).toMatchObject({ col: 2, row: 0, colSpan: 1 })
+    // 'd' is alone in row 1, so it stretches to the right edge rather than
+    // leaving columns 1-2 of that row uncovered.
+    expect(l.cells.find((c) => c.tabId === 'd')).toMatchObject({ col: 0, row: 1, colSpan: 3 })
+    expect(untiled(l)).toEqual([])
+  })
+
+  it('refuses a grid smaller than the pane count — no eviction, just null', () => {
+    expect(reflow(['a', 'b', 'c', 'd', 'e'], 2, 2)).toBeNull()
+  })
+
+  it('leaves no two cells overlapping when a row does not divide evenly', () => {
+    const l = reflow(['a', 'b', 'c', 'd', 'e'], 3, 2)!
+    expect(l.cells).toHaveLength(5)
+    expect(untiled(l)).toEqual([])
   })
 })
 
