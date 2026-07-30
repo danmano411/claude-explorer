@@ -27,8 +27,20 @@ const ENTRY = path.join(ROOT, 'out/main/index.js');
 // instance lock is keyed on userData, so the raw children below must be handed
 // the very same --user-data-dir string as instance 1 or they would each become
 // a primary instance and nothing would be forwarded anywhere.
-const PROFILE = path.join(os.tmpdir(), 'claude-explorer-cli-harness');
+// Suffixed with the pid: this repo is worked on in several git worktrees at
+// once, and a fixed name means two concurrent runs share a profile — which,
+// because the lock is keyed on userData, makes the second run's app silently
+// forward into the FIRST run's window instead of failing. Symptom is a handful
+// of "the argv tab is the focused one" failures against a workspace holding
+// tabs nobody in this run opened.
+const PROFILE = path.join(os.tmpdir(), `claude-explorer-cli-harness-${process.pid}`);
 fs.rmSync(PROFILE, { recursive: true, force: true });
+
+// The app titles a folder tab with its basename, and this harness opens ROOT.
+// Hardcoding 'Claude Explorer' assumed the checkout is always named that; from
+// a worktree it is not, and every title assertion fails for a reason that has
+// nothing to do with the CLI.
+const ROOT_TAB = path.basename(ROOT);
 
 const results = [];
 const check = (name, pass, detail = '') => {
@@ -73,7 +85,7 @@ console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
   let act = await activeTitle(win);
   const entries = await win.locator('.entry').count();
   check('cold start opened a tab on the argv path and focused it',
-    ts.length === 2 && ts[1] === 'Claude Explorer' && act === 'Claude Explorer' && entries > 5,
+    ts.length === 2 && ts[1] === ROOT_TAB && act === ROOT_TAB && entries > 5,
     `${ts.join(' | ')} — active "${act}", ${entries} entries`);
 
   // 2. a second launch does not become a second app.
@@ -103,8 +115,8 @@ console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
   ts = await titles(win);
   act = await activeTitle(win);
   check('--new-session (a) added one focused tab on the folder',
-    ts.length === before + 2 && ts[ts.length - 1] === 'Claude Explorer'
-      && act === 'Claude Explorer',
+    ts.length === before + 2 && ts[ts.length - 1] === ROOT_TAB
+      && act === ROOT_TAB,
     `${ts.join(' | ')} — active "${act}"`);
 
   // A FileBrowser is only mounted while the active tab is a files view, so
@@ -184,7 +196,7 @@ console.log('\ninstance 2 — relaunch with --open, expect restore + one appende
   const activeIndex = await win.locator('.tab:not(.add)')
     .evaluateAll((els) => els.findIndex((e) => e.classList.contains('active')));
   check('and the argv tab is the focused one',
-    ts[ts.length - 1] === 'Claude Explorer' && activeIndex === ts.length - 1,
+    ts[ts.length - 1] === ROOT_TAB && activeIndex === ts.length - 1,
     `last "${ts[ts.length - 1]}", active index ${activeIndex} of ${ts.length}`);
 
   await close();
