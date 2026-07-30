@@ -165,6 +165,9 @@ export function App() {
   // ponytail: always appends + focuses, never dedupes against an identical
   // restored tab. Two tabs on the same folder is the price; match on cwd and
   // focus the existing one when someone complains.
+  // KAN-47: BOTH arms are sourceless on purpose. An OS shell-open is not
+  // "opened from" any tab, so neither one inherits a group — `openViewerTab`
+  // without a `sourceId` is exactly today's far-right append.
   const applyCli = (cmd: string, path: string) => {
     if (cmd === 'open-path') openFolderTab(path);
     else if (cmd === 'open-file') openViewerTab(path);
@@ -186,6 +189,14 @@ export function App() {
   const update = (id: string, patch: Partial<Tab>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
 
+  // A tab that joins a COLLAPSED group is rendered by nothing at all — TabBar
+  // draws no members of a collapsed group — so it reads as the tab vanishing
+  // rather than as "it joined a group" (KAN-44 review #2). Every path that
+  // puts a tab into a group it wasn't in has to expand it; no-op (same
+  // reference) when the group is already open or gone.
+  const expand = (groupId: string) =>
+    setGroups((gs) => (gs.find((g) => g.id === groupId)?.collapsed ? setCollapsed(gs, groupId, false) : gs));
+
   // KAN-47: `+` / Ctrl+T has no source tab — it's the global "new tab" action,
   // same as Chrome's own new-tab button never joining a group. Stays far-right.
   const addTab = async () => {
@@ -206,16 +217,18 @@ export function App() {
   // could not live inside a future tab group). Re-opening the same file focuses
   // the tab that already has it instead of piling up duplicates.
   //
-  // KAN-47: the tab this viewer was opened FROM is whichever tab's FileBrowser
-  // is on screen, i.e. `active` at the moment of the click — captured here,
-  // before the settingsGet await, so a tab switch mid-flight can't retarget it.
-  // The settings round-trip only happens when there's a group to inherit;
-  // an ungrouped source is already the no-op fast path.
-  const openViewerTab = async (filePath: string, mode: 'file' | 'diff' = 'file') => {
-    const sourceGroupId = tabs.find((t) => t.id === active)?.groupId;
-    const groupId = sourceGroupId !== undefined && (await window.api.settingsGet()).groupWithSource
-      ? sourceGroupId : undefined;
+  // KAN-47: `sourceId` is the tab this viewer was opened FROM, passed in
+  // explicitly by the caller rather than inferred from `active` — an OS
+  // shell-open (applyCli's 'open-file' arm) is not "opened from" any tab and
+  // must stay far-right, which sourceless means literally here. Its groupId is
+  // resolved INSIDE the updater, not from this render's closure: settingsGet
+  // is an await, and an ungroup during it would otherwise tag the new tab with
+  // a group its source has already left.
+  const openViewerTab = async (filePath: string, mode: 'file' | 'diff' = 'file', sourceId?: string) => {
+    const link = sourceId !== undefined && (await window.api.settingsGet()).groupWithSource;
     setTabs((ts) => {
+      const groupId = link ? ts.find((t) => t.id === sourceId)?.groupId : undefined;
+      if (groupId !== undefined) expand(groupId);
       const { tabs: next, id } = openViewerTabList(ts, filePath, mode, groupId);
       selectTab(id);
       return next;
@@ -241,20 +254,15 @@ export function App() {
   // Group-aware: the same positional move, plus "did it land inside a group's
   // span?" — the join/leave rule lives in groups.ts, not here.
   //
-  // If that landing spot's group happens to be collapsed, expand it: a drop
-  // is one user gesture (same one-commit reasoning groupActions relies on
-  // above), and without this a tab dropped beside a collapsed group joins it
-  // per groups.ts's inclusive edge rule and then simply isn't rendered —
-  // reads as the tab vanishing, not as "it joined a group" (KAN-44 review #2).
+  // If that landing spot's group happens to be collapsed, `expand` it: a tab
+  // dropped beside a collapsed group joins it per groups.ts's inclusive edge
+  // rule and would then simply not be rendered (KAN-44 review #2).
   const reorderTabs = (from: number, insert: number) => {
     const moved = tabs[from];
     const next = reorderWithGroups(tabs, from, insert);
     setTabs(next);
     const newGroupId = moved && next.find((t) => t.id === moved.id)?.groupId;
-    if (newGroupId !== undefined && newGroupId !== moved?.groupId) {
-      const g = groups.find((x) => x.id === newGroupId);
-      if (g?.collapsed) setGroups(setCollapsed(groups, newGroupId, false));
-    }
+    if (newGroupId !== undefined && newGroupId !== moved?.groupId) expand(newGroupId);
   };
 
   // A group with no members left is invisible (segments() only emits runs of
@@ -341,15 +349,19 @@ export function App() {
   // Feature 5: open a plain shell terminal tab at a folder.
   //
   // KAN-47: `sourceId` is the tab whose context menu spawned this — the
-  // right-clicked tab, which is not necessarily `active` — so its groupId is
-  // captured up front, same reasoning as openViewerTab above.
+  // right-clicked tab, which is not necessarily `active`. Its groupId is
+  // resolved inside the updater, same reasoning as openViewerTab above; here
+  // the await is a Windows pty spawn, which is far longer than an IPC.
   const openShellTab = async (cwd: string, sourceId?: string) => {
-    const sourceGroupId = sourceId !== undefined ? tabs.find((t) => t.id === sourceId)?.groupId : undefined;
+    const link = sourceId !== undefined && (await window.api.settingsGet()).groupWithSource;
     const ptyId = await window.api.ptySpawn({ path: cwd, shell: true });
     const t = newTerminalTab(cwd, 'shell', ptyId, 'Terminal');
-    const groupId = sourceGroupId !== undefined && (await window.api.settingsGet()).groupWithSource
-      ? sourceGroupId : undefined;
-    setTabs((ts) => (groupId !== undefined ? addToGroup([...ts, t], t.id, groupId) : [...ts, t]));
+    setTabs((ts) => {
+      const groupId = link ? ts.find((x) => x.id === sourceId)?.groupId : undefined;
+      if (groupId === undefined) return [...ts, t];
+      expand(groupId);
+      return addToGroup([...ts, t], t.id, groupId);
+    });
     selectTab(t.id);
   };
 
@@ -399,7 +411,7 @@ export function App() {
             }
             onOpenClaude={(p) => openClaude(activeTab.id, p)}
             onOpenExternal={(p) => window.api.externalOpen(p)}
-            onOpenFile={openViewerTab}
+            onOpenFile={(p, m) => openViewerTab(p, m, activeTab.id)}
           />
         )}
         {activeTab?.view === 'viewer' && activeTab.filePath && (

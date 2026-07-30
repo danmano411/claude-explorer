@@ -48,7 +48,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </label>
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={save}>Save</button>
+          {/* Saving before settingsGet resolves would write the initial state
+              back over the real one — clobbering a custom ideCommand with
+              'code' and re-enabling groupWithSource for anyone who turned it
+              off. Enter-to-save is already safe (the input is disabled). */}
+          <button className="primary" onClick={save} disabled={!loaded}>Save</button>
         </div>
       </div>
     </div>

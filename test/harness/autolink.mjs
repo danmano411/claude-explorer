@@ -14,10 +14,13 @@
 //   4. a shell tab opened from a tab's own context menu ("Open Terminal")
 //      follows the same rule — this is the OTHER open-tab path that has a
 //      real per-tab source (the right-clicked tab, not necessarily `active`);
-//   5. group membership of an auto-linked tab survives a restart, same as any
+//   5. opening from a tab whose group is COLLAPSED expands the group, so the
+//      new tab is actually on the strip instead of joining a run that renders
+//      nothing (KAN-44 review #2's defect, on the auto-link path);
+//   6. group membership of an auto-linked tab survives a restart, same as any
 //      other group membership (KAN-43's persistence, unmodified by this
 //      feature — this just proves the auto-linked tab is on that path too);
-//   6. the Settings modal's new checkbox round-trips through settings.json.
+//   7. the Settings modal's new checkbox round-trips through settings.json.
 //
 // The setting is flipped via window.api.settingsSet directly (the exact call
 // SettingsModal's Save button makes) for the behavioural assertions, so a
@@ -78,6 +81,8 @@ const probe = (win) => win.evaluate(() => {
   const wrappers = [...document.querySelectorAll('.tabgroup')];
   return {
     wrapperCount: wrappers.length,
+    visibleTabs: all.length,
+    label: wrappers[0] ? wrappers[0].querySelector('.group-label').textContent.trim() : null,
     memberIdx: all.map((t, i) => (t.closest('.tabgroup') ? i : -1)).filter((i) => i >= 0),
   };
 });
@@ -169,6 +174,34 @@ fs.rmSync(PROFILE, { recursive: true, force: true });
       JSON.stringify(p));
   }
 
+  // --- 5. auto-linking into a COLLAPSED group must expand it. A collapsed
+  // group renders none of its members, while the pane still shows the active
+  // one — so without the expand the new tab is drawn by nothing at all and
+  // reads as having vanished, the exact defect KAN-44 review #2 caught on the
+  // drag path.
+  const repoIdx3 = await indexOfTitle(win, 'Repo');
+  await win.locator('.tab:not(.add)').nth(repoIdx3).click();
+  await win.waitForTimeout(200);
+  await win.locator('.group-label').first().click(); // collapse
+  await win.waitForTimeout(400);
+  {
+    const p = await probe(win);
+    check('setup: the group is collapsed — no members on the strip, count on the chip',
+      p.memberIdx.length === 0 && p.label === 'Group (3)', JSON.stringify(p));
+  }
+  // The source tab is hidden but still active, so its FileBrowser is on screen.
+  await win.locator('.entry', { hasText: 'README.md' }).first().dblclick();
+  await win.waitForTimeout(500);
+  {
+    const t = await titles(win);
+    const p = await probe(win);
+    check('opening from a tab in a COLLAPSED group expands it, so the new tab is visible',
+      t.includes('README.md') && p.label === 'Group', `${t.join(' | ')} label="${p.label}"`);
+    check('and the new tab is INSIDE the run — 4 contiguous members now',
+      p.wrapperCount === 1 && p.memberIdx.length === 4 && consecutive(p.memberIdx),
+      JSON.stringify(p));
+  }
+
   await win.waitForTimeout(1600); // 400ms persist debounce + margin, for run 2
   await close();
 }
@@ -182,8 +215,8 @@ fs.rmSync(PROFILE, { recursive: true, force: true });
   await win.waitForTimeout(1500);
 
   const p = await probe(win);
-  check('the auto-linked group survived the restart, still contiguous, still 3 members',
-    p.wrapperCount === 1 && p.memberIdx.length === 3 && consecutive(p.memberIdx),
+  check('the auto-linked group survived the restart, still contiguous, still 4 members',
+    p.wrapperCount === 1 && p.memberIdx.length === 4 && consecutive(p.memberIdx),
     JSON.stringify(p));
 
   await close();

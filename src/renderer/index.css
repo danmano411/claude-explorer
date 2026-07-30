@@ -377,7 +377,6 @@ body {
 .settings-hint { font-size: 12px; color: var(--ink-soft); }
 .settings-hint code { background: var(--bg-panel); padding: 0 3px; border-radius: 3px; }
 .settings-checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--ink-soft); }
-.settings-checkbox input { width: auto; }
 
 /* remove-from-recent × */
 .recent-remove { color: var(--ink-soft); }
