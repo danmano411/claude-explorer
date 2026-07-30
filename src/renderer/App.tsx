@@ -1,8 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   newFilesTab, newTerminalTab, toPersisted, fromPersisted, needsSpawn,
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
+import {
+  closePane as closePaneIn, compact, showIn, single, split as splitLayout,
+} from './gridlayout';
+import { gridPlacement } from './splitgrid';
+import { SplitDividers } from './components/SplitDividers';
 import {
   addToGroup, deleteGroup, newGroup, recolorGroup, removeFromGroup,
   renameGroup, reorderWithGroups, setCollapsed,
@@ -21,7 +26,7 @@ import { DiffView } from './components/DiffView';
 import { RecentMenu } from './components/RecentMenu';
 import { SettingsModal } from './components/SettingsModal';
 import { SpaceMenu } from './components/SpaceMenu';
-import { TabBar, type GroupActions } from './TabBar';
+import { TabBar, type GroupActions, type SplitActions } from './TabBar';
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
@@ -47,6 +52,10 @@ export function App() {
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
   const status = usePtyStatus();
+  // The pane container. SplitDividers' handles are grid items ON this element's
+  // grid, so they must be its children, and the drag converts pixels to
+  // fractions against its box.
+  const contentRef = useRef<HTMLDivElement>(null);
   const lastActivated = useRef<Map<string, number>>(new Map());
   const spawning = useRef<Set<string>>(new Set());
   // An argv/Explorer open is APPENDED to whatever restore produces, never
@@ -78,14 +87,87 @@ export function App() {
   const activeSpace = spaces.find((s) => s.id === activeSpaceId);
   const spaceTabs = sliceOf(activeSpace?.tabIds ?? [], tabs);
 
+  // --- split view (KAN-46) -------------------------------------------------
+  //
+  // HOW PLACEMENT COMPOSES WITH THE FLAT PANE LIST. Split view does not own the
+  // panes and never re-parents one. `.content` keeps being the single flat
+  // container it has always been, holding one absolutely positioned `.pane` per
+  // renderable tab; all `gridPlacement()` does is turn it into a CSS Grid and
+  // hand each pane a `grid-area`. An absolutely positioned child WITH a grid
+  // position takes that cell as its containing block, so `inset: 0` fills the
+  // cell exactly — the panes tile without one node moving in the tree. That is
+  // the KAN-23 constraint made structural: an xterm that changes parent is an
+  // xterm that loses alt-screen mode and its scrollback, so the only thing a
+  // split is allowed to change about a pane is its `style`.
+  //
+  // `layout: null` therefore needs no special case: `gridPlacement` returns an
+  // empty container style and no pane styles, which leaves `.content` exactly
+  // the block box it is today with one visible `inset: 0` pane in it.
+
+  /**
+   * The layout as it may actually be RENDERED.
+   *
+   * A cell naming a tab this space no longer owns (closed, or moved to another
+   * space) would otherwise reserve a grid area with no element in it — a hole
+   * in the tiling. Repaired here rather than on each of the paths a tab can
+   * leave a space by, because this is where the obligation actually is and
+   * because it also covers a `workspace.json` that predates the pruning. The
+   * persisted copy self-heals through `sanitize()`, which drops the same cells
+   * on the next write.
+   */
+  const layout = useMemo(() => {
+    const l = activeSpace?.layout;
+    if (!l) return null;
+    const live = new Set(sliceOf(activeSpace!.tabIds, tabs).map((t) => t.id));
+    const cells = l.cells.filter((c) => live.has(c.tabId));
+    if (!cells.length) return null;
+    return cells.length === l.cells.length ? l : compact({ ...l, cells });
+  }, [activeSpace, tabs]);
+
+  const placement = useMemo(
+    () => gridPlacement(layout, activeSpace?.colFractions, activeSpace?.rowFractions),
+    [layout, activeSpace?.colFractions, activeSpace?.rowFractions],
+  );
+
+  const activeTab = spaceTabs.find((t) => t.id === active);
+
+  /** The tabs with a pane on screen. Without a split that is just the active
+   *  tab, which is what makes the single-pane path literally unchanged. */
+  const visible = placement.split
+    ? spaceTabs.filter((t) => placement.panes[t.id])
+    : activeTab ? [activeTab] : [];
+  const visibleIds = new Set(visible.map((t) => t.id));
+
+  /** The active space through `fn`, everything else untouched. */
+  const mapActiveSpace = (fn: (s: Space) => Space) =>
+    setSpaces((ss) => ss.map((s) => (s.id === activeSpaceIdRef.current ? fn(s) : s)));
+
   // `active` is the tab with focus right now; `space.activeTabId` is the memory
   // of it, so coming back to a space lands where you left it (KAN-43 persists
   // that field). setActiveTab refuses a tab the space does not own, so the
   // membership update always has to be queued before this.
+  //
+  // KAN-46: the strip stays global and single while a split is up, so clicking
+  // a tab has to say WHICH pane it lands in. It lands in the focused one —
+  // `showIn` swaps it for the tab that was there, which keeps its place on the
+  // strip and simply stops being visible. Clicking a tab that already has a
+  // pane is a plain focus move (showIn no-ops), which is also what a click
+  // inside a pane produces via `onPointerDownCapture` below. With no layout
+  // there is nothing to retarget and this is byte-for-byte what it always was.
   const selectTab = (id: string) => {
+    const from = active;
     lastActivated.current.set(id, Date.now());
     setActive(id);
-    setSpaces((ss) => setActiveTab(ss, activeSpaceIdRef.current, id));
+    setSpaces((ss) => {
+      // Same reference when nothing moved — `setActiveTab` is careful about
+      // that too, and the debounced persist keys off `spaces` identity.
+      const i = ss.findIndex((s) => s.id === activeSpaceIdRef.current);
+      const l = i === -1 ? null : ss[i].layout;
+      const next = l && showIn(l, from, id);
+      const retargeted =
+        next && next !== l ? ss.map((s, k) => (k === i ? { ...s, layout: next } : s)) : ss;
+      return setActiveTab(retargeted, activeSpaceIdRef.current, id);
+    });
   };
 
   /** Every open path lands the new tab in the space you are looking at. */
@@ -209,9 +291,21 @@ export function App() {
   // for the CPU before the window is usable. A failed spawn paints its own error
   // inside the pane (see PtyManager), so a folder that has since been deleted
   // explains itself rather than silently doing nothing.
+  //
+  // KAN-46: "on first activation" means every tab that is ON SCREEN, not just
+  // the focused one. A restored split shows several terminals at once, and a
+  // pane whose tab never spawned renders nothing — the grid area is reserved
+  // and empty, which is a hole in the tiling that looks like the app lost a
+  // pane. `spawning` keeps this idempotent across the extra renders `placement`
+  // adds to the dependency list.
   useEffect(() => {
-    const t = tabs.find((x) => x.id === active);
-    if (!t || !needsSpawn(t) || spawning.current.has(t.id)) return;
+    for (const t of tabs) {
+      if (!visibleIds.has(t.id) || !needsSpawn(t) || spawning.current.has(t.id)) continue;
+      spawn(t);
+    }
+  }, [active, tabs, placement]);
+
+  const spawn = (t: Tab) => {
     spawning.current.add(t.id);
     spawnFor(t)
       .then((ptyId) => {
@@ -229,7 +323,7 @@ export function App() {
         });
       })
       .finally(() => spawning.current.delete(t.id));
-  }, [active, tabs]);
+  };
 
   // The workspace document IS this component's state, so it is written whole
   // rather than read-modify-written. The old spread-what-is-on-disk shape had
@@ -373,7 +467,20 @@ export function App() {
     const t = tabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
     lastActivated.current.delete(id);
-    setSpaces((ss) => removeTabFromSpace(ss, activeSpaceIdRef.current, id));
+    // Route the space's layout through closePaneIn too, exactly like the "Close
+    // pane" menu item — not just membership. Without this the render-time
+    // `layout` memo only ever `compact`s dead cells away, which can only drop a
+    // track that is empty on EVERY row/col; a hole whose track is still occupied
+    // by a neighbour (an L-shaped or T-shaped tiling) stays a hole forever
+    // (KAN-46 review #2). `closePaneIn` no-ops when `id` has no cell.
+    setSpaces((ss) => {
+      const removed = removeTabFromSpace(ss, activeSpaceIdRef.current, id);
+      if (removed === ss) return ss;
+      return removed.map((s) =>
+        s.id === activeSpaceIdRef.current && s.layout
+          ? { ...s, layout: closePaneIn(s.layout, id) }
+          : s);
+    });
     setTabs((ts) => {
       const remaining = closeTabList(ts, id);
       if (id === active) {
@@ -385,9 +492,24 @@ export function App() {
         // member last" fix still lands on a real survivor.
         const mine = new Set(activeSpace?.tabIds ?? []);
         const survivors = remaining.filter((x) => mine.has(x.id));
+        // Prefer a PLACED survivor (one with a pane) when a split is up. MRU
+        // alone can pick a tab with no cell — after a restore `lastActivated` is
+        // empty, every survivor ties at 0, and `reduce` takes the first one in
+        // `remaining`'s (tab-store) order, which is not necessarily one anyone
+        // can currently see. Reproduced with a 3-pane split where the strip's
+        // first tab is a member evicted from its cell by `showIn` (KAN-46 review
+        // #3): re-picking it left the active tab highlighted on the strip with
+        // no visible pane, and clicking it was a no-op (`showIn` treats
+        // `tabId === focusedTabId` as already-shown). With no split `layout` is
+        // null, `placedIds` is empty, and this falls through to plain MRU —
+        // byte-for-byte the old behaviour.
+        const placedIds = new Set(layout?.cells.map((c) => c.tabId) ?? []);
+        const pool = survivors.some((x) => placedIds.has(x.id))
+          ? survivors.filter((x) => placedIds.has(x.id))
+          : survivors;
         // Most-recently-activated survivor; '' only when the space is now empty.
-        setActive(survivors.length
-          ? survivors.reduce((a, b) =>
+        setActive(pool.length
+          ? pool.reduce((a, b) =>
             (lastActivated.current.get(b.id) ?? 0) > (lastActivated.current.get(a.id) ?? 0) ? b : a).id
           : '');
       }
@@ -626,7 +748,85 @@ export function App() {
     return () => window.removeEventListener('keydown', h);
   }, [spaces, activeSpaceId]);
 
-  const activeTab = spaceTabs.find((t) => t.id === active);
+  /**
+   * Everything a `.pane` element needs. The focus ring and the click-to-focus
+   * handler are both split-only: with one pane there is nothing to disambiguate,
+   * and attaching a `selectTab` to the whole content area would make a click on
+   * a file row a state write it is not today.
+   *
+   * Capture phase, deliberately: xterm stops propagation on its own container,
+   * so a bubbling handler never sees a click inside a terminal — exactly the
+   * pane you most need to be able to focus by clicking it.
+   */
+  const paneProps = (t: Tab) => ({
+    className: placement.split && t.id === active ? 'pane pane-focused' : 'pane',
+    style: placement.panes[t.id],
+    'data-pane': t.id,
+    ...(placement.split ? { onPointerDownCapture: () => selectTab(t.id) } : {}),
+  });
+
+  // Track sizes are per-space state, so a divider drag survives a space switch
+  // and a restart. Fired once per drag (on pointerup), never per pointermove —
+  // mid-drag SplitDividers writes the template straight to the DOM.
+  const persistFractions = (cols: number[], rows: number[]) =>
+    mapActiveSpace((s) => ({ ...s, colFractions: cols, rowFractions: rows }));
+
+  /**
+   * Split the FOCUSED pane and show `tabId` in the half that appears.
+   *
+   * With no layout yet the focused pane is the whole content area, so the split
+   * starts from `single(active)`. `splitLayout` returns its input unchanged
+   * when it cannot do anything (nothing focused, or `tabId` already has a
+   * pane), and that no-op is what keeps a pointless menu click from
+   * materialising a 1x1 grid where `layout: null` was.
+   *
+   * Fractions are dropped: the track count changed, so the old ones describe a
+   * grid that no longer exists.
+   *
+   * Bases off the RENDERED `layout` memo, not `s.layout` — a layout whose cells
+   * all belonged to since-closed tabs is a corpse (`{cells: []}` before
+   * sanitize's KAN-46 review #1 fix, and a pre-fix workspace.json can still hand
+   * one to a fresh session): falling back to `s.layout` finds cells but no
+   * `focusedTabId` among them, `splitLayout` no-ops, and split view is dead for
+   * the rest of the space's life. `layout` has already had exactly that case
+   * pruned to `null`, which is what lets the `single(active)` fallback fire.
+   */
+  const splitPane = (tabId: string, axis: 'col' | 'row') => {
+    mapActiveSpace((s) => {
+      const base = layout ?? (active ? single(active) : null);
+      if (!base) return s;
+      const next = splitLayout(base, active, tabId, axis);
+      if (next === base) return s;
+      return { ...s, layout: next, colFractions: undefined, rowFractions: undefined };
+    });
+    selectTab(tabId); // queued after the split, so `showIn` finds it placed and no-ops
+  };
+
+  /** Removes a pane. The tab stays on the strip — panes are placement, the strip
+   *  is reachability. The last pane going away restores `layout: null`. */
+  const closePane = (tabId: string) => {
+    const survivor = layout?.cells.find((c) => c.tabId !== tabId)?.tabId;
+    mapActiveSpace((s) => {
+      // Same reasoning as `splitPane`: base off the pruned `layout` memo, not
+      // `s.layout`, or a corpse layout (all cells dead) leaves this a no-op too.
+      if (!layout) return s;
+      return {
+        ...s,
+        layout: closePaneIn(layout, tabId),
+        colFractions: undefined,
+        rowFractions: undefined,
+      };
+    });
+    // Closing the pane you were in leaves focus on a tab with nothing on screen.
+    if (tabId === active && survivor) selectTab(survivor);
+  };
+
+  const splitActions: SplitActions = {
+    placed: placement.split ? Object.keys(placement.panes) : active ? [active] : [],
+    split: placement.split,
+    onSplit: splitPane,
+    onClosePane: closePane,
+  };
 
   return (
     <div className="app">
@@ -634,6 +834,7 @@ export function App() {
         tabs={spaceTabs}
         groups={groups}
         groupActions={groupActions}
+        splitActions={splitActions}
         activeId={active}
         status={status}
         onSelect={selectTab}
@@ -661,27 +862,36 @@ export function App() {
           />
         }
       />
-      <div className="content">
-        {activeTab?.view === 'files' && (
-          <FileBrowser
-            cwd={activeTab.cwd}
-            tabId={activeTab.id}
-            onNavigate={(p) =>
-              update(activeTab.id, {
-                cwd: p,
-                ...(activeTab.renamed ? {} : { title: basename(p) }),
-              })
-            }
-            onOpenClaude={(p) => openClaude(activeTab.id, p)}
-            onOpenExternal={(p) => window.api.externalOpen(p)}
-            onOpenFile={(p, m) => openViewerTab(p, m, activeTab.id)}
-          />
-        )}
-        {activeTab?.view === 'viewer' && activeTab.filePath && (
-          activeTab.viewerMode === 'diff'
-            ? <DiffView filePath={activeTab.filePath} />
-            : <Viewer filePath={activeTab.filePath} />
-        )}
+      <div className="content" ref={contentRef} style={placement.container}>
+        {/* Files and viewer panes are mounted only while visible, exactly as
+            they were before split view — a FileBrowser has no alt-screen mode
+            and no scrollback to lose, so there is nothing to keep alive off
+            screen. The only change is the `.pane` wrapper they now share with
+            the terminals, which is what gives them a grid area to sit in.
+            `.filebrowser`/`.viewer` are height:100%, and `.pane` is
+            `inset: 0` on a positioned container either way, so the box they
+            get is the same one they got as a direct child of `.content`. */}
+        {visible.map((t) => (t.view === 'terminal' ? null : (
+          <div key={t.id} {...paneProps(t)}>
+            {t.view === 'files' && (
+              <FileBrowser
+                cwd={t.cwd}
+                tabId={t.id}
+                onNavigate={(p) =>
+                  update(t.id, { cwd: p, ...(t.renamed ? {} : { title: basename(p) }) })
+                }
+                onOpenClaude={(p) => openClaude(t.id, p)}
+                onOpenExternal={(p) => window.api.externalOpen(p)}
+                onOpenFile={(p, m) => openViewerTab(p, m, t.id)}
+              />
+            )}
+            {t.view === 'viewer' && t.filePath && (
+              t.viewerMode === 'diff'
+                ? <DiffView filePath={t.filePath} />
+                : <Viewer filePath={t.filePath} />
+            )}
+          </div>
+        )))}
         {/* Terminals stay mounted for every terminal tab and are merely hidden
             when inactive. Unmounting disposes the xterm, and a rebuilt instance
             only ever receives *new* pty bytes — it never sees the escape
@@ -695,16 +905,24 @@ export function App() {
             render, not which processes exist, so a background space's terminals
             stay mounted and hidden exactly like a background tab's. Narrowing
             this to the active space would resurrect KAN-23 per space switch.
-            Keyed off `activeTab?.id` rather than `active` so a focus id that
+            Keyed off `visibleIds` rather than `active` so a focus id that
             somehow names a tab outside this space hides everything instead of
-            showing a terminal with no tab on the strip. */}
+            showing a terminal with no tab on the strip — and so a split shows
+            every terminal that has a cell, not just the focused one. */}
         {tabs.map((t) =>
           t.view === 'terminal' && t.ptyId ? (
-            <div key={t.id} className="pane" hidden={t.id !== activeTab?.id}>
+            <div key={t.id} {...paneProps(t)} hidden={!visibleIds.has(t.id)}>
               <Terminal ptyId={t.ptyId} />
             </div>
           ) : null,
         )}
+        {/* Handles only — no pane is a child of this component. Last, so a
+            handle sits above the panes in paint order as well as in z-index. */}
+        <SplitDividers
+          placement={placement}
+          containerRef={contentRef}
+          onResize={persistFractions}
+        />
       </div>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>

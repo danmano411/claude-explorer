@@ -3,7 +3,6 @@ import {
   SEAM_PX, dividerArea, dividerId, gridTemplate, resizeFractions,
   type Divider, type GridPlacement,
 } from '../splitgrid';
-import './SplitDividers.css';
 
 /** One arrow-key press. Roughly a terminal line; big enough to feel, small
  *  enough to land on a target with a few presses. */
@@ -42,29 +41,16 @@ export interface SplitDividersProps {
  * the caller's existing flat, always-mounted list; `gridPlacement()` gives them
  * a `grid-area` each and this places handles on the same grid.
  *
- * INTEGRATION (App.tsx), five lines:
- *   1. `const contentRef = useRef<HTMLDivElement>(null)` on `.content`.
- *   2. `const placement = useMemo(() => gridPlacement(space.layout, cols, rows), ...)`
- *   3. `.content` gets `style={placement.container}`.
- *   4. each `.pane` gets `style={placement.panes[t.id]}`,
- *      `hidden={placement.split ? !placement.panes[t.id] : t.id !== active}`,
- *      `className={'pane' + (t.id === active ? ' pane-focused' : '')}`, and an
- *      `onPointerDownCapture={() => selectTab(t.id)}` (capture phase: xterm
- *      stops propagation, so a bubbling handler never sees a click in a
- *      terminal and the pane would be unfocusable exactly where it matters).
- *   5. `<SplitDividers placement={placement} containerRef={contentRef}
- *        onResize={persistFractions} />` as a child of `.content`.
+ * Wired into `App.tsx`'s `.content` since KAN-46 integration: that element gets
+ * `ref` + `style={placement.container}`, each existing `.pane` gets
+ * `style={placement.panes[t.id]}` and a capture-phase `selectTab` (xterm stops
+ * propagation, so a bubbling handler never sees a click inside a terminal —
+ * exactly the pane you most need to focus by clicking it), and this component
+ * is the last child. `Terminal.tsx` coalesces its ResizeObserver into a
+ * `requestAnimationFrame` so a drag costs one `ptyResize` per frame rather than
+ * ~8 per pointermove; that is a flooding fix, not a correctness one.
  *
- * And ONE line in `Terminal.tsx`: its ResizeObserver already watches its own
- * box, so no wiring is needed for correctness — but it fires ~8x per divider
- * drag and each fire sends a `ptyResize` IPC. Coalesce it with a
- * `requestAnimationFrame` so a drag is one conpty resize per frame, not eight
- * per pointermove:
- *     let raf = 0;
- *     const ro = new ResizeObserver(() => {
- *       cancelAnimationFrame(raf); raf = requestAnimationFrame(resize);
- *     });
- * (plus `cancelAnimationFrame(raf)` in the existing cleanup).
+ * Styles live in `index.css` under "M5: split view", with the rest of the app's.
  */
 export function SplitDividers({ placement, containerRef, onResize }: SplitDividersProps) {
   const drag = useRef<{

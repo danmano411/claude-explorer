@@ -2,12 +2,15 @@
 //   node test/harness/splitgrid.mjs            (no npm run build needed)
 //   node test/harness/splitgrid.mjs --show     leave the window open to look at it
 //
-// Split view is deliberately NOT wired into App.tsx yet (three other M5 tickets
-// own App.tsx/index.css this milestone), so this cannot drive the real app the
-// way test/harness/tabvisuals.mjs does. Instead it bundles the component with
-// esbuild and renders it in a bare Electron BrowserWindow: the same Chromium
-// that ships the app, so CSS Grid, ResizeObserver and pointer capture all
-// behave exactly as they will in production.
+// This is the GEOMETRY harness: it drives splitgrid.ts + SplitDividers directly,
+// over layouts the app's own split/close actions cannot always produce, in a
+// bare Electron BrowserWindow bundled with esbuild — the same Chromium that
+// ships the app, so CSS Grid, ResizeObserver and pointer capture all behave
+// exactly as they will in production.
+//
+// test/harness/splitview.mjs is the other half: the same claims against the REAL
+// app, with a live terminal in a pane. Keep both — this one can pose layouts the
+// app cannot reach, and that one can prove things about a running pty.
 //
 // splitgrid.entry.tsx reproduces App.tsx's real DOM shape — one flat container,
 // every tab mounted once forever as an absolutely positioned `.pane` sibling —
@@ -234,7 +237,8 @@ await setLayout('3x3');
 {
   let allFocusable = true;
   const clay = [];
-  for (const p of (await geometry()).panes) {
+  const geomBefore = await geometry();
+  for (const p of geomBefore.panes) {
     // Click the stand-in, not the pane wrapper: focus must work through
     // content, which is what onPointerDownCapture is for.
     await win.locator(`[data-stand="${p.id}"]`).click({ position: { x: 10, y: 10 } });
@@ -243,7 +247,12 @@ await setLayout('3x3');
       const f = [...document.querySelectorAll('.pane.pane-focused:not([hidden])')];
       return {
         ids: f.map((e) => e.dataset.pane),
-        ring: f[0] ? getComputedStyle(f[0]).boxShadow : null,
+        // An OUTLINE, not a border and not an inset box-shadow: a border would
+        // shrink the content box (re-fitting every terminal on every focus
+        // change) and a box-shadow paints UNDER the pane's own descendants, so
+        // a pane full of opaque content showed almost none of it.
+        ring: f[0] ? getComputedStyle(f[0]).outline : null,
+        offset: f[0] ? getComputedStyle(f[0]).outlineOffset : null,
         clayVar: getComputedStyle(document.documentElement).getPropertyValue('--clay').trim(),
       };
     });
@@ -257,8 +266,19 @@ await setLayout('3x3');
     ? `rgb(${[1, 3, 5].map((i) => parseInt(last.clayVar.slice(i, i + 2), 16)).join(', ')})`
     : last.clayVar;
   check('the focus ring is painted in --clay', last.ring?.includes(rgb), `${last.ring} vs --clay=${last.clayVar} (${rgb})`);
-  check('the focus ring is inset, so focusing does not resize the pane\'s content box',
-    last.ring?.includes('inset'), last.ring);
+  check('the focus ring is drawn INSIDE the pane, not around it',
+    parseFloat(last.offset) < 0, last.offset);
+  // The claim behind that, measured rather than inferred from the property: a
+  // border here would shrink every focused pane's content box by 4px and make
+  // every terminal in the grid re-fit on every focus change.
+  const geomAfter = await geometry();
+  const resized = geomAfter.panes.filter((p) => {
+    const was = geomBefore.panes.find((q) => q.id === p.id);
+    return !was || Math.abs(was.stand.width - p.stand.width) > EPS
+      || Math.abs(was.stand.height - p.stand.height) > EPS;
+  });
+  check('and focusing does not resize any pane\'s content box',
+    resized.length === 0, resized.map((p) => p.id).join(','));
 }
 
 // ============================================================================

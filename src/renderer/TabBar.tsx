@@ -27,6 +27,29 @@ export interface GroupActions {
   toggleCollapsed: (groupId: string) => void;
 }
 
+/**
+ * Split view, from the strip's point of view (KAN-46). One object, same seam
+ * shape as `GroupActions`.
+ *
+ * The strip stays global and single: there is one row of tabs no matter how
+ * many panes are up, and a tab is not "in" a pane — panes are placement only.
+ * So the only thing the menu needs to know is whether the right-clicked tab
+ * currently HAS a pane, which decides between "put it in a new one" and "take
+ * its pane away".
+ */
+export interface SplitActions {
+  /** Tab ids with a pane right now. With no split up this is the active tab,
+   *  which is the single pane — that is what keeps "Split right" off the menu
+   *  of the tab you are already looking at, where it could only be a no-op. */
+  placed: string[];
+  /** More than one pane is up, i.e. there is a pane to close. */
+  split: boolean;
+  /** Splits the FOCUSED pane and shows `tabId` in the half that appears. */
+  onSplit: (tabId: string, axis: 'col' | 'row') => void;
+  /** Removes `tabId`'s pane. The tab itself stays on the strip. */
+  onClosePane: (tabId: string) => void;
+}
+
 interface Props {
   /** The ACTIVE SPACE's ordered slice, not every tab that exists — the strip
    *  renders one space (KAN-45). `segments()` and the `onReorder` indices below
@@ -34,6 +57,7 @@ interface Props {
   tabs: Tab[];
   groups: TabGroup[];
   groupActions: GroupActions;
+  splitActions: SplitActions;
   activeId: string;
   status: Map<string, PtyStatus>;
   onSelect: (id: string) => void;
@@ -52,7 +76,7 @@ interface Props {
 }
 
 export function TabBar({
-  tabs, groups, groupActions, activeId, status, onSelect, onClose, onAdd, onReorder,
+  tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
   onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu, recentMenu,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
@@ -244,6 +268,27 @@ export function TabBar({
 
       {menu && (() => {
         const t = tabs.find((x) => x.id === menu.id);
+        const hasPane = splitActions.placed.includes(menu.id);
+        // Exactly one of these two is ever offered, because "does this tab have
+        // a pane" is the whole state machine: a tab with no pane can be split
+        // into one, a tab with a pane can lose it. Splitting a tab that is
+        // already on screen would just be a move, and closing the only pane
+        // there is is what `layout: null` already means.
+        //
+        // Empty for the common case — the active tab with no split up
+        // (`hasPane && !split`, "close pane" makes no sense with nothing to
+        // close). Its leading separator rides along with it: spread in below
+        // ONLY when there is something to separate, or an empty array between
+        // two unconditional separators renders a double rule (ContextMenu does
+        // not collapse runs of them) every time that common case hits.
+        const splitItems = hasPane
+          ? splitActions.split
+            ? [{ label: 'Close pane', onClick: () => splitActions.onClosePane(menu.id) }]
+            : []
+          : [
+            { label: 'Split right', onClick: () => splitActions.onSplit(menu.id, 'col' as const) },
+            { label: 'Split down', onClick: () => splitActions.onSplit(menu.id, 'row' as const) },
+          ];
         return (
           <ContextMenu
             x={menu.x}
@@ -254,6 +299,7 @@ export function TabBar({
               { label: 'Open in File Explorer', onClick: () => onOpenExplorer(menu.id) },
               { label: 'Open Terminal', onClick: () => onOpenTerminal(menu.id) },
               { label: 'Open in IDE', onClick: () => onOpenIde(menu.id) },
+              ...(splitItems.length ? [{ separator: true as const }, ...splitItems] : []),
               { separator: true },
               { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
               // KAN-45 integration review #2: `groups` is the whole workspace's

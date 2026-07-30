@@ -576,3 +576,60 @@ body {
    one with nothing left to click. */
 .entry.ghost { cursor: pointer; color: var(--ink-soft); }
 .entry.ghost .entry-label { opacity: 0.7; }
+
+/* ================= M5: split view (KAN-46) ================= */
+
+/* There are no pane rules here on purpose: split view does not own the panes.
+   `.pane` stays exactly as it is defined above and merely gets a `grid-area`
+   from `gridPlacement()`; the seam between panes is the grid's own 1px `gap`
+   showing the container background, drawn once rather than as a ring on each
+   side of every interior edge. Everything below uses Retro Claude custom
+   properties only, so the prefers-color-scheme block above covers it. */
+
+/* Handles are grid items on the same grid as the panes (see splitgrid.ts's
+   dividerArea), so they follow the template during a drag with no JS. z-index
+   applies to grid items whatever their `position`, so this stacks above the
+   absolutely positioned panes and the browser's own hit-testing picks them. */
+.split-divider {
+  z-index: 2;
+  background: transparent;
+  transition: background 90ms linear;
+  /* preventDefault() on pointerdown does not suppress touch panning — without
+     this, a drag on a Windows touchscreen is cancelled mid-gesture. */
+  touch-action: none;
+  /* 9px of grab, centred on a seam the eye reads as 1px — the Fitts's-law
+     target has to be bigger than the thing it points at. */
+}
+.split-divider.col {
+  width: 9px;
+  margin-left: -4px;
+  justify-self: start;
+  cursor: col-resize;
+}
+.split-divider.row {
+  height: 9px;
+  margin-top: -4px;
+  align-self: start;
+  cursor: row-resize;
+}
+.split-divider:hover,
+.split-divider:focus-visible,
+.split-divider.dragging {
+  background: var(--clay-soft);
+  outline: none;
+}
+
+/* The focused pane's ring, applied by App.tsx only while a split is up (a lone
+   pane needs no "which one is focused").
+
+   An OUTLINE pulled inwards, not a border and not an inset box-shadow. A border
+   shrinks the content box and would force every terminal in the grid to re-fit
+   on every focus change. An inset box-shadow keeps the box but paints under the
+   element's own descendants, so a pane holding a file browser (opaque nav bar,
+   opaque list) showed almost none of it — outlines are painted in the last step
+   of the painting order, above every descendant, and cost no layout at all. */
+.pane-focused {
+  outline: 2px solid var(--clay);
+  outline-offset: -2px;
+  z-index: 1; /* the ring reads as continuous over the neighbour's edge */
+}
