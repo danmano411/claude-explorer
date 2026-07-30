@@ -197,6 +197,10 @@ export interface PersistedTab {
   title: string
   renamed?: boolean
   groupId?: string
+  /** KAN-53. Absent, not `false`, for an unpinned tab — a v0.5.0 workspace.json
+   *  has no such field and must still load, so absent has to be the norm.
+   *  Mutually exclusive with `groupId`; `sanitize()` enforces that on read. */
+  pinned?: boolean
   terminalKind?: 'claude' | 'shell'
   resumeSessionId?: string
   filePath?: string

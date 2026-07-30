@@ -155,6 +155,26 @@ describe('sanitize', () => {
     w.spaces[0].tabIds = ['t1', 't2', 't2']
     expect(sanitize(w).spaces[0].tabIds).toEqual(['t1', 't2'])
   })
+
+  // KAN-53: pinned-before-unpinned is the second ordering invariant of the
+  // rendered strip, so it is repaired in the same single place as contiguity —
+  // not sorted in the component on every render.
+  it('hoists a pinned tab to the front of its space, dropping any group it was in', () => {
+    const w = base()
+    w.tabs = [
+      { id: 't1', view: 'files', cwd: 'C:\\a', title: 'a', groupId: 'g1' },
+      { id: 't2', view: 'files', cwd: 'C:\\b', title: 'b', groupId: 'g1' },
+      { id: 't3', view: 'files', cwd: 'C:\\c', title: 'c', pinned: true, groupId: 'g1' },
+      { id: 't4', view: 'files', cwd: 'C:\\d', title: 'd' },
+    ]
+    w.spaces[0].tabIds = ['t1', 't2', 't3', 't4']
+    const out = sanitize(w)
+    expect(out.spaces[0].tabIds).toEqual(['t3', 't1', 't2', 't4'])
+    expect(out.tabs.find((t) => t.id === 't3')?.groupId).toBeUndefined()
+    expect(out.tabs.find((t) => t.id === 't3')?.pinned).toBe(true)
+    // g1's survivors are still one unbroken run.
+    expect(out.spaces[0].tabIds.indexOf('t2') - out.spaces[0].tabIds.indexOf('t1')).toBe(1)
+  })
 })
 
 /**

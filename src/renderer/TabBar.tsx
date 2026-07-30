@@ -64,6 +64,10 @@ interface Props {
   onClose: (id: string) => void;
   onAdd: () => void;
   onReorder: (from: number, insert: number) => void; // insert index is post-splice (from tabreorder)
+  /** Chrome-style pin/unpin (KAN-53). Not part of `GroupActions` on purpose:
+   *  pinning REMOVES a tab from its group, so folding it in there would put the
+   *  two mutually exclusive states behind one seam. */
+  onTogglePin: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onOpenExplorer: (id: string) => void;
   onOpenTerminal: (id: string) => void;
@@ -79,7 +83,7 @@ interface Props {
 
 export function TabBar({
   tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
-  onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu, fileMenu,
+  onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu, fileMenu,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
   let drag: DragPayload = null;
@@ -160,6 +164,7 @@ export function TabBar({
   const renderTab = (t: Tab) => {
     const i = indexOf.get(t.id)!;
     let cls = t.id === activeId ? 'tab active' : 'tab';
+    if (t.pinned) cls += ' pinned';
     if (over?.index === i) cls += over.side === 'right' ? ' drop-right' : ' drop-left';
     if (springId === t.id) cls += ' spring-target';
     const isTerminal = t.view === 'terminal';
@@ -169,6 +174,9 @@ export function TabBar({
       <button
         key={t.id}
         className={cls}
+        // A pinned tab shows no title, so the native tooltip is the only way
+        // left to tell two folder icons apart.
+        title={t.pinned ? t.title : undefined}
         draggable={renaming !== t.id}
         onClick={() => onSelect(t.id)}
         onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: t.id }); }}
@@ -186,9 +194,24 @@ export function TabBar({
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(TAB_MIME)) {
             e.preventDefault();
-            const r = e.currentTarget.getBoundingClientRect();
-            const side: 'left' | 'right' = e.clientX > r.left + r.width / 2 ? 'right' : 'left';
-            if (over?.index !== i || over?.side !== side) setOver({ index: i, side });
+            let target = i;
+            let side: 'left' | 'right';
+            // KAN-53: reorderWithGroups() clamps the drop to the dragged tab's own
+            // pinned/unpinned region, so painting the indicator on a hovered tab
+            // from the OTHER region would promise a drop the clamp then refuses.
+            // Snap the indicator to the seam instead — the last tab of the
+            // dragged tab's own region — so it always shows where the drop will
+            // actually land, and the drag still visibly stops there.
+            if (dragFrom !== null && !!tabs[dragFrom].pinned !== !!t.pinned) {
+              const boundary = tabs.findIndex((x) => !x.pinned);
+              const boundaryIdx = boundary === -1 ? tabs.length : boundary;
+              target = tabs[dragFrom].pinned ? Math.max(boundaryIdx - 1, 0) : boundaryIdx;
+              side = tabs[dragFrom].pinned ? 'right' : 'left';
+            } else {
+              const r = e.currentTarget.getBoundingClientRect();
+              side = e.clientX > r.left + r.width / 2 ? 'right' : 'left';
+            }
+            if (over?.index !== target || over?.side !== side) setOver({ index: target, side });
           } else if (drag) {
             e.preventDefault(); // allow the file-drag hover to keep firing
           }
@@ -216,10 +239,16 @@ export function TabBar({
             ? <span className={'tab-status ' + st} />
             : isTerminal ? '▶' : '📁'}
         </span>
+        {/* Pinned = icon only: no title, no close button (Chrome's model — a
+            pinned tab is meant to be un-closable by accident). Both are still
+            reachable from the context menu. Rename is still offered, so the
+            input still renders here when it is open. */}
         {renaming === t.id
           ? renameInput(commitRename, () => setRenaming(null))
-          : <span className="tab-title">{t.title}</span>}
-        <span className="close" onClick={(e) => { e.stopPropagation(); onClose(t.id); }}>×</span>
+          : !t.pinned && <span className="tab-title">{t.title}</span>}
+        {!t.pinned && (
+          <span className="close" onClick={(e) => { e.stopPropagation(); onClose(t.id); }}>×</span>
+        )}
       </button>
     );
   };
@@ -303,18 +332,27 @@ export function TabBar({
               { label: 'Open in IDE', onClick: () => onOpenIde(menu.id) },
               ...(splitItems.length ? [{ separator: true as const }, ...splitItems] : []),
               { separator: true },
-              { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
-              // KAN-45 integration review #2: `groups` is the whole workspace's
-              // list, not this strip's — filtered to groups that actually have a
-              // member ON THIS STRIP (`tabs` is the active space's slice), or a
-              // group that lives entirely in another space shows up here too,
-              // and picking it splits one group across two spaces: both strips
-              // draw a chip for it, and collapse/rename/recolor/ungroup act on
-              // both at once since those all run over the global `groups`/`tabs`.
-              ...groups
-                .filter((g) => g.id !== t?.groupId && tabs.some((x) => x.groupId === g.id))
-                .map((g) => ({ label: `Add to “${g.name}”`, swatch: g.color, onClick: () => groupActions.add(menu.id, g.id) })),
-              ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
+              { label: t?.pinned ? 'Unpin tab' : 'Pin tab', onClick: () => onTogglePin(menu.id) },
+              // Pinning and grouping are mutually exclusive (KAN-53): a pinned
+              // tab is held left of every unpinned one, so it could only ever
+              // break a group's contiguous run. groups.ts refuses the operation;
+              // the menu must not offer it either, or the item would silently do
+              // nothing. A pinned tab also never has a groupId, so "Remove from
+              // group" cannot apply.
+              ...(t?.pinned ? [] : [
+                { label: 'New group from this tab', onClick: () => groupActions.create(menu.id) },
+                // KAN-45 integration review #2: `groups` is the whole workspace's
+                // list, not this strip's — filtered to groups that actually have a
+                // member ON THIS STRIP (`tabs` is the active space's slice), or a
+                // group that lives entirely in another space shows up here too,
+                // and picking it splits one group across two spaces: both strips
+                // draw a chip for it, and collapse/rename/recolor/ungroup act on
+                // both at once since those all run over the global `groups`/`tabs`.
+                ...groups
+                  .filter((g) => g.id !== t?.groupId && tabs.some((x) => x.groupId === g.id))
+                  .map((g) => ({ label: `Add to “${g.name}”`, swatch: g.color, onClick: () => groupActions.add(menu.id, g.id) })),
+                ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
+              ]),
               { separator: true },
               { label: 'Close', onClick: () => onClose(menu.id) },
             ]}

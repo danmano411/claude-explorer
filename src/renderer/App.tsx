@@ -10,7 +10,7 @@ import { gridPlacement } from './splitgrid';
 import { SplitDividers } from './components/SplitDividers';
 import {
   addToGroup, deleteGroup, newGroup, recolorGroup, removeFromGroup,
-  renameGroup, reorderWithGroups, setCollapsed,
+  renameGroup, reorderWithGroups, setCollapsed, setPinned,
 } from '../shared/groups';
 import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
@@ -534,7 +534,14 @@ export function App() {
     if (!moved) return;
     const next = reorderWithGroups(spaceTabs, from, insert);
     const newGroupId = next.find((t) => t.id === moved.id)?.groupId;
-    setSpaces((ss) => reorderInSpace(ss, activeSpaceIdRef.current, from, insert));
+    // Where the tab ACTUALLY landed, not where the drag asked it to: KAN-53
+    // makes reorderWithGroups clamp `insert` into the dragged tab's own region
+    // (pinned tabs are held left of every unpinned one), and reorderInSpace
+    // holds ids only, so it cannot re-derive that. Reading the landing index
+    // back off the result keeps the two in step by construction rather than by
+    // two clamp formulas being kept identical.
+    const landed = next.findIndex((t) => t.id === moved.id);
+    setSpaces((ss) => reorderInSpace(ss, activeSpaceIdRef.current, from, landed));
     if (newGroupId === moved.groupId) return;
     // Only the tag changes in the store; the position lives in `tabIds`.
     setTabs((ts) => ts.map((t) => (t.id === moved.id ? next.find((x) => x.id === moved.id)! : t)));
@@ -595,6 +602,17 @@ export function App() {
         .forEach((t) => closeTab(t.id));
     },
   };
+
+  /**
+   * Pin / unpin (KAN-53). Same shape as the three group membership ops and for
+   * the same reason: pinning MOVES the tab (to the seam between the pinned and
+   * unpinned regions), and the strip is the active space's slice — so the new
+   * order has to go back into that space's `tabIds`, not just the tab record.
+   * `setPinned` also drops the groupId, which `applyToSlice` writes through
+   * because it replaces whole records.
+   */
+  const togglePin = (id: string) =>
+    applyToSlice((sl) => setPinned(sl, id, !sl.find((t) => t.id === id)?.pinned));
 
   // A new conversation gets its id assigned here rather than discovered later:
   // reading back "whichever jsonl appeared in this folder" cannot tell two tabs
@@ -842,6 +860,7 @@ export function App() {
         onClose={closeTab}
         onAdd={addTab}
         onReorder={reorderTabs}
+        onTogglePin={togglePin}
         onRename={onRename}
         onOpenExplorer={onOpenExplorer}
         onOpenTerminal={onOpenTerminal}

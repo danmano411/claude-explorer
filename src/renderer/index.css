@@ -102,6 +102,15 @@ body {
 .tab .close:hover { color: #fff; background: var(--clay); }
 .tab.add { color: var(--ink-soft); font-size: 18px; padding: 4px 12px; }
 
+/* ===== Pinned tabs (KAN-53) =====
+   Icon only: TabBar renders no title and no close button. Symmetric padding
+   centres the one remaining child. KAN-33's height strut is `.tab-title`'s
+   line-height — deleting the title for a pinned tab deletes the strut too, so
+   `.tab-icon` needs its own (a Claude tab's icon is an 8px status dot with no
+   text, so it has nothing else to inherit the height from). */
+.tab.pinned { padding-left: 8px; padding-right: 8px; }
+.tab.pinned .tab-icon { min-height: 1.4em; }
+
 /* ===== Tab folders (KAN-44) =====
    A group is a contiguous run of this same strip, wrapped in one flex box so
    the 2px colour bar spans exactly the run. The wrapper deliberately repeats
