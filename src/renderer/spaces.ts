@@ -301,7 +301,7 @@ export function removeTabFromSpace<T extends Spaced>(spaces: readonly T[], space
  * the module doc. The strip renders `tabIds`, so a drag over it produces
  * space-relative indices; handing them to a reorder over `Workspace.tabs`
  * instead moves whichever tab happens to sit at that global index. `insert` is
- * post-splice, the coordinate space `tabreorder.dropIndex` already returns.
+ * post-splice, the coordinate space `tabreorder.reorder` expects.
  *
  * Membership does not change, so `activeTabId` stays valid by construction and
  * is left alone. No-op (same reference) for an unknown spaceId, an out-of-range
