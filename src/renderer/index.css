@@ -48,10 +48,22 @@ body {
   display: inline-flex; align-items: center; gap: 6px;
   max-width: 220px; padding: 6px 12px;
   font-family: var(--font-serif); font-size: 14px; color: var(--ink-soft);
+  /* Root cause of the file/terminal tab height mismatch: this never set its
+     own line-height, so it fell back to the UA default of `normal`, which is
+     computed per FONT rather than per element. The leading glyph differs by
+     tab type — 📁 (files) and ▶ (shell) fall outside Times New Roman and get
+     silently substituted with the platform's symbol/emoji font, whose
+     `normal` metrics are taller; the Claude tab's leading element is the
+     `.tab-status` dot (a sized span, not a glyph), so it never triggers that
+     substitution and rendered ~3px shorter. A single explicit line-height
+     (the same token `.nav-btn` already uses for 14px chrome text) makes the
+     row height deterministic regardless of which font a given icon glyph
+     happens to fall back to — one rule fixes all three tab types. */
+  line-height: 1.4;
   background: var(--bg-sunken);
   border: 1px solid var(--line); border-bottom: none;
   border-radius: var(--radius) var(--radius) 0 0;
-  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer; white-space: nowrap; overflow: hidden;
   position: relative; top: 1px;
 }
 .tab:hover { background: var(--bg-panel); }
@@ -59,8 +71,25 @@ body {
   background: var(--bg-panel); color: var(--ink);
   border-top: 2px solid var(--clay);
   padding-top: 5px; /* compensate the 2px border so text doesn't jump */
+  /* Focused-tab growth ceiling: 40ch. Unfocused tabs stay at the existing
+     220px cap; a focused tab is allowed to grow to fit its full title, up to
+     40 characters of this serif font (280px in this stack) — roughly double
+     the unfocused cap, enough to show a realistic folder/session name in
+     full without one long-named tab being able to push the rest of the
+     strip (and the + button) off screen. Past 40ch it still ellipsizes,
+     same as an unfocused tab. */
+  max-width: 40ch;
+}
+/* The icon (folder / play-triangle / status dot) and the close button are
+   fixed-size chrome, not something a long title is allowed to displace —
+   `flex: none` keeps their content size guaranteed regardless of tab width. */
+.tab-icon { display: inline-flex; align-items: center; flex: none; }
+.tab-title {
+  flex: 1 1 auto; min-width: 0; /* let the title be the thing that shrinks */
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tab .close {
+  flex: none;
   color: var(--ink-soft); font-size: 15px; line-height: 1;
   padding: 0 2px; border-radius: 2px;
 }
