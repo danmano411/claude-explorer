@@ -26,6 +26,10 @@ export interface Tab {
   /** Chrome-style pinned: icon-only, held at the left end of the strip, and
    *  never a group member (KAN-53). The other half of `Grouped`. */
   pinned?: boolean
+  /** KAN-41. This Claude session was started BY the MCP spawn tool, so it is a
+   *  worker: main withholds the MCP config and token from it, and this flag is
+   *  what re-tells main so on a restart-and-respawn. Never shown in the UI. */
+  agentSpawned?: true
 }
 
 export function toPersisted(t: Tab): PersistedTab {
@@ -41,6 +45,7 @@ export function toPersisted(t: Tab): PersistedTab {
     resumeSessionId: t.sessionId,
     filePath: t.filePath,
     viewerMode: t.viewerMode,
+    agentSpawned: t.agentSpawned,
   }
 }
 
@@ -88,6 +93,7 @@ export function fromPersisted(p: PersistedTab): Tab | null {
       pinned: p.pinned,
       terminalKind: p.terminalKind ?? 'claude',
       sessionId: p.resumeSessionId,
+      agentSpawned: p.agentSpawned,
     }
   }
   if (p.view === 'viewer' && !p.filePath) return null // nothing to show
@@ -115,8 +121,12 @@ export function newFilesTab(cwd: string): Tab {
 
 export function newTerminalTab(
   cwd: string, kind: 'claude' | 'shell', ptyId: string, title: string, sessionId?: string,
+  agentSpawned?: true,
 ): Tab {
-  return { id: crypto.randomUUID(), view: 'terminal', cwd, ptyId, terminalKind: kind, title, sessionId }
+  return {
+    id: crypto.randomUUID(), view: 'terminal', cwd, ptyId, terminalKind: kind, title, sessionId,
+    agentSpawned,
+  }
 }
 
 /** Read-only viewer tab. cwd is the containing folder so the tab context menu

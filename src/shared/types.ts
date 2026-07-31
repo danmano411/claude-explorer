@@ -242,6 +242,11 @@ export interface PersistedTab {
   resumeSessionId?: string
   filePath?: string
   viewerMode?: 'file' | 'diff'
+  /** KAN-41. Provenance, not preference: a session an agent asked for stays a
+   *  worker across a restart. Absent (never `false`) so an older workspace.json
+   *  still loads. Without it, restarting launders every agent-spawned session
+   *  into one that gets the MCP tools — and the spawn tool — back. */
+  agentSpawned?: true
 }
 
 export interface Workspace {
@@ -330,3 +335,24 @@ export type ControlResult = ControlTab[] | null
 export type ControlReply =
   | { id: string; ok: true; result: ControlResult }
   | { id: string; ok: false; error: string }
+
+// --- KAN-41 agent spawn confirmation ---------------------------------------
+
+/**
+ * "An agent asked to start Claude Code in `path` — allow it?" There is at most
+ * ONE of these outstanding app-wide; main mints the token, holds it, and is the
+ * only thing that can redeem it.
+ *
+ * `path` is already canonical and is shown to the user VERBATIM AND IN FULL —
+ * it is the whole of what they are approving, and a middle-elided path is a
+ * path a caller can disguise (see `.spawn-path` in index.css).
+ *
+ * `expiresAt` is epoch ms, and it is on the wire because main has FORGOTTEN the
+ * token by then: the prompt must dismiss itself at that instant rather than let
+ * a late click send an answer nothing is listening for.
+ */
+export interface SpawnConfirmRequest {
+  token: string
+  path: string
+  expiresAt: number
+}

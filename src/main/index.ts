@@ -18,7 +18,8 @@ import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
 import { registerControlHandlers } from './control.handlers'
-import { startMcpServer, stopMcpServer } from './mcp'
+import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
+import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
 import { setMcpInjection } from './pty'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
@@ -210,8 +211,12 @@ app.whenReady().then(async () => {
   registerGitHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
-  // KAN-39: only the reply listener + pending map. Nothing calls control() yet.
   registerControlHandlers(() => mainWindow)
+  // KAN-41: open_claude_session's human gate. Its own channel pair, not the
+  // control channel — control is one-op-at-a-time behind a 15s deadline, and a
+  // prompt in front of a human is neither. The answer function comes from mcp.ts
+  // (which owns the guard) and is passed in, so the glue stays a leaf.
+  registerSpawnConfirmHandlers(() => mainWindow, answerSpawnConfirm)
   // Async since KAN-55 — File > Open Recent now lists each recent folder's
   // Claude sessions, and a native menu template is built ahead of the click.
   // Not awaited: the window must not wait on a session-directory scan, and
