@@ -60,6 +60,48 @@ function sendPendingCli(): void {
 }
 
 /**
+ * The one way a command line becomes a tab. KAN-65: resolveCliIntent is async
+ * now (it canonicalizes and stats a path an unauthenticated local process
+ * named, and either syscall costs ~21 s on an unreachable UNC host), which
+ * turns a straight-line assignment into a startup race. Both launch paths —
+ * the argv parse in whenReady and every 'second-instance' — go through here,
+ * and the single chain is what makes the three properties hold:
+ *
+ *  - IT STILL OPENS. Resolution no longer finishes before createWindow(), so
+ *    the answer can land on either side of did-finish-load. Unchanged from
+ *    before: the pending slot plus `windowReady` is a one-shot in both
+ *    directions — whichever of the two happens second calls sendPendingCli and
+ *    finds the other already done.
+ *  - IN ORDER. `cliChain` runs one resolution at a time, so a fast local path
+ *    arriving second can never overtake a dead UNC arriving first and put its
+ *    tab (and the focus) in the wrong place. Nothing else awaits inside the
+ *    chained callback, so assignment and delivery are ordered with it.
+ *  - EXACTLY ONCE. Each call resolves one argv and assigns pendingCli at most
+ *    once; sendPendingCli clears the slot synchronously before anything else
+ *    can run. `if (!target) return` rather than assigning null, so a junk
+ *    second launch can no longer cancel a real open that has not been
+ *    delivered yet.
+ *
+ * ponytail: the chain is unbounded and the slot still holds one. A loop of
+ * `--open \\10.255.255.n\s` queues 21 s each, so a legitimate launch waits
+ * behind it — the WINDOW stays responsive, which is the whole ticket, but this
+ * entry point is starvable by anyone who can already spawn processes as this
+ * user. Cap the chain when that is worth caring about; make the slot an array
+ * when the renderer's matching one-slot gate (App.tsx pendingCli) grows up too.
+ */
+let cliChain: Promise<unknown> = Promise.resolve()
+function handleCli(argv: string[], cwd: string): void {
+  cliChain = cliChain
+    .then(async () => {
+      const target = await resolveCliIntent(parseCliArgs(argv, cwd))
+      if (!target) return
+      pendingCli = target
+      sendPendingCli()
+    })
+    .catch((err) => console.error('cli: failed to resolve', err))
+}
+
+/**
  * KAN-40. Bring up the agent-control MCP server and tell PtyManager how to hand
  * it to the Claude sessions it launches. Awaited before createWindow() so that
  * workspace restore — which spawns terminals as soon as the renderer loads —
@@ -150,8 +192,9 @@ app.on('second-instance', (_e, _argv, workingDirectory, data) => {
   const d = (data ?? {}) as { argv?: unknown; cwd?: unknown }
   const argv = Array.isArray(d.argv) ? d.argv.filter((a): a is string => typeof a === 'string') : []
   const cwd = typeof d.cwd === 'string' ? d.cwd : workingDirectory
-  pendingCli = resolveCliIntent(parseCliArgs(argv, cwd))
-  sendPendingCli()
+  // Fire-and-forget: the focus/restore below must happen NOW, not 21 seconds
+  // from now behind an unreachable path this same caller may have named.
+  handleCli(argv, cwd)
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.focus()
@@ -242,11 +285,14 @@ app.whenReady().then(async () => {
   // focus is the one signal that the user may have been elsewhere. Throttled
   // inside menu.ts because this fires on every alt-tab.
   app.on('browser-window-focus', () => buildMenuThrottled())
-  // Parsed here, but sweep() above is fire-and-forget (`void sweep().then(...)`)
-  // and did-finish-load routinely fires before it settles, so this can in fact
-  // land before sweep() finishes. That is harmless: opening a tab pushes
-  // nothing onto the undo stack, which is the only thing D-1 cares about.
-  pendingCli = resolveCliIntent(parseCliArgs(process.argv, process.cwd()))
+  // Started here and deliberately NOT awaited: a launch whose argv names an
+  // unreachable UNC path must not hold up createWindow() for 21 seconds, which
+  // is the cold-start half of KAN-65. sweep() above is fire-and-forget too
+  // (`void sweep().then(...)`) and did-finish-load routinely fires before it
+  // settles, so the resulting tab can land before sweep() finishes. That is
+  // harmless: opening a tab pushes nothing onto the undo stack, which is the
+  // only thing D-1 cares about.
+  handleCli(process.argv, process.cwd())
   await applyAgentControl()
   createWindow()
   initUpdater()

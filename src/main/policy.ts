@@ -77,7 +77,15 @@ function* ancestors(p: string): Generator<[string, string[]]> {
  *  them is spent on the calling thread. In main that is the whole app: no IPC,
  *  no pty:data, no paint. Only use this for a path the USER chose in the window
  *  that would be frozen; anything a caller outside the app named goes through
- *  canonicalizeAsync. */
+ *  canonicalizeAsync.
+ *
+ *  KAN-65 left this with exactly ONE caller — gate(), below — which is the
+ *  point: the rule above is now checkable by grepping this name, instead of
+ *  being a convention spread over three call sites. gate()'s paths are the
+ *  user's own selection in the window, and nothing an unauthenticated caller
+ *  reaches routes here (fsmutate.handlers and trash.handlers are its only
+ *  callers, both fed by renderer IPC). Move it — and delete this spelling — the
+ *  day that stops being true. */
 export function canonicalize(p: string): string {
   for (const [cur, rest] of ancestors(p)) {
     try {
@@ -117,7 +125,15 @@ export function oneAtATime(): <T>(fn: () => Promise<T>) => Promise<T> {
     return run
   }
 }
-const resolveOne = oneAtATime()
+/** The ONE gate every untrusted path resolution in main shares — MCP's
+ *  canonicalize (via canonicalizeAsync) and the CLI's canonicalize AND its stat
+ *  (cli.ts). Shared, not one queue each, and that is the whole point: what is
+ *  being bounded is how many of libuv's four worker threads a caller outside the
+ *  app can hold at once, and two queues would make that two. The cost is that a
+ *  looping agent delays a CLI launch and vice versa — but each of them can
+ *  already starve its own class, so a second queue would buy isolation between
+ *  two untrusted callers at the price of a second pinned thread. */
+export const resolveOne = oneAtATime()
 
 /** canonicalize() without pinning the main thread — same answers, one awaited
  *  syscall at a time. This is the spelling every caller-supplied path must use

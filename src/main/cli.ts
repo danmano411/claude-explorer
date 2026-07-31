@@ -1,6 +1,6 @@
-import { statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { canonicalize } from './policy'
+import { canonicalizeAsync, resolveOne } from './policy'
 
 export type CliIntent = { cmd: 'open' | 'new-session'; path: string }
 
@@ -56,20 +56,47 @@ export function parseCliArgs(argv: string[], cwd: string): CliIntent | null {
  * disk (canonicalize + stat), which is why it is separate from parseCliArgs —
  * that one stays unit-testable with no fixtures.
  *
+ * ASYNC, AND SERIALISED THROUGH policy.ts's SHARED GATE — KAN-65, and both
+ * halves are the fix, not tidiness. The path below came from whoever ran
+ * `"Claude Explorer.exe" --open <path>`, which is any local process with no
+ * authentication of any kind (see the trust-boundary note under --new-session).
+ * Resolving an unreachable UNC host costs ~21 SECONDS: measured here,
+ * `\\10.255.255.31\s` took 21,033 ms and `\\10.255.255.33\s` 21,034 ms, cold
+ * every time — the negative cache is per host AND short-lived, so a fresh
+ * process a quarter of an hour later paid the full price for the same host
+ * again, and incrementing the number never gets a discount either. Spelt
+ * synchronously that was 21 seconds of frozen main process per launch: no IPC,
+ * no pty:data forwarding, no menu, no paint, from an unauthenticated one-line
+ * loop.
+ *
+ * `await` alone would NOT have fixed it. It moves the stall off the event loop
+ * but not off libuv's threadpool, which is four threads — four concurrent dead
+ * resolutions park every other async fs operation in main behind them (measured
+ * in policy.ts: a readdir took 20,636 ms during four, 4 ms during one). So the
+ * canonicalize goes through canonicalizeAsync and the stat through the same
+ * exported gate, which caps every outside caller at ONE worker between them.
+ *
  * ponytail: no fs fixtures for resolveCliIntent — the E2E proves it for real
- * (test/harness/cli.mjs).
+ * (test/harness/cli.mjs), including the freeze itself.
  */
-export function resolveCliIntent(i: CliIntent | null): CliTarget | null {
+export async function resolveCliIntent(i: CliIntent | null): Promise<CliTarget | null> {
   if (!i) return null
   // Explorer hands us %V, which can be an 8.3 short name, a junction, or a
   // UNC/\\?\ spelling; the shell also lets a path arrive with '..' in it.
-  // canonicalize() is the repo's existing resolver for exactly this
-  // (policy.ts) — realpathSync.native, falling back to an ancestor walk,
+  // canonicalizeAsync() is the repo's existing resolver for exactly this
+  // (policy.ts) — realpath.native, falling back to an ancestor walk,
   // never throws.
-  const path = canonicalize(i.path)
+  const path = await canonicalizeAsync(i.path)
   let dir: boolean
   try {
-    dir = statSync(path).isDirectory()
+    // Through the gate too. canonicalizeAsync returns the lexical path when the
+    // host is unreachable, so this stats the very same dead UNC. It measured 0
+    // ms — but only because the realpath immediately above it just warmed that
+    // host's negative cache inside this process; it is the same syscall class on
+    // the same dead host, and it is 21 s whenever it goes first or the cache has
+    // lapsed. Ungated it would be a second libuv worker an outside caller gets
+    // for free, on top of the one canonicalizeAsync rations.
+    dir = (await resolveOne(() => stat(path))).isDirectory()
   } catch {
     // The OS handed us a path that is gone or unreadable. Do NOT open a tab
     // pointed at nothing: a files tab would render an empty error pane. One

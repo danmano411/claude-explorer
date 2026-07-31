@@ -119,15 +119,19 @@ describe('resolveCliIntent', () => {
   const HERE = fileURLToPath(new URL('.', import.meta.url))
   const THIS_FILE = fileURLToPath(import.meta.url)
 
-  it('--open <folder> -> open-path', () => {
-    expect(resolveCliIntent({ cmd: 'open', path: HERE })).toMatchObject({ cmd: 'open-path' })
+  // Async since KAN-65 — it resolves a caller-supplied path off the main
+  // thread. The answers are unchanged, which is what these three still pin.
+  it('--open <folder> -> open-path', async () => {
+    await expect(resolveCliIntent({ cmd: 'open', path: HERE }))
+      .resolves.toMatchObject({ cmd: 'open-path' })
   })
 
-  it('--open <file> -> open-file (spec §9 acceptance criterion 3)', () => {
-    expect(resolveCliIntent({ cmd: 'open', path: THIS_FILE })).toMatchObject({ cmd: 'open-file' })
+  it('--open <file> -> open-file (spec §9 acceptance criterion 3)', async () => {
+    await expect(resolveCliIntent({ cmd: 'open', path: THIS_FILE }))
+      .resolves.toMatchObject({ cmd: 'open-file' })
   })
 
-  it('--new-session <file> is refused, not promoted to its parent folder (the C13 boundary)', () => {
-    expect(resolveCliIntent({ cmd: 'new-session', path: THIS_FILE })).toBeNull()
+  it('--new-session <file> is refused, not promoted to its parent folder (the C13 boundary)', async () => {
+    await expect(resolveCliIntent({ cmd: 'new-session', path: THIS_FILE })).resolves.toBeNull()
   })
 })
