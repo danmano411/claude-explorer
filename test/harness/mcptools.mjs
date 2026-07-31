@@ -276,9 +276,19 @@ async function goTo(dir) {
   await win.waitForTimeout(1_200);
 }
 
-/** The whole two-step, with the human in the middle. Returns both replies. */
+/** The whole two-step, with the human in the middle. Returns both replies.
+ *
+ *  Denying arms a global cooldown (DENY_COOLDOWN_MS in spawnguard.ts) that
+ *  refuses the next mint, and several sections below legitimately ask again
+ *  right after a denial. Wait it out by POLLING rather than sleeping a
+ *  hardcoded duration — the refusal itself is the clock, so this does not go
+ *  stale if the constant changes. */
 async function confirmSpawn(dir) {
-  const ask = await tool('open_claude_session', { path: dir });
+  let ask = await tool('open_claude_session', { path: dir });
+  for (let i = 0; i < 25 && /denied the last request/i.test(ask.text); i++) {
+    await new Promise((r) => setTimeout(r, 1_000));
+    ask = await tool('open_claude_session', { path: dir });
+  }
   const token = json(ask)?.token;
   if (!token) return { ask, started: { isError: true, text: 'no token minted' } };
   // Answer BEFORE redeeming: guard.answer settles the pending promise whether or
@@ -516,6 +526,32 @@ let AGENT_DIR = '';
     after.isError && /declined|unknown, already used, or expired/i.test(after.text), after.text);
   check('and a denial spawns nothing', dumpsFor(CAP_DIRS[2]).length === 0,
     `${dumpsFor(CAP_DIRS[2]).length} sessions in ${path.basename(CAP_DIRS[2])}`);
+
+  // The deny cooldown, end to end. Without it the loop above is a DoS: the modal
+  // is a fixed full-window backdrop and a re-ask cycle costs ~36ms, so the app
+  // is unusable and Allow is flashing under the cursor. Nothing spawns either
+  // way — what is measured here is that the user is left alone.
+  const tooSoon = await tool('open_claude_session', { path: CAP_DIRS[3] });
+  check('an ask straight after a Deny is refused, and the refusal names the wait',
+    tooSoon.isError && /denied the last request/i.test(tooSoon.text) && /\b\d+s\b/.test(tooSoon.text),
+    tooSoon.text);
+  // The absence that matters: no second modal was put in front of the user. A
+  // per-path cooldown would have let CAP_DIRS[3] straight through.
+  await win.waitForTimeout(500);
+  check('and no new prompt was put in front of the user', (await promptPath()) === null,
+    String(await promptPath()));
+
+  // ...and it wears off. A cooldown with no expiry would brick the tool for the
+  // rest of the app run.
+  const t0 = Date.now();
+  const recovered = await waitFor(async () => {
+    const r = await tool('open_claude_session', { path: CAP_DIRS[3] });
+    return /denied the last request/i.test(r.text) ? null : r;
+  }, 30_000, 1_000);
+  check('a legitimate ask after the cooldown works again',
+    !!recovered && !recovered.isError && json(recovered)?.needsConfirm === true,
+    `${Math.round((Date.now() - t0) / 1000)}s — ${recovered?.text?.slice(0, 120) ?? 'never recovered'}`);
+  await clickAnswer(false); // leave nothing pending for §7 (and re-arm the cooldown it polls out)
 }
 
 // === 6. no recursion — the other headline ===================================
@@ -607,6 +643,41 @@ console.log('\n8 — five close_tab calls with no gap');
   check('the app-spawned sessions can all be closed through the tool',
     (await tabs()).every((t) => t.terminalKind !== 'claude' || t.cwd === HARVEST),
     (await tabs()).filter((t) => t.terminalKind === 'claude').map((t) => t.title).join(', '));
+}
+
+// === 8b. a slow path stalls one request, not the process ====================
+//
+// open_viewer_tab resolves a CALLER-NAMED path, and needs no confirmation at
+// all. Resolved synchronously, an unreachable SMB host costs main ~21 seconds
+// on its own thread: no IPC, no pty:data forwarding, no menu, no paint — every
+// terminal in the app goes silent and the user sees a hung application. A
+// prompt-injected agent loops it over fresh hostnames and it never comes back.
+//
+// The oracle is a SECOND request issued while the first is still stalled. It
+// has to travel the same socket->main->control->renderer round trip, so it can
+// only answer quickly if main was free the whole time.
+console.log('\n8b — an unreachable UNC path');
+{
+  // 10.255.255.0/24 is non-routable, so the SMB connect hangs until Windows
+  // gives up. Windows negative-caches per HOST, so pick one this machine has
+  // not tried — a cached host fails instantly and would measure nothing.
+  const dead = `\\\\10.255.255.${(process.pid % 200) + 30}\\s\\x.txt`;
+  const t0 = Date.now();
+  const stalled = tool('open_viewer_tab', { path: dead });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const t1 = Date.now();
+  const during = await tool('list_tabs');
+  const listMs = Date.now() - t1;
+  await stalled;
+  const stallMs = Date.now() - t0;
+
+  // Stated first, and loudly: if the host answers fast on this machine there is
+  // no stall to be concurrent with, and the check below would pass vacuously.
+  check('the unreachable host really did stall the request (otherwise the next check measures nothing)',
+    stallMs > 5_000, `${stallMs}ms for ${dead}`);
+  check('and a list_tabs issued 400ms into that stall was answered without waiting for it',
+    !during.isError && listMs < 3_000, `${listMs}ms (stall was ${stallMs}ms)`);
 }
 
 // === 9. the fan-out criterion ===============================================

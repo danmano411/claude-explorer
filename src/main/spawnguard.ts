@@ -26,6 +26,30 @@ export const CONFIRM_WAIT_MS = 55_000
  *  data loss, it is unbounded process creation and API spend from one
  *  prompt-injected agent. */
 export const MAX_AGENT_SESSIONS = 8
+/**
+ * How long a Deny silences the next ask.
+ *
+ * Without it, `answer()` frees the slot the instant the user refuses and the
+ * agent re-asks immediately: measured at 12 modals in 428 ms. The prompt is a
+ * fixed full-window backdrop, so at ~28 a second the app is unusable, the user
+ * cannot even read the tab they are worried about, and an Allow button is
+ * flashing under their cursor — the realistic outcome is a mis-click or a
+ * force-quit, i.e. the DoS ends in an approval.
+ *
+ * Ten seconds, chosen against the two costs. Against the attack it is a 280x
+ * cut (0.1 prompts/s instead of 28): every modal is readable, dismissable, and
+ * leaves the app usable in between. Against the honest case — the user denies,
+ * then tells the agent to try a different folder — the conversational turn that
+ * produces the second ask already takes longer than this, and the refusal below
+ * TELLS the model how long to wait, so it is a pause, not a failure. Longer
+ * would start punishing the honest case for nothing; shorter stops being a
+ * meaningful cut.
+ *
+ * GLOBAL, not per-path: an agent supplies the folder, so a per-path cooldown is
+ * walked around by naming a sibling directory. Only a Deny arms it — an expiry
+ * already costs the attacker the full TTL, and an Allow is not a refusal.
+ */
+export const DENY_COOLDOWN_MS = 10_000
 
 export type SpawnDecision =
   | { kind: 'needsConfirm'; token: string; path: string; expiresAt: number }
@@ -49,6 +73,7 @@ export interface SpawnGuardOpts {
   ttlMs?: number
   waitMs?: number
   max?: number
+  cooldownMs?: number
 }
 
 export interface SpawnGuard {
@@ -74,7 +99,8 @@ export interface SpawnGuard {
   ): Promise<SpawnDecision>
   /** The user's answer. Total: an unknown or stale token is dropped, never
    *  thrown — the IPC listener calling this has nobody to catch for it. A deny
-   *  frees the slot immediately; an allow leaves it until claimed or expired. */
+   *  frees the slot immediately and starts the DENY_COOLDOWN_MS backoff; an
+   *  allow leaves it until claimed or expired. */
   answer(token: string, allow: boolean): void
   readonly pending: Readonly<{ token: string; path: string; expiresAt: number }> | null
   readonly inFlight: number
@@ -108,12 +134,17 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
   const ttlMs = opts.ttlMs ?? CONFIRM_TTL_MS
   const waitMs = opts.waitMs ?? CONFIRM_WAIT_MS
   const max = opts.max ?? MAX_AGENT_SESSIONS
+  const cooldownMs = opts.cooldownMs ?? DENY_COOLDOWN_MS
   const now = opts.now ?? Date.now
   const newToken = opts.newToken ?? (() => randomBytes(32).toString('hex'))
   const schedule = opts.schedule ?? defaultSchedule
 
   let pending: Pending | null = null
   let inFlight = 0
+  /** Wall-clock instant the last Deny stops silencing mint(). Not a flag and not
+   *  a timer: it EXPIRES by itself, so there is no clear-it site to forget and
+   *  no way for one refusal to disable the tool for the rest of the run. */
+  let deniedUntil = 0
 
   /** In-flight spawns count. Without that, N concurrent redemptions all read the
    *  same pre-spawn total. During the overlap a session is briefly counted twice
@@ -124,6 +155,19 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
   const capReason = `at most ${max} Claude sessions started by this tool may run at once; close one first`
 
   const mint = (path: string): SpawnDecision => {
+    // Before the pending check, because a Deny clears `pending` — this is the
+    // only thing standing between a refusal and the next modal. A typed reason
+    // carrying the wait, so a model that is not attacking knows to pause rather
+    // than to retry blind. See DENY_COOLDOWN_MS.
+    const wait = deniedUntil - now()
+    if (wait > 0) {
+      return {
+        kind: 'refused',
+        reason:
+          `the user denied the last request to start a Claude session; do not ask again ` +
+          `for ${Math.ceil(wait / 1000)}s, and only if they ask you to`,
+      }
+    }
     if (pending) {
       return {
         kind: 'refused',
@@ -228,10 +272,12 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
       const p = pending
       if (!p || p.token !== token) return
       // A deny frees the slot now rather than at the TTL, so the next ask does
-      // not have to wait out two minutes of a permission the user refused.
+      // not have to wait out two minutes of a permission the user refused — and
+      // arms the cooldown, so freeing it is not an invitation to re-ask at once.
       if (!allow) {
         pending = null
         p.cancel()
+        deniedUntil = now() + cooldownMs
       }
       p.settle(allow)
     },

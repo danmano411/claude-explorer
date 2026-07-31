@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { app } from 'electron'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { control } from './control.handlers'
 import { ControlError } from './control'
 import { isAuthorized } from './mcpauth'
-import { canonicalize } from './policy'
+import { canonicalizeAsync } from './policy'
 import { agentSessionCount } from './pty.handlers'
 import { promptSpawnConfirm } from './spawnconfirm.handlers'
 import { createSpawnGuard } from './spawnguard'
@@ -49,9 +49,11 @@ const OPEN_VIEWER_TAB_DESCRIPTION =
   'Open a read-only tab in Claude Explorer showing the GIT DIFF of one file — the ' +
   'same output as `git diff` for that path. `path` is an ABSOLUTE Windows path to a ' +
   'file (e.g. C:\\Users\\me\\repo\\src\\index.ts) inside a git repository; an ' +
-  'unchanged file opens an empty diff. This only shows the USER something: it ' +
-  'returns no file contents to you and changes nothing on disk. Returns {"ok":true}; ' +
-  'the new tab appears in list_tabs.'
+  'unchanged file opens an empty diff. If the file is NOT inside a git repository ' +
+  'the call still returns {"ok":true} and the tab shows git\'s own error instead of a ' +
+  'diff — so {"ok":true} means the tab was opened, not that a diff was produced. ' +
+  'This only shows the USER something: it returns no file contents to you and changes ' +
+  'nothing on disk. The new tab appears in list_tabs.'
 
 const OPEN_CLAUDE_SESSION_DESCRIPTION =
   'Start a NEW Claude Code session in a new terminal tab of Claude Explorer, in the ' +
@@ -64,6 +66,9 @@ const OPEN_CLAUDE_SESSION_DESCRIPTION =
   '`token`. If that call returns needsConfirm again, the user has not answered yet — ' +
   'call again with the same token. On success it returns {"started":true}. A token ' +
   'works once, only for the path it was issued for, and expires after two minutes. ' +
+  'IF THE USER DENIES, STOP: this tool then refuses for a short cooldown and the ' +
+  'refusal tells you how many seconds. Do not retry to wait it out — only ask again ' +
+  'if the user themselves asks you to. ' +
   'The new session has NO Claude Explorer tools: it cannot open tabs or start ' +
   'further sessions. At most 8 app-started sessions may run at once. If Claude Code ' +
   'has never run in that folder, the new tab will show Claude\'s "do you trust this ' +
@@ -113,22 +118,31 @@ async function runControl(op: ControlOp, what: string): Promise<ControlResult> {
 }
 
 /**
- * A caller-supplied path, checked for SHAPE before canonicalize() sees it.
- * Order is load-bearing: canonicalize() resolves a relative path against
+ * A caller-supplied path, checked for SHAPE before the resolver sees it.
+ * Order is load-bearing: the resolver resolves a relative path against
  * Electron's cwd and would silently launder `src` into an absolute path the
  * model never named — and, for open_claude_session, into a folder the user is
  * then asked to approve.
  */
-function absolutePath(p: string): string {
+async function absolutePath(p: string): Promise<string> {
   if (!/^[a-zA-Z]:[\\/]|^\\\\[^\\]/.test(p)) {
     throw new Error(`path must be an absolute Windows path (e.g. C:\\Users\\me\\repo), got: ${p}`)
   }
-  return canonicalize(p)
+  return canonicalizeAsync(p)
 }
 
-function existingPath(p: string, want: 'file' | 'folder'): string {
-  const full = absolutePath(p)
-  const st = statSync(full, { throwIfNoEntry: false })
+/**
+ * ASYNC ON PURPOSE, all the way down. Both steps here are OS path resolution on
+ * a path the CALLER named, and both are slow in exactly the same case: an SMB
+ * host that does not answer. `\\10.255.255.1\share\x` takes ~21 seconds to fail,
+ * and in the synchronous spelling all 21 are spent on main's thread — one
+ * open_viewer_tab (which needs no confirmation at all) freezes IPC, pty output,
+ * the menu and every repaint, and a loop over fresh hostnames keeps it frozen.
+ * Awaited, the same stall costs this one request and nothing else.
+ */
+async function existingPath(p: string, want: 'file' | 'folder'): Promise<string> {
+  const full = await absolutePath(p)
+  const st = await stat(full).catch(() => null)
   if (!st) throw new Error(`no such path: ${full}`)
   if (st.isDirectory() !== (want === 'folder')) {
     throw new Error(`${full} is a ${st.isDirectory() ? 'folder' : 'file'}; this tool needs a ${want}`)
@@ -229,7 +243,7 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // No `mode` property at all: "file" is unrepresentable rather than
       // rejected, so there is nothing for a caller to try. Diff shows the user
       // a change; a file viewer would be a read tool, and the agent has a shell.
-      const filePath = existingPath(path, 'file')
+      const filePath = await existingPath(path, 'file')
       await runControl({ op: 'openViewerTab', args: { filePath, mode: 'diff' } }, 'The tab')
       return asText({ ok: true })
     },
@@ -244,7 +258,7 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     async ({ path, token: confirmToken }) => {
       // Validated before the guard sees either call, so a bad path never reaches
       // a human as a prompt and never mints a token.
-      const cwd = existingPath(path, 'folder')
+      const cwd = await existingPath(path, 'folder')
       // No `resumeId`: the tool starts a new session and nothing else. Picking up
       // someone else's conversation is not a thing an agent gets to do.
       const decision = await guard.request(cwd, confirmToken, async (p) => {

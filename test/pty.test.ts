@@ -5,12 +5,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 // on the .exe branch and a single cmd.exe command-line STRING on the .cmd
 // branch — claudeArgv() below normalises the two.
 const spawned: { file: string; args: string[] | string; opts: any }[] = []
+// The exit listener spawn() registers, kept rather than dropped: a process
+// ending on its own is the OTHER site that has to forget a session (kill() is
+// the tab-closing one), and a test cannot fire an exit it was never handed.
+const exitCbs: ((e: { exitCode: number }) => void)[] = []
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[] | string, opts: any) => {
     spawned.push({ file, args, opts })
     return {
       onData: () => {},
-      onExit: () => {},
+      onExit: (cb: (e: { exitCode: number }) => void) => { exitCbs.push(cb) },
       write: () => {},
       resize: () => {},
       kill: () => {},
@@ -69,7 +73,7 @@ const BRANCHES = [
 const noop = () => {}
 // A real Claude session id — the shape of a `<uuid>.jsonl` transcript name.
 const UUID = '11111111-2222-4333-8444-555555555555'
-beforeEach(() => { spawned.length = 0 })
+beforeEach(() => { spawned.length = 0; exitCbs.length = 0 })
 
 /**
  * The claude argv spawn() asked for, whichever branch built it: the array as
@@ -302,6 +306,19 @@ describe.each(BRANCHES)('KAN-41 recursion guard ($kind)', ({ mod }) => {
     mgr.spawn({ path: 'C:\\repo' }, noop, noop) // a normal session must not count
     expect(mgr.agentSessions()).toBe(1)
     mgr.kill(agentId)
+    expect(mgr.agentSessions()).toBe(0)
+  })
+
+  // The cap's other decrement site. kill() is what closing a tab does and is
+  // covered above; this is Claude ending BY ITSELF — /exit, a crash, the model
+  // finishing — with no kill() anywhere. Nothing else in the tree decrements,
+  // so if the handle survives its own process the cap creeps up until the tool
+  // is permanently refusing, and the user's only cure is restarting the app.
+  it('drops an agentSpawned session from the cap when its PROCESS exits, with no kill()', () => {
+    const mgr = new mod.PtyManager()
+    mgr.spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
+    expect(mgr.agentSessions()).toBe(1)
+    exitCbs.at(-1)!({ exitCode: 0 })
     expect(mgr.agentSessions()).toBe(0)
   })
 

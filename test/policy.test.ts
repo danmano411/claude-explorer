@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { classify, check, gate, canonicalize, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
+import { classify, check, gate, canonicalize, canonicalizeAsync, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
 import type { Op } from '../src/main/policy'
 
 const ROOTS = ['C:\\FakeWindows', 'C:\\Fake Program Files']
@@ -240,5 +240,22 @@ describe('canonicalize', () => {
   it('never throws on garbage', () => {
     expect(() => canonicalize('')).not.toThrow()
     expect(() => canonicalize('Z:\\nope\\<>|')).not.toThrow()
+  })
+
+  // canonicalizeAsync is what every path from OUTSIDE the app resolves through
+  // (mcp.ts), because realpathSync.native on an unreachable SMB host pins main
+  // for ~21 seconds. It is only safe to route those through it if it answers
+  // IDENTICALLY — a botched port of the ancestor walk would silently change what
+  // a caller-supplied path resolves to, and gate() classifies the result.
+  it('canonicalizeAsync agrees with canonicalize, including the ancestor walk', async () => {
+    const cases = [
+      'C:\\PROGRA~1', // 8.3 short name -> a real system root
+      path.join(os.tmpdir(), 'ce-does-not-exist-yet', 'x.txt'), // the walk
+      os.homedir() + '\\..\\..\\Windows\\System32', // .. traversal
+      '\\\\?\\C:\\Windows\\System32',
+      'Z:\\nope\\<>|', // garbage: neither may throw
+      '',
+    ]
+    for (const p of cases) expect(await canonicalizeAsync(p)).toBe(canonicalize(p))
   })
 })

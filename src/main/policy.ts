@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import type { FileMode } from '../shared/types'
 
 export type Op = 'delete' | 'permanentDelete' | 'move' | 'copy' | 'rename' | 'mkdir' | 'newFile'
@@ -49,33 +50,60 @@ export function classify(p: string, roots: string[] = DEFAULT_SYSTEM_ROOTS): Pat
   return 'normal'
 }
 
+/** `p` itself, then each ancestor, paired with the segments to re-append. The
+ *  first one that really exists on disk is the answer; if none does, the caller
+ *  falls back to the lexical path. Shared so the sync and async resolvers below
+ *  cannot drift apart — the only difference between them is which realpath they
+ *  await. */
+function* ancestors(p: string): Generator<[string, string[]]> {
+  const rest: string[] = []
+  let cur = path.resolve(p)
+  for (;;) {
+    yield [cur, rest.slice()]
+    const parent = path.dirname(cur)
+    if (parent === cur) return
+    rest.unshift(path.basename(cur))
+    cur = parent
+  }
+}
+
 /** Resolve to the real on-disk path: expands 8.3 short names, `..`, symlinks
  *  and junctions, and strips the `\\?\` prefix. For a target that does not
  *  exist yet (mkdir/newFile) the nearest existing ancestor is resolved and the
- *  remaining segments re-appended. Never throws. */
+ *  remaining segments re-appended. Never throws.
+ *
+ *  BLOCKS THE PROCESS. `realpathSync.native` on a path whose host is
+ *  unreachable (`\\10.255.255.1\share\x`) takes ~21 SECONDS, and every one of
+ *  them is spent on the calling thread. In main that is the whole app: no IPC,
+ *  no pty:data, no paint. Only use this for a path the USER chose in the window
+ *  that would be frozen; anything a caller outside the app named goes through
+ *  canonicalizeAsync. */
 export function canonicalize(p: string): string {
-  try {
-    return fs.realpathSync.native(p)
-  } catch {
-    /* falls through to the ancestor walk */
-  }
-  try {
-    const rest: string[] = []
-    let cur = path.resolve(p)
-    for (;;) {
-      const parent = path.dirname(cur)
-      if (parent === cur) return path.resolve(p)
-      rest.unshift(path.basename(cur))
-      cur = parent
-      try {
-        return path.join(fs.realpathSync.native(cur), ...rest)
-      } catch {
-        /* keep walking up */
-      }
+  for (const [cur, rest] of ancestors(p)) {
+    try {
+      return path.join(fs.realpathSync.native(cur), ...rest)
+    } catch {
+      /* keep walking up */
     }
-  } catch {
-    return p
   }
+  return path.resolve(p)
+}
+
+const realpathNative = promisify(fs.realpath.native)
+
+/** canonicalize() without pinning the main thread — same answers, one awaited
+ *  syscall at a time. This is the spelling every caller-supplied path must use
+ *  (see mcp.ts): the 21-second stall above then costs one request instead of
+ *  the whole process. */
+export async function canonicalizeAsync(p: string): Promise<string> {
+  for (const [cur, rest] of ancestors(p)) {
+    try {
+      return path.join(await realpathNative(cur), ...rest)
+    } catch {
+      /* keep walking up */
+    }
+  }
+  return path.resolve(p)
 }
 
 export function check(
