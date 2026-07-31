@@ -48,6 +48,13 @@ const api: Api = {
   settingsSet: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
   clipboardReadText: () => clipboard.readText(),
   clipboardHasImage: () => !clipboard.readImage().isEmpty(),
+  clipboardWriteText: (t) => clipboard.writeText(t),
+  // KAN-62 finding #2. Chromium exposes a real Windows CF_HDROP (an Explorer
+  // file copy) through its generic clipboard formats as something
+  // uri-list/filename shaped rather than a literal 'CF_HDROP' string — this
+  // was measured directly (PowerShell `Set-Clipboard -Path` → `text/uri-list`
+  // is the only entry in availableFormats()).
+  clipboardHasFileDrop: () => clipboard.availableFormats().some((f) => /uri-list|hdrop|filename/i.test(f)),
   onMenuCommand: (cb) => {
     const h = (_e: unknown, cmd: string, arg?: string) => cb(cmd, arg);
     ipcRenderer.on(CH.menuCommand, h);

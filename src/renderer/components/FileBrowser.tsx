@@ -8,7 +8,7 @@ import { unwrap, type ConfirmRequest } from '../opresult';
 import { gutterMarks, markKey, type GutterMark } from '../diffparse';
 import { IDLE_MS } from '../ptystatus';
 import { isTypingTarget } from '../keys';
-import { useAppState } from '../appstate';
+import { useAppState, type Clipboard } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -40,9 +40,17 @@ const MARK: Record<GutterMark, [glyph: string, title: string]> = {
   contains: ['·', 'Contains changes'],
 };
 
-export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExternal, onOpenFile }: {
+export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onOpenExternal, onOpenFile }: {
   cwd: string;
   tabId: string;
+  // KAN-62 finding #1. Split view mounts one FileBrowser per visible pane, and
+  // each registers its OWN window-level keydown listener — without this guard
+  // EVERY pane's listener fires on a single Ctrl+C, and the last one mounted
+  // wins, deterministically overwriting the real OS clipboard (and the in-app
+  // one) with whichever pane ISN'T the one the user is looking at. `focused`
+  // is `App.tsx`'s single derived focus truth (`t.id === active`) passed down,
+  // not a second copy of it — see App.tsx's "THE FOCUSED PANE IS DERIVED".
+  focused: boolean;
   onNavigate: (p: string) => void;
   onOpenClaude: (p: string) => void;
   onOpenExternal: (p: string) => void;
@@ -216,6 +224,26 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     }
   };
 
+  // KAN-62. The in-app clipboard already drives this pane's own Paste; this
+  // ALSO puts the absolute path(s) on the real OS clipboard as text, one per
+  // line, so a subsequent Ctrl+V into a Claude tab (or any other text field)
+  // carries something.
+  //
+  // Finding #2: clipboard.writeText() REPLACES the whole OS clipboard, every
+  // format on it, not just adds text/plain. Our own Copy/Cut never put
+  // anything else there, but a REAL Windows Explorer copy might already be
+  // sitting on the clipboard (CF_HDROP, surfaced to us as a 'text/uri-list'-ish
+  // format) — measured: writeText silently destroys it, and Electron cannot
+  // read the raw CF_HDROP bytes back out to restore them (writeBuffer of what
+  // readBuffer('text/uri-list') returns writes 0 bytes and wipes everything).
+  // So when one is already there we leave the OS clipboard alone rather than
+  // clobber a pending real Explorer paste; this pane's own Paste still works
+  // either way because it drives off the in-app clipboard, not the OS one.
+  const setClip = (c: NonNullable<Clipboard>) => {
+    app.setClipboard(c);
+    if (!window.api.clipboardHasFileDrop()) window.api.clipboardWriteText(c.paths.join('\n'));
+  };
+
   const paste = async (destDir: string) => {
     const cb = app.clipboard;
     if (!cb || !cb.paths.length) return;
@@ -335,8 +363,8 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       items.push({ label: 'Open in default app', onClick: () => window.api.openPath(entry.path) });
     }
     items.push({ separator: true });
-    items.push({ label: 'Cut', onClick: () => app.setClipboard({ mode: 'cut', paths }) });
-    items.push({ label: 'Copy', onClick: () => app.setClipboard({ mode: 'copy', paths }) });
+    items.push({ label: 'Cut', onClick: () => setClip({ mode: 'cut', paths }) });
+    items.push({ label: 'Copy', onClick: () => setClip({ mode: 'copy', paths }) });
     items.push({ label: 'Paste', onClick: () => paste(entry.path), disabled: !canPaste || !isDir });
     items.push({ separator: true });
     if (paths.length === 1) items.push({ label: 'Rename', onClick: () => setRenaming({ path: entry.path, value: entry.name }) });
@@ -352,6 +380,12 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   // keyboard shortcuts
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
+      // KAN-62 finding #1: this listener is window-level and every visible
+      // pane in a split mounts one, so without this every keystroke would
+      // otherwise reach ALL of them — Ctrl+C in the pane you're looking at
+      // would also fire in the other pane, last-mounted wins, and the wrong
+      // file's path lands on the OS clipboard (and gets pasted into Claude).
+      if (!focused) return;
       const typing = isTypingTarget(e.target);
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
@@ -363,8 +397,8 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       if (e.key === 'Backspace') { e.preventDefault(); nav(winDirname(dir)); return; }
       if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
       if (e.key === 'Escape') { setSelection(emptySelection()); setMenu(null); return; }
-      if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) app.setClipboard({ mode: 'cut', paths: selectedPaths }); return; }
-      if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) app.setClipboard({ mode: 'copy', paths: selectedPaths }); return; }
+      if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) setClip({ mode: 'cut', paths: selectedPaths }); return; }
+      if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) setClip({ mode: 'copy', paths: selectedPaths }); return; }
       if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) { paste(dir); return; }
       if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); doUndo(); return; }
       if (e.ctrlKey && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
@@ -395,7 +429,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [dir, shown, selectedPaths, app.clipboard]);
+  }, [dir, shown, selectedPaths, app.clipboard, focused]);
 
   return (
     <div className="filebrowser">
