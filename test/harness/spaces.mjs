@@ -238,13 +238,19 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   check('the shell is still ALIVE after the round trip — it answers a new command',
     (await termText(win)).includes(ALIVE));
 
-  // --- Ctrl+1..9 must not fire while a terminal owns the keystrokes ---------
+  // --- KAN-59: Ctrl+1..9 fires even while a TERMINAL owns the keystrokes ----
+  // The inverse of what this asserted before KAN-59. The shortcut was dead in a
+  // terminal because App declined every `isTypingTarget` press and xterm's focus
+  // sink is a hidden <textarea>; it now declines only for the app's own <input>s
+  // (the address-bar check immediately below is unchanged and still holds).
   await win.locator('.pane:not([hidden]) .xterm-screen').click();
   await win.waitForTimeout(200);
   await win.keyboard.press('Control+2');
   await win.waitForTimeout(600);
-  check('Ctrl+2 is IGNORED while a terminal has focus (it must reach the shell)',
-    (await spaceName(win)) === 'Space', await spaceName(win));
+  check('Ctrl+2 switches space even while a terminal has focus (KAN-59)',
+    (await spaceName(win)) === 'Beta', await spaceName(win));
+  await switchSpaceViaMenu(win, 'Space');   // back, for the checks below
+  await win.waitForTimeout(400);
 
   await win.locator('.tab:not(.add)').nth(0).click();  // a files tab, for its address bar
   await win.waitForTimeout(400);
@@ -258,7 +264,8 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   await win.keyboard.press('Escape');
 
   // Positive control: the same key, nothing typable focused, DOES switch —
-  // otherwise the two checks above would pass on a shortcut that never works.
+  // otherwise the address-bar check above would pass on a shortcut that never
+  // works at all.
   await win.click('.tabbar');
   await win.waitForTimeout(150);
   await win.keyboard.press('Control+2');

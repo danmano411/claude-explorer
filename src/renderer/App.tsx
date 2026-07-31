@@ -23,7 +23,7 @@ import {
   reorderInSpace, setActiveTab, switchSpace,
 } from './spaces';
 import type { ControlRequest, ControlResult, GridCell, GridLayout, Space, TabGroup } from '../shared/types';
-import { isTextBox, isTypingTarget } from './keys';
+import { isTextBox, spaceIndex } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -1031,17 +1031,36 @@ export function App() {
     setActive(focusOf(r.spaces.find((s) => s.id === r.activeSpaceId)));
   };
 
-  // Ctrl+1..9 selects the nth space. Guarded by the SAME predicate FileBrowser's
-  // shortcuts use (renderer/keys.ts) rather than a second mechanism: a terminal
-  // must receive Ctrl+1 itself, and xterm's focus sink is a <textarea>, exactly
-  // like the address bar / search box / rename inputs are <input>s.
+  // Ctrl+1..9 selects the nth space.
+  //
+  // KAN-59: this used to be gated by `isTypingTarget`, which made it dead
+  // whenever a terminal had focus — xterm's focus sink is a hidden
+  // `.xterm-helper-textarea`, so the guard declined every press. Nothing was
+  // swallowing the event; we were.
+  //
+  // The fix is `isTextBox` — the predicate that already means "one of the app's
+  // OWN text boxes, and not a terminal" (see keys.ts; the grid picker below has
+  // used it for exactly this distinction since KAN-56). Not a widened
+  // `isTypingTarget`: that one is tag-based on purpose, and an xterm exception
+  // by class name is a list to forget to update. The address bar / search box /
+  // rename inputs keep declining Ctrl+1..9 exactly as before — a rename in
+  // flight when the space changes out from under it is a state nobody asked for
+  // — while a terminal, which is a <textarea> and not one of ours, no longer
+  // does.
+  //
+  // The other half of the fix is in Terminal.tsx, and BOTH are needed. xterm
+  // registers its keydown listener on that textarea, i.e. at the TARGET phase,
+  // which is strictly before this bubble-phase window listener — so this handler
+  // alone would switch the space *after* xterm had already sent the shell
+  // Ctrl+3's ESC (or Ctrl+4..8's FS/GS/RS/US/DEL). Terminal.tsx's arm is what
+  // stops the byte; this is what performs the switch, because only App knows how
+  // many spaces there are.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if (isTypingTarget(e.target)) return;
-      const n = Number(e.key);
-      if (!Number.isInteger(n) || n < 1 || n > 9) return;
-      const target = spaces[n - 1];
+      const i = spaceIndex(e);
+      if (i === null) return;
+      if (isTextBox(e.target)) return; // our own inputs only; a terminal is not one
+      const target = spaces[i];
       if (!target) return; // fewer than n spaces: leave the key alone
       e.preventDefault();
       switchToSpace(target.id);
@@ -1660,7 +1679,7 @@ export function App() {
         {tabs.map((t) =>
           t.view === 'terminal' && t.ptyId ? (
             <div key={t.id} {...paneProps(t)} hidden={!visibleIds.has(t.id)}>
-              <Terminal ptyId={t.ptyId} />
+              <Terminal ptyId={t.ptyId} kind={t.terminalKind} />
             </div>
           ) : null,
         )}

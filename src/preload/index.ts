@@ -45,6 +45,7 @@ const api: Api = {
   settingsGet: () => ipcRenderer.invoke(CH.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(CH.settingsSet, patch),
   clipboardReadText: () => clipboard.readText(),
+  clipboardHasImage: () => !clipboard.readImage().isEmpty(),
   onMenuCommand: (cb) => {
     const h = (_e: unknown, cmd: string, arg?: string) => cb(cmd, arg);
     ipcRenderer.on(CH.menuCommand, h);
