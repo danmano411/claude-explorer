@@ -397,11 +397,18 @@ async function runInTerminal(win, line) {
   const ws = JSON.parse(fs.readFileSync(path.join(PROFILE, 'workspace.json'), 'utf8'));
   const src = ws.spaces.find((s) => s.name === 'Space');
   const dst = ws.spaces.find((s) => s.name === 'Beta');
-  const celled = (src.layout?.cells ?? []).flatMap((c) => c.tabIds);
-  check('the persisted document is already well-formed: no cell names a tab the space lost',
-    celled.every((id) => src.tabIds.includes(id))
-      && src.tabIds.every((id) => !dst.tabIds.includes(id)),
-    `cells ${celled.length}, src ${src.tabIds.length}, dst ${dst.tabIds.length}`);
+  // Asserted on the GRID, not just on the ids: `sanitize()` runs on write as
+  // well as on read, so it prunes a dangling id by itself and an id-level check
+  // here can never fail — it would be measuring sanitize, not the move. What
+  // sanitize does NOT do is compact, so the vacated rectangle is exactly what
+  // survives to disk, and cell coverage is the thing that tells.
+  const cells = src.layout?.cells ?? [];
+  const covered = cells.reduce((n, c) => n + c.colSpan * c.rowSpan, 0);
+  check('the persisted layout is already well-formed — its cells cover the grid, with no vacated hole',
+    !!src.layout && covered === src.layout.cols * src.layout.rows
+      && cells.flatMap((c) => c.tabIds).every((id) => src.tabIds.includes(id))
+      && !src.tabIds.some((id) => dst.tabIds.includes(id)),
+    `${covered} of ${src.layout?.cols}x${src.layout?.rows}, cells ${cells.length}`);
 
   await switchSpaceViaMenu(win, 'Beta');
   const back = await titles(win);
