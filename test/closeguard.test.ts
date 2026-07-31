@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { closeRisk, closeReason, deleteSpaceReason, type Closeable } from '../src/renderer/closeguard'
+import { closeRisk, closeReason, deleteSpaceReason, moveTabReason, type Closeable } from '../src/renderer/closeguard'
 import type { PtyStatus } from '../src/shared/types'
 
 const statusMap = (entries: Array<[string, PtyStatus]> = []) => new Map(entries)
@@ -65,6 +65,20 @@ describe('closeReason', () => {
 
   it('gives a single-tab shell close its own sentence, distinct from the Claude one', () => {
     expect(closeReason(['shell'])).toMatch(/nothing about this shell/)
+  })
+})
+
+// KAN-66. The selectivity rule for moving a tab between spaces, in the one
+// place it can be tested without a renderer. Only ONE move is questioned, and
+// `null` is what makes every other one a single click.
+describe('moveTabReason', () => {
+  it('returns null for an ungrouped tab — no modal at all', () => {
+    expect(moveTabReason(false)).toBeNull()
+  })
+
+  it('names exactly what moving a grouped tab on its own changes', () => {
+    expect(moveTabReason(true)).toBe(
+      'This tab will be removed from the current group and will be moved to that space.')
   })
 })
 

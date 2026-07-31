@@ -366,6 +366,17 @@ body {
   border-radius: 50%; border: 1px solid var(--line); vertical-align: baseline;
 }
 
+/* Submenus (KAN-66). Opened by :hover, never by state — the nested <ul> is a
+   CHILD of its row, so a pointer travelling onto it never leaves the parent and
+   there is nothing to time out or to close. `position: absolute` overrides
+   .ctx-menu's `fixed`, which is what makes it hang off the row instead of off
+   the viewport; -5px lines its first item up with its parent across .ctx-menu's
+   4px padding and 1px border. */
+.ctx-sub { position: relative; display: flex; align-items: baseline; gap: 10px; }
+.ctx-caret { margin-left: auto; color: var(--ink-soft); }
+.ctx-sub > .ctx-menu { position: absolute; left: 100%; top: -5px; display: none; }
+.ctx-sub:hover > .ctx-menu { display: block; }
+
 /* delete-confirm modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(20, 15, 10, 0.38); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal {

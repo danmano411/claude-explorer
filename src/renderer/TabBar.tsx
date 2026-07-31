@@ -22,8 +22,9 @@ export const TAB_MIME = 'application/x-ce-tab';
  */
 export const LONE_MIME = 'application/x-ce-tab-lone';
 /** Dragging a group by its label chip carries the group id, not a tab id — the
- *  two drags land through different model calls, so they need different types. */
-const GROUP_MIME = 'application/x-ce-tabgroup';
+ *  two drags land through different model calls, so they need different types.
+ *  Exported since KAN-66, because a space row in the switcher accepts both. */
+export const GROUP_MIME = 'application/x-ce-tabgroup';
 const SPRING_MS = 600;
 /** How long a displaced tab takes to slide to its new slot. Short enough that
  *  the strip keeps up with a fast drag, long enough to read as movement. */
@@ -116,6 +117,16 @@ interface Props {
   onOpenExplorer: (id: string) => void;
   onOpenTerminal: (id: string) => void;
   onOpenIde: (id: string) => void;
+  /** Where "Move Tab to ▸" / "Move Group to ▸" can send things (KAN-66). Every
+   *  space EXCEPT the one this strip is drawing, already filtered by App —
+   *  which is the only thing that knows which space that is. Empty (or absent,
+   *  pre-wiring) means the whole block is omitted rather than shown empty. */
+  otherSpaces?: { id: string; name: string }[];
+  /** Move one tab / a whole group to another space. Both land on the same App
+   *  handler the switcher's drop rows do, which is what makes the menu and the
+   *  drag the same operation rather than two that have to agree. */
+  onMoveTabToSpace?: (tabId: string, spaceId: string) => void;
+  onMoveGroupToSpace?: (groupId: string, spaceId: string) => void;
   /** Rendered at the very left edge — the only control there. The File menu
    *  (New Tab / Open Recent) used to live in this strip too, but KAN-55 moved
    *  it into the native app menu, so `spaceMenu` is on its own now. Optional:
@@ -138,7 +149,7 @@ interface Props {
 export function TabBar({
   tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
   onReorderGroup, onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu,
-  paneKey = null, onAdopt, onPaneGrab,
+  otherSpaces = [], onMoveTabToSpace, onMoveGroupToSpace, paneKey = null, onAdopt, onPaneGrab,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
   let drag: DragPayload = null;
@@ -160,6 +171,18 @@ export function TabBar({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [gRenaming, setGRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+
+  /**
+   * A "Move … to ▸" block, or NOTHING when there is nowhere to send it (KAN-66).
+   *
+   * Omitted rather than disabled: a lone space is the common case, and a
+   * permanently greyed row that never becomes available explains nothing the
+   * space switcher two inches to the left does not already say.
+   */
+  const moveTo = (label: string, go: ((spaceId: string) => void) | undefined) =>
+    otherSpaces.length && go
+      ? [{ label, items: otherSpaces.map((s) => ({ label: s.name, onClick: () => go(s.id) })) }]
+      : [];
 
   const clearSpring = () => {
     if (springTimer.current) { clearTimeout(springTimer.current); springTimer.current = null; }
@@ -637,6 +660,13 @@ export function TabBar({
                   .map((g) => ({ label: `Add to “${g.name}”`, swatch: g.color, onClick: () => groupActions.add(menu.id, g.id) })),
                 ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
               ]),
+              // KAN-66. NOT inside the `pinned ? [] :` arm above: a pin governs
+              // closing and ordering, not which space a tab lives in, so a
+              // pinned tab moves like any other and arrives still pinned.
+              // Whether the move needs a confirm is App's call (`moveTabReason`)
+              // — the menu asks for the same operation the switcher's drop rows
+              // do, so there is one guard rather than one per entry point.
+              ...moveTo('Move Tab to', onMoveTabToSpace && ((sid) => onMoveTabToSpace(menu.id, sid))),
               { separator: true },
               // KAN-57: hiding the `×` was never a guarantee — this item closed
               // a pinned tab freely, which is what "pinned" was supposed to
@@ -663,6 +693,13 @@ export function TabBar({
               onClick: () => groupActions.recolor(gmenu.id, c),
             })),
             { separator: true },
+            // KAN-66. The members KEEP their groupId: `Workspace.groups` is a
+            // flat top-level registry, not a per-space one, so the whole run
+            // simply reappears as one contiguous run in the destination strip
+            // and nothing about the group record changes. No confirm — a group
+            // moving whole loses nothing, which is exactly the case
+            // `moveTabReason` is selective about.
+            ...moveTo('Move Group to', onMoveGroupToSpace && ((sid) => onMoveGroupToSpace(gmenu.id, sid))),
             { label: 'Ungroup', onClick: () => groupActions.ungroup(gmenu.id) },
             { label: "Close group's tabs", onClick: () => groupActions.closeTabs(gmenu.id) },
           ]}
