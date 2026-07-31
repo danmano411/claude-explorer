@@ -8,6 +8,7 @@ import {
   renameSpace,
   reorderInSpace,
   setActiveTab,
+  setSpacePinned,
   switchSpace,
 } from '../src/renderer/spaces'
 
@@ -30,6 +31,9 @@ const space = (id: string, tabIds: string[] = [], activeTabId?: string): S => ({
   layout: null,
   ...(activeTabId === undefined ? {} : { activeTabId }),
 })
+
+/** KAN-57. */
+const pinnedSpace = (id: string, tabIds: string[] = []): S => ({ ...space(id, tabIds), pinned: true })
 
 /** THE invariant: every known tab is owned by exactly one space — never zero
  *  (unreachable live session), never two (ambiguous PTY ownership). */
@@ -139,6 +143,69 @@ describe('deleteSpace', () => {
     const snapshot = structuredClone(spaces)
     deleteSpace(spaces, 'a', 'a')
     expect(spaces).toEqual(snapshot)
+  })
+
+  // KAN-57: deleting a space with a live Claude session or shell in it is
+  // recoverable UI-side (a confirm), but the refusal for a PINNED space has to
+  // hold even if a caller skips the menu entirely — so it lives here, in the
+  // data layer, not only behind a disabled button.
+  describe('PINNED (KAN-57)', () => {
+    it('refuses to delete a pinned space among others', () => {
+      const spaces = [space('a', ['t1']), pinnedSpace('b', ['t2']), space('c', ['t3'])]
+      expect(deleteSpace(spaces, 'a', 'b')).toEqual({ ok: false, reason: 'PINNED' })
+    })
+    it('hands out no closedTabIds for a refused pinned space — nothing licenses a PTY kill', () => {
+      const spaces = [space('a', ['t1']), pinnedSpace('b', ['t2'])]
+      const r = deleteSpace(spaces, 'a', 'b')
+      expect(r.ok).toBe(false)
+      expect('closedTabIds' in r).toBe(false)
+    })
+    it('reports the unknown-id refusal before ever looking at pinned', () => {
+      const spaces = [pinnedSpace('a', ['t1'])]
+      expect(deleteSpace(spaces, 'a', 'ghost')).toEqual({ ok: false, reason: 'NO_SUCH_SPACE' })
+    })
+    // The user's explicit "keep this" beats the structural floor: a pinned
+    // lone space should say the thing the user can actually undo.
+    it('reports PINNED, not LAST_SPACE, for a pinned lone space', () => {
+      const spaces = [pinnedSpace('only', ['t1'])]
+      expect(deleteSpace(spaces, 'only', 'only')).toEqual({ ok: false, reason: 'PINNED' })
+    })
+    it('still deletes an unpinned space normally', () => {
+      const spaces = [space('a', ['t1']), pinnedSpace('b', ['t2']), space('c', ['t3'])]
+      const r = deleteSpace(spaces, 'a', 'c')
+      expect(r.ok).toBe(true)
+      expect(r.ok && r.closedTabIds).toEqual(['t3'])
+    })
+  })
+})
+
+describe('setSpacePinned', () => {
+  it('sets the field', () => {
+    const result = setSpacePinned([space('a')], 'a', true)
+    expect(result[0].pinned).toBe(true)
+  })
+  it('is a no-op (same reference) for an unknown spaceId', () => {
+    const spaces = [space('a')]
+    expect(setSpacePinned(spaces, 'ghost', true)).toBe(spaces)
+  })
+  it('is a no-op (same reference) when the state already holds', () => {
+    const pinned = setSpacePinned([space('a')], 'a', true)
+    expect(setSpacePinned(pinned, 'a', true)).toBe(pinned)
+    const unpinned = [space('a')]
+    expect(setSpacePinned(unpinned, 'a', false)).toBe(unpinned)
+  })
+  // The stripActiveTab precedent: unpinning deletes the key rather than
+  // writing `false`, so a never-pinned space and an unpinned one persist
+  // identically and neither writes a field a pre-KAN-57 reader would choke on.
+  it('unpinning deletes the key rather than writing false', () => {
+    const pinned = setSpacePinned([space('a')], 'a', true)
+    const un = setSpacePinned(pinned, 'a', false)
+    expect('pinned' in un[0]).toBe(false)
+  })
+  it('touches only the named space', () => {
+    const spaces = [space('a'), space('b')]
+    const result = setSpacePinned(spaces, 'a', true)
+    expect(result[1]).toBe(spaces[1])
   })
 })
 

@@ -162,6 +162,43 @@ describe('sanitize', () => {
     expect(out.tabs.find((t) => t.id === 't3')?.pinned).toBe(true)
     expect(out.spaces[0].tabIds.indexOf('t2') - out.spaces[0].tabIds.indexOf('t1')).toBe(1)
   })
+
+  // KAN-57.
+  describe('pinned', () => {
+    it('round-trips pinned:true, including through a JSON write', () => {
+      const w = base()
+      w.spaces[0].pinned = true
+      const out = sanitize(w)
+      expect(out.spaces[0].pinned).toBe(true)
+      expect(JSON.parse(JSON.stringify(out)).spaces[0].pinned).toBe(true)
+    })
+
+    // A workspace.json written before KAN-57 has no such field at all, and
+    // `undefined` has to be dropped by JSON.stringify so it stays that way.
+    it('drops the key entirely for an unpinned (or pre-KAN-57) space', () => {
+      const out = sanitize(base())
+      expect(out.spaces[0].pinned).toBeUndefined()
+      expect('pinned' in JSON.parse(JSON.stringify(out)).spaces[0]).toBe(false)
+    })
+
+    // A hand-edited "pinned": "no" is truthy in JS; coercing it wrong would
+    // lock the space's Delete forever with no UI able to explain why.
+    it('coerces hand-edited garbage to absent, never to truthy', () => {
+      for (const garbage of ['no', 1, {}, 'false', null]) {
+        const w = base()
+        // @ts-expect-error deliberately malformed, as a hand-edited file would be
+        w.spaces[0].pinned = garbage
+        expect(sanitize(w).spaces[0].pinned).toBeUndefined()
+      }
+    })
+
+    it('is idempotent for a pinned space — a second pass churns nothing', () => {
+      const w = base()
+      w.spaces[0].pinned = true
+      const once = sanitize(w)
+      expect(sanitize(once)).toEqual(once)
+    })
+  })
 })
 
 /**
@@ -264,6 +301,19 @@ describe('sanitize — 0.7.0 layout migration (KAN-56)', () => {
     const s = sanitize(v070()).spaces[0]
     expect(s.tabIds).toEqual(strips(s).flat())
     expect(s.tabIds).toEqual(['a', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'b'])
+  })
+
+  // KAN-57: this file predates the `pinned` field by two majors. It must
+  // load with every space unpinned and every tab still reachable — not throw,
+  // not default to pinned, not drop a tab in the process.
+  it('loads a literal pre-KAN-57 file with everything unpinned and nothing lost', () => {
+    const out = sanitize(v070())
+    expect(out.spaces[0].pinned).toBeUndefined()
+    const reachable = out.spaces[0].layout
+      ? out.spaces[0].layout.cells.flatMap((c) => c.tabIds)
+      : out.spaces[0].tabIds
+    expect([...reachable].sort()).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+    expect(out.tabs).toHaveLength(10)
   })
 
   it('carries the 0.7.0 track fractions through untouched', () => {

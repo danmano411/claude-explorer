@@ -11,11 +11,17 @@ export function acceleratorLabel(index: number): string | null {
   return index >= 0 && index < 9 ? `Ctrl+${index + 1}` : null
 }
 
-/** Delete is refused when it's the only space left — the UI must not offer,
- *  nor act on, what will be refused. Checked both at the menu-item gate and
- *  again in the confirm modal's Delete handler. */
-export function canDeleteSpace(spaceCount: number): boolean {
-  return spaceCount > 1
+/**
+ * Delete is refused when it's the only space left (the structural floor), and
+ * — KAN-57 — when the space is PINNED (the user's explicit instruction). The UI
+ * must not offer, nor act on, what `deleteSpace` will refuse: checked at the
+ * menu-item gate and again in the confirm modal's Delete handler, since either
+ * can change while the modal is open.
+ *
+ * `pinned` is optional so the one-arg call shape still means "count only".
+ */
+export function canDeleteSpace(spaceCount: number, pinned?: boolean): boolean {
+  return spaceCount > 1 && !pinned
 }
 
 /**

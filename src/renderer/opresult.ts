@@ -5,10 +5,28 @@ import type { OpResult } from '../shared/types'
 // is only for display and for what the dialog sends back.
 export const CONFIRM_WORD = 'CONFIRM'
 
+/**
+ * ONE confirm shape for the whole renderer (KAN-57).
+ *
+ * It started welded to the main-process policy round-trip and that is why
+ * SpaceMenu and FileBrowser each hand-rolled their own `.modal-backdrop`
+ * instead of reusing it. Exactly one field did the welding — a `retry` that
+ * re-invoked an IPC op — so widening that one field is smaller than extracting
+ * a shared shell, and it ends with one dialog rather than three plus a shell.
+ */
 export interface ConfirmRequest {
+  /** The question. One sentence, naming exactly what is lost. */
   reason: string
-  typed: boolean
-  retry(confirm: string): Promise<void>
+  /** Type-to-confirm (CONFIRM_WORD). Set only by the main-process policy path
+   *  below; a purely-renderer confirm leaves it absent — main re-validates the
+   *  word, so a renderer-only action has nothing to send it to. */
+  typed?: boolean
+  /** Label of the danger button. Default 'Continue'. */
+  confirmLabel?: string
+  /** Do it. `word` is what was typed ('' when `typed` is falsy); a
+   *  renderer-only action ignores it. Sync or async — the dialog closes when it
+   *  settles. */
+  confirm(word: string): void | Promise<void>
 }
 
 /**
@@ -30,7 +48,7 @@ export async function unwrap<T>(
     onConfirm({
       reason: r.reason,
       typed: r.typed,
-      retry: async (confirm: string) => {
+      confirm: async (confirm: string) => {
         const again = await run(confirm)
         if (!again.ok) onMessage(again.reason)
       },

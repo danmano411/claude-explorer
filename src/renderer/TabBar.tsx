@@ -437,10 +437,11 @@ export function TabBar({
             ? <span className={'tab-status ' + st} />
             : isTerminal ? '▶' : '📁'}
         </span>
-        {/* Pinned = icon only: no title, no close button (Chrome's model — a
-            pinned tab is meant to be un-closable by accident). Both are still
-            reachable from the context menu. Rename is still offered, so the
-            input still renders here when it is open. */}
+        {/* Pinned = icon only: no title, no close button. KAN-57 makes that
+            literal rather than cosmetic — the context menu's Close is greyed
+            for a pinned tab and App refuses one at the chokepoint, so Unpin is
+            the only way out. Rename is still offered, so the input still
+            renders here when it is open. */}
         {renaming === t.id
           ? renameInput(commitRename, () => setRenaming(null))
           : !t.pinned && <span className="tab-title">{t.title}</span>}
@@ -637,7 +638,12 @@ export function TabBar({
                 ...(t?.groupId ? [{ label: 'Remove from group', onClick: () => groupActions.remove(menu.id) }] : []),
               ]),
               { separator: true },
-              { label: 'Close', onClick: () => onClose(menu.id) },
+              // KAN-57: hiding the `×` was never a guarantee — this item closed
+              // a pinned tab freely, which is what "pinned" was supposed to
+              // mean it could not do. Greyed rather than removed, so the state
+              // explains itself at the point of refusal; "Unpin tab" is two
+              // items up, which is the escape.
+              { label: 'Close', disabled: !!t?.pinned, onClick: () => onClose(menu.id) },
             ]}
           />
         );
