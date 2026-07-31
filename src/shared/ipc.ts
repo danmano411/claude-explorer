@@ -137,6 +137,13 @@ export interface Api {
   settingsGet(): Promise<Settings>
   settingsSet(patch: Partial<Settings>): Promise<Settings> // returns merged settings
   clipboardReadText(): string // sync; clipboard is reachable from the preload process
+  // KAN-60. Only "is there a bitmap on it", never the pixels: Claude Code reads
+  // the Windows clipboard itself, so all the renderer needs is which branch of
+  // its Ctrl+V arm to take. Like clipboardReadText this is a plain preload
+  // function, NOT a channel — two of the usual four contract pieces (CH constant,
+  // main handler) do not apply, because electron's `clipboard` is reachable from
+  // the preload directly.
+  clipboardHasImage(): boolean
   // `arg` carries the path for the CLI/Explorer entry point ('open-path' |
   // 'open-file'); the menu-click commands never set it.
   onMenuCommand(cb: (cmd: string, arg?: string) => void): () => void
