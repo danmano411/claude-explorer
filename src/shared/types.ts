@@ -217,6 +217,15 @@ export interface Space {
    *  v0.4.0 has no such field and must still load. sanitize() guarantees it
    *  names a member of `tabIds` (or is absent). */
   activeTabId?: string
+  /**
+   * KAN-57: deleting this space is refused while true. Absent, not `false`, for
+   * an unpinned space — a workspace.json written before KAN-57 has no such
+   * field and must load unchanged, and `JSON.stringify` drops `undefined`, so an
+   * unpinned space writes no key back either.
+   *
+   * Says nothing about this space's TABS: it gates exactly one operation.
+   */
+  pinned?: boolean
 }
 
 /**

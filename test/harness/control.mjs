@@ -62,6 +62,24 @@
 //   E. narrow the restore gate back to `req.op !== 'listTabs' && !restoreDone`
 //      (App.tsx) → section 11 red: listTabs answers [] mid-restore, which is
 //      the same bytes as "no tabs open" and so unrecoverable by a caller.
+//   F. delete the `const refused = resolved.filter((t) => t.pinned)` filter from
+//      requestClose (App.tsx) → section 9b red: the channel closes a pinned tab
+//      and answers ok. (KAN-57 shipped this guard with NOTHING in the repo
+//      covering it from the control side: nowhere else does `pinned` and the
+//      channel meet, so the whole suite stayed green with the filter gone.)
+//   G. flip the control arm's `requestClose([tabId], 'now')` to `'ask'`
+//      (App.tsx) → section 8 reds FIRST, 3 of them: its opening burst closes a
+//      live terminal, and with 'ask' that raises a modal nobody answers, so the
+//      op times out and the tab stays. The backdrop then swallows every later
+//      click and 9b is not reached at all. So `'now'` was already defended, by
+//      section 8 and by accident; what 9b adds is the PINNED half of the arm
+//      (F), which nothing else in the repo touched.
+//
+// NOTE on F: `closeNow` re-checks `pinned` too, so deleting only requestClose's
+// filter reds 9b's REFUSAL-SHAPE check (the op answers ok) while the tab itself
+// survives — measured. Deleting both filters reds all three of 9b's checks. The
+// second filter is redundant defence, not dead defence, and this is the section
+// that says so.
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -188,6 +206,25 @@ const until = async (pred, ms = 15_000) => {
 };
 
 const FIELDS = ['id', 'ptyId', 'view', 'cwd', 'title', 'terminalKind', 'status'];
+
+/** Pick a row on the tab strip's context menu (section 9b pins from the UI —
+ *  `pinned` is renderer state with no control op behind it). */
+const tabMenu = async (i, itemText) => {
+  // Soft on both clicks: a regression that leaves a modal backdrop up makes the
+  // right-click unhittable, and an escaping Playwright rejection would report a
+  // stack trace instead of the FAILs naming what broke (the filemenu.mjs /
+  // confirm.mjs policy). The outcome checks below still catch a click that
+  // silently did not land.
+  await win.locator('.tab:not(.add)').nth(i)
+    .click({ timeout: 3000, button: 'right' }).catch(() => {});
+  await win.waitForTimeout(250);
+  await win.locator('.ctx-item', { hasText: itemText }).first().click({ timeout: 3000 }).catch(() => {});
+  await win.waitForTimeout(400);
+  if (await win.locator('.ctx-backdrop').count()) {
+    await win.mouse.click(4, 4);
+    await win.waitForTimeout(200);
+  }
+};
 
 /** Wait for the visible viewer pane to stop saying "Reading changes…". Both
  *  DiffView states — hunks and a refusal — are reached through that placeholder,
@@ -475,6 +512,46 @@ console.log('\n9 — two closeTab ops naming one tab, in one tick');
       && second?.error === `control: unknown tab ${doomed?.id}`,
     JSON.stringify(second));
   check('and the tab really is gone', !has(await tabs(), 'twice.txt'), titles(await tabs()));
+}
+
+// === 9b. a PINNED tab refuses closeTab ======================================
+// KAN-57 put a pinned filter in `requestClose` and routed the control arm
+// through it in `'now'` mode. Nothing in the repo covered either from this side
+// — `grep -i pinned control.mjs` returned nothing — so both could be deleted
+// with every test still green (mutations F and G in the ledger above). This is
+// the only place `pinned` and the channel meet.
+console.log('\n9b — a pinned tab refuses the close op');
+{
+  const before = await tabs();
+  const title = await win.evaluate(() =>
+    document.querySelector('.tab:not(.add) .tab-title')?.textContent?.trim() ?? '');
+  const target = before.find((t) => t.title === title);
+  check('PRE-STATE: the strip\'s first tab resolves to a control row',
+    !!target && before.length > 1, `"${title}" -> ${JSON.stringify(target ?? null)}`);
+
+  await tabMenu(0, 'Pin tab');
+  check('PRE-STATE: it is pinned', (await win.locator('.tab.pinned').count()) === 1,
+    `${await win.locator('.tab.pinned').count()} pinned`);
+
+  const refused = await call({ op: 'closeTab', args: { tabId: target?.id ?? 'no-such-tab' } });
+  // TYPED, not swallowed and not a crash: the drain turns the throw into the
+  // channel's `{ ok:false, error }` shape, the same one the unknown-tab refusal
+  // in section 5 uses — so a caller can tell "refused" from "worked".
+  check('closeTab REFUSES a pinned tab, in the typed refusal shape',
+    refused.ok === false && refused.code === 'renderer'
+      && refused.error === `control: tab ${target?.id} is pinned`, JSON.stringify(refused));
+  const survived = await tabs();
+  check('…and the tab is still open — a refusal, not a close that also errored',
+    survived.length === before.length && has(survived, title), titles(survived));
+
+  // POSITIVE CONTROL. Without it, both checks above are satisfied by a closeTab
+  // op that is broken for every tab.
+  await tabMenu(0, 'Unpin tab');
+  const accepted = await call({ op: 'closeTab', args: { tabId: target?.id ?? 'no-such-tab' } });
+  const after = await tabs();
+  check('POSITIVE CONTROL: unpinned, the very same op answers ok and the tab closes',
+    accepted.ok === true && after.length === before.length - 1 && !has(after, title),
+    `${JSON.stringify(accepted)} — ${titles(after)}`);
 }
 
 // === 10. a request main has already given up on is not run ==================

@@ -15,7 +15,11 @@
 //      failed to fire) but never crosses;
 //   5. unpinning restores the title and the close button and lands the tab at
 //      the head of the unpinned region;
-//   6. pinned state AND pinned order survive a restart.
+//   6. pinned state AND pinned order survive a restart;
+//   7. KAN-57: a RESTORED pinned tab refuses to close — the context menu's Close
+//      is greyed and clicking it is a no-op, and File ▸ Close Tab (Ctrl+W) takes
+//      nothing either — with unpin-then-close as the positive control. This
+//      block used to assert the opposite, and passed; that was the defect.
 //
 // Drag is dispatched as real DragEvents in three separate evaluate() calls, for
 // the reason spelled out at the top of groups.mjs: Chromium will not synthesise
@@ -80,6 +84,17 @@ async function tabMenu(win, i, itemText) {
   await win.locator('.ctx-item', { hasText: itemText }).first().click();
   await win.waitForTimeout(450);
 }
+
+/** Every context-menu row with its ENABLED state, leaving the menu OPEN — the
+ *  disabled flag is the whole point of the KAN-57 block below, so text alone is
+ *  not enough. (`tabMenuItems` reads labels only and dismisses.) */
+const tabMenuEntries = async (win, i) => {
+  await win.locator('.tab:not(.add)').nth(i).click({ button: 'right' });
+  await win.waitForTimeout(250);
+  return win.evaluate(() => [...document.querySelectorAll('.ctx-item')].map((el) => ({
+    label: el.textContent.trim(), disabled: el.classList.contains('disabled'),
+  })));
+};
 
 /** Every enabled item on a tab's context menu, then dismiss it via the backdrop. */
 async function tabMenuItems(win, i) {
@@ -245,7 +260,7 @@ let looseWidth;
 // Run 2: same profile, fresh process — does the pin survive?
 // ===========================================================================
 {
-  const { win, close } = await launchApp();
+  const { app, win, close } = await launchApp();
   await win.waitForSelector('.tab:not(.add)');
   await win.waitForTimeout(1500);
 
@@ -261,12 +276,80 @@ let looseWidth;
     `members=${JSON.stringify(memberIdx(s))} wrappers=${s.wrappers}`);
   check('the restored pinned tab is not in the group', !s.tabs[0].grouped, `${s.tabs[0].grouped}`);
 
-  // Closing a pinned tab still works, from the menu (there is no × on it).
-  await tabMenu(win, 0, /^Close$/);
-  const after = await strip(win);
-  check('a pinned tab can still be closed from the context menu',
-    after.tabs.length === s.tabs.length - 1 && !after.tabs.some((t) => t.name === 'C'),
-    names(after));
+  // --- KAN-57 INVERTED THIS BLOCK ------------------------------------------
+  // It used to read "a pinned tab can still be closed from the context menu",
+  // and it passed — that was the defect, written down as the contract. A pin is
+  // now a refusal on every route that closes a TAB, so the same four clicks
+  // assert the opposite. Inverted rather than deleted (the precedent is KAN-59
+  // doing the same to spaces.mjs's Ctrl+1..9 assertion): the route is still worth
+  // driving, only the expected answer changed.
+  //
+  // Why this lives HERE as well as in confirm.mjs §4: this pinned tab came back
+  // OFF DISK. confirm.mjs pins one in the session that then tests it, so it can
+  // only ever prove the guard holds for a freshly-pinned tab; a `pinned` flag
+  // that survives sanitize() but does not reach the menu's `disabled` decision
+  // is green there and red here.
+  {
+    // Soft, unlike the rest of this file: a REGRESSION here makes the later
+    // rows impossible (the tab this block is aiming at is already gone), and an
+    // escaping Playwright rejection would report one stack trace instead of the
+    // three FAILs that name what broke. Every step is still followed by an
+    // outcome check, so a click that silently did not happen is a FAIL too.
+    const softMenu = async (i, itemText) => {
+      await win.locator('.tab:not(.add)').nth(Math.max(0, i))
+        .click({ timeout: 3000, button: 'right' }).catch(() => {});
+      await win.waitForTimeout(250);
+      await win.locator('.ctx-item', { hasText: itemText }).first()
+        .click({ timeout: 3000 }).catch(() => {});
+      await win.waitForTimeout(450);
+      if (await win.locator('.ctx-backdrop').count()) {
+        await win.mouse.click(4, 4);
+        await win.waitForTimeout(200);
+      }
+    };
+    const menu = await tabMenuEntries(win, 0);
+    const closeItem = menu.find((e) => e.label === 'Close');
+    check('a RESTORED pinned tab offers Close greyed out, not missing — the refusal explains itself',
+      !!closeItem && closeItem.disabled === true,
+      JSON.stringify(closeItem ?? menu.map((e) => e.label)));
+    await win.locator('.ctx-item', { hasText: /^Close$/ }).first().click({ timeout: 3000 }).catch(() => {});
+    await win.waitForTimeout(400);
+    await win.mouse.click(4, 4);
+    await win.waitForTimeout(200);
+    const after = await strip(win);
+    check('CLICKING that greyed Close closes nothing — the pinned tab is still there',
+      after.tabs.length === s.tabs.length && after.tabs[0].name === 'C' && after.tabs[0].pinned,
+      names(after));
+
+    // The native File ▸ Close Tab (Ctrl+W) route: driven from the main process,
+    // because a native menu item is not in the DOM.
+    await win.locator('.tab:not(.add)').nth(0).click();
+    await win.waitForTimeout(300);
+    const fired = await app.evaluate(({ Menu }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById('file:close-tab');
+      if (!item) return false;
+      item.click();
+      return true;
+    });
+    await win.waitForTimeout(700);
+    const afterCtrlW = await strip(win);
+    check('Ctrl+W aimed at the restored pinned tab closes NOTHING',
+      fired && afterCtrlW.tabs.length === s.tabs.length && afterCtrlW.tabs[0].name === 'C',
+      `fired=${fired}, ${names(afterCtrlW)}`);
+
+    // POSITIVE CONTROL. Without it both refusals above are satisfied by a Close
+    // that never worked on this build at all.
+    await softMenu(0, 'Unpin tab');
+    const unpinned = await strip(win);
+    check('PRE-STATE for the control: C is unpinned, still open, and among the loose tabs',
+      unpinned.tabs.some((t) => t.name === 'C') && !unpinned.tabs.find((t) => t.name === 'C')?.pinned,
+      names(unpinned));
+    await softMenu(unpinned.tabs.findIndex((t) => t.name === 'C'), /^Close$/);
+    const closed = await strip(win);
+    check('POSITIVE CONTROL: unpinned, the very same menu row closes it',
+      closed.tabs.length === s.tabs.length - 1 && !closed.tabs.some((t) => t.name === 'C'),
+      names(closed));
+  }
 
   await close();
 }

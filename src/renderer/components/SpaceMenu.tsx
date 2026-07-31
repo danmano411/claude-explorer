@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Space } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
+import { deleteSpaceReason, type CloseRisk } from '../closeguard'
+import { ConfirmDialog } from './ConfirmDialog'
 // Styles live in index.css (the .spacemenu block, next to .recentmenu), matching
 // every other component here — the separate stylesheet only existed because
 // index.css was owned by a parallel M5 ticket during the fan-out.
@@ -47,10 +49,19 @@ export interface SpaceMenuProps {
   onCreate: (name: string) => void
   onRename: (id: string, name: string) => void
   onDelete: (id: string) => void
+  /** Pin / unpin a space (KAN-57). Gates exactly one operation — Delete — and
+   *  says nothing at all about the space's TABS. */
+  onTogglePin: (id: string, pinned: boolean) => void
+  /** What the delete confirm has to say about a space's tabs (KAN-57): the
+   *  live-work risk of each, and how many are PINNED — a space delete closes
+   *  those too, and the sentence has to admit it. App owns the join because
+   *  `status` is keyed by ptyId, not by tab id; this component only renders the
+   *  answer. */
+  tabsOf: (spaceId: string) => { risks: CloseRisk[]; pinnedCount: number }
 }
 
 export function SpaceMenu({
-  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete,
+  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, tabsOf,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -208,7 +219,18 @@ export function SpaceMenu({
                 Rename
               </button>
             </li>
-            {active && canDeleteSpace(uniqueSpaces.length) && (
+            {active && (
+              <li>
+                <button
+                  ref={(el) => registerItem(el)}
+                  className="spacemenu-item"
+                  onClick={() => { onTogglePin(active.id, !active.pinned); close() }}
+                >
+                  {active.pinned ? 'Unpin space' : 'Pin space'}
+                </button>
+              </li>
+            )}
+            {active && canDeleteSpace(uniqueSpaces.length, active.pinned) && (
               <li>
                 <button
                   ref={(el) => registerItem(el)}
@@ -223,32 +245,31 @@ export function SpaceMenu({
         </div>
       )}
 
+      {/* The shared ConfirmDialog (KAN-57), not a fourth hand-rolled
+          `.modal-backdrop`. `target` is resolved on every render, so a space
+          deleted or renamed underneath this modal is reflected in it — and a
+          space that has gone entirely renders nothing at all, rather than
+          leaving a dialog naming something that no longer exists. */}
       {confirmDeleteId && (() => {
         const target = uniqueSpaces.find((s) => s.id === confirmDeleteId)
         if (!target) return null
-        const count = target.tabIds.length
+        const { risks, pinnedCount } = tabsOf(target.id)
         return (
-          <div className="modal-backdrop" onClick={() => setConfirmDeleteId(null)}>
-            <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <p>Delete «{target.name}» and close its {count} tab{count === 1 ? '' : 's'}?</p>
-              <div className="modal-actions">
-                <button onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-                <button
-                  className="danger"
-                  onClick={() => {
-                    // Re-check: the menu item that opens this modal is
-                    // gated on canDeleteSpace too, but `spaces` can shrink
-                    // to 1 while the modal is still open (another tab/IPC
-                    // path deletes concurrently) — never delete the last one.
-                    if (canDeleteSpace(uniqueSpaces.length)) onDelete(target.id)
-                    setConfirmDeleteId(null)
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          </div>
+          <ConfirmDialog
+            request={{
+              reason: deleteSpaceReason(target.name, target.tabIds.length, risks, pinnedCount),
+              confirmLabel: 'Delete',
+              confirm: () => {
+                // Re-check: the menu item that opens this modal is gated on
+                // canDeleteSpace too, but `spaces` can shrink to 1 — or this
+                // space can be pinned — while the modal is still open (another
+                // path acting concurrently). Never delete the last one, and
+                // never one the user has since pinned.
+                if (canDeleteSpace(uniqueSpaces.length, target.pinned)) onDelete(target.id)
+              },
+            }}
+            onClose={() => setConfirmDeleteId(null)}
+          />
         )
       })()}
     </div>

@@ -279,6 +279,12 @@ export function sanitize(raw: unknown): Workspace {
       // a blank pane. Absent (a v0.4.0 file) is fine — restore falls back to
       // the first tab.
       activeTabId: s.activeTabId && tabIds.includes(s.activeTabId) ? s.activeTabId : undefined,
+      // Coerced rather than left to ride the `...s` spread: every other field
+      // read off disk is type-checked here, and a hand-edited `"pinned": "no"`
+      // would otherwise be truthy and lock the space's Delete forever with no UI
+      // that can explain it. `undefined` is dropped by JSON.stringify, so a
+      // pre-KAN-57 file round-trips with no new key (KAN-57).
+      pinned: s.pinned === true ? true : undefined,
       layout,
     }
   })
