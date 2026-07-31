@@ -205,7 +205,11 @@ const until = async (pred, ms = 15_000) => {
   }
 };
 
-const FIELDS = ['id', 'ptyId', 'view', 'cwd', 'title', 'terminalKind', 'status'];
+// KAN-64 added `agentSpawned` to the frozen set (src/shared/types.ts): the reap
+// in mcp.ts cannot tell a tab the spawn tool opened from a tab the user opened
+// without it. Still a whitelist, and `groupId` is still what it is really
+// watching for — M5's grouping model does not belong on this channel.
+const FIELDS = ['id', 'ptyId', 'view', 'cwd', 'title', 'terminalKind', 'status', 'agentSpawned'];
 
 /** Pick a row on the tab strip's context menu (section 9b pins from the UI —
  *  `pinned` is renderer state with no control op behind it). */
