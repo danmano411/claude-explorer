@@ -638,6 +638,10 @@ const flat = (t) => t.replace(/\s+/g, '');
     try { return JSON.parse(fs.readFileSync(p, 'utf8')).mcpServers.explorer; } catch { return null; }
   };
   const portOf = (srv) => Number(/:(\d+)\//.exec(srv?.url ?? '')?.[1] ?? 0);
+  // Every port this app run has ever announced to Claude Code. Section 9 kills
+  // the switch and then asks whether ANY of them is still accepting — checking
+  // only the newest would miss a listener that was leaked and then orphaned.
+  const seenPorts = new Set();
 
   /** Open the Settings modal the way Preferences… (Ctrl+,) does. */
   const openSettings = async () => {
@@ -734,6 +738,24 @@ const flat = (t) => t.replace(/\s+/g, '');
     await openSettings();
     check('the Settings modal has an agent-control toggle, and it is on',
       (await toggleState()) === true, String(await toggleState()));
+
+    // A save that does NOT change agentControl still runs the whole lifecycle,
+    // so startMcpServer() is called with a listener already bound — and it has
+    // to be a no-op. A second listen() binds a second port while the first
+    // socket stays bound with nothing holding its handle, and stopMcpServer()
+    // closes only the newest: the leak would go on serving all four tools, on
+    // the same token, straight through the kill switch. Nowhere else in this
+    // file saves with the switch already on, so this is the only exercise that
+    // line gets. The two assertions are the cause and the property: the port
+    // must not move, and (in 9) nothing we ever announced may survive the kill.
+    const beforeSave = portOf(cfg3());
+    seenPorts.add(beforeSave);
+    await setToggle(true);
+    const afterSave = portOf(cfg3());
+    seenPorts.add(afterSave);
+    check('a save that leaves the switch on does not bind a second listener',
+      afterSave === beforeSave && listeners(afterSave).length > 0,
+      `${beforeSave} -> ${afterSave}`);
   }
 
   // --- 9. off: the listener dies, and the next session gets nothing ---------
@@ -741,9 +763,12 @@ const flat = (t) => t.replace(/\s+/g, '');
   let port3 = 0;
   {
     port3 = portOf(cfg3());
+    seenPorts.add(port3);
     const alive = await connectProbe(port3);
     check('control: the port is open with the toggle still on', alive === 'open', alive);
 
+    // 8's last act was a save, which closed the modal.
+    await openSettings();
     await setToggle(false);
 
     // The app is still running — this is the one place the "no listener" claim
@@ -755,6 +780,13 @@ const flat = (t) => t.replace(/\s+/g, '');
     const lines = listeners(port3);
     check('and netstat agrees nothing is listening there any more',
       lines.length === 0, lines.join(', ') || 'nothing');
+
+    // The property, not the port: one surviving socket anywhere is the whole
+    // switch defeated, and the config file only ever names the newest.
+    const strays = [];
+    for (const p of seenPorts) if ((await connectProbe(p)) === 'open') strays.push(p);
+    check('and no port this app run ever announced is still accepting',
+      strays.length === 0, strays.join(', ') || `none of ${[...seenPorts].join(', ')}`);
 
     const disk = onDisk();
     check('settings.json gained agentControl:false and lost nothing',
