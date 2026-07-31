@@ -70,13 +70,33 @@ describe('closeReason', () => {
 
 describe('deleteSpaceReason', () => {
   it('matches the pre-KAN-57 wording exactly when nothing in the space is live', () => {
-    expect(deleteSpaceReason('Research', 3, [])).toBe('Delete «Research» and close its 3 tabs?')
-    expect(deleteSpaceReason('Research', 3, ['none', 'none'])).toBe('Delete «Research» and close its 3 tabs?')
+    expect(deleteSpaceReason('Research', 3, [], 0)).toBe('Delete «Research» and close its 3 tabs?')
+    expect(deleteSpaceReason('Research', 3, ['none', 'none'], 0)).toBe('Delete «Research» and close its 3 tabs?')
   })
 
   it('appends the live clause when the space holds a running session', () => {
-    const reason = deleteSpaceReason('Research', 2, ['claude', 'none'])
+    const reason = deleteSpaceReason('Research', 2, ['claude', 'none'], 0)
     expect(reason.startsWith('Delete «Research» and close its 2 tabs?')).toBe(true)
     expect(reason).toContain('running Claude session')
+  })
+
+  // KAN-57 review (D-4). Deleting a space closes its PINNED tabs — every other
+  // close route in the app refuses them, so the one route that does not has to
+  // say so, in the dialog, before the click.
+  it('admits that the delete will close the space\'s pinned tabs', () => {
+    const reason = deleteSpaceReason('Research', 3, ['none', 'none', 'none'], 1)
+    expect(reason).toBe(
+      'Delete «Research» and close its 3 tabs? 1 is pinned — deleting the space closes it anyway.')
+  })
+
+  it('pluralises the pinned clause, and states it alongside the live clause', () => {
+    expect(deleteSpaceReason('R', 4, [], 2)).toContain('2 are pinned — deleting the space closes them anyway.')
+    const both = deleteSpaceReason('R', 2, ['claude', 'none'], 1)
+    expect(both).toContain('running Claude session')
+    expect(both).toContain('1 is pinned')
+  })
+
+  it('says nothing about pinning when the space holds no pinned tab', () => {
+    expect(deleteSpaceReason('R', 2, ['claude', 'none'], 0)).not.toContain('pinned')
   })
 })

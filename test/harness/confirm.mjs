@@ -25,6 +25,11 @@
 //      second dialog left behind. Cancel is all-or-nothing.
 //   6. A pinned space offers no Delete, and unpinning brings it back.
 //   7. Both pins survive a restart.
+//   8. Switching space with the confirm still open (Ctrl+1..9 works over the
+//      modal's Cancel button) does NOT leave the origin space with a dead
+//      remembered tab and a blank window body when you come back to it.
+//   9. Deleting a space closes its PINNED tabs — kept deliberately — and the
+//      delete confirm names them, because every other close route refuses one.
 //
 // PTY LIVENESS. Two independent instruments, and the cheap one is calibrated
 // against the expensive one before it is trusted:
@@ -500,6 +505,121 @@ console.log('\n7. after a restart');
     unpinned.includes('Delete') && !unpinned.includes('Unpin space'), unpinned.join(' | '));
 
   await close();
+}
+
+// ===========================================================================
+// Run 3 — a fresh profile, two spaces. Both of these are review findings.
+// ===========================================================================
+{
+  const PROFILE3 = path.join(os.tmpdir(), `claude-explorer-confirm3-${process.pid}`);
+  fs.rmSync(PROFILE3, { recursive: true, force: true });
+  const { win, close } = await launchApp({ userDataDir: PROFILE3 });
+  await win.waitForSelector('.entry');
+  await win.waitForTimeout(600);
+
+  /** The three numbers that say whether the window body is showing anything. */
+  const shape = () => win.evaluate(() => ({
+    strip: document.querySelectorAll('.tab:not(.add)').length,
+    panes: document.querySelectorAll('.pane:not([hidden])').length,
+    active: document.querySelectorAll('.tab.active').length,
+    modals: document.querySelectorAll('.modal-backdrop').length,
+    space: document.querySelector('.spacemenu-name')?.textContent?.trim() ?? '',
+  }));
+  const toSpace = async (n) => {
+    await win.click('.tabbar');
+    await win.waitForTimeout(150);
+    await win.keyboard.press(`Control+${n}`);
+    await win.waitForTimeout(800);
+  };
+
+  // -------------------------------------------------------------------------
+  // 8. Switching space while the confirm is up must not blank the origin space.
+  //
+  // A confirm OUTLIVES the render that opened it, and Ctrl+1..9 is live while it
+  // is up (KAN-59 made it live over a focused terminal too; it was always live
+  // over the modal's own Cancel button). Continue then ran `closeTab` against
+  // WHICHEVER SPACE WAS ACTIVE BY THEN, so the origin space kept the dead id in
+  // `tabIds`, in its layout cell and as its remembered `activeTabId` — and
+  // coming back to it focused a tab that no longer existed:
+  //   BACK IN SPACE 1: {"strip":1,"panes":0,"active":0}  ← blank window body.
+  // The mechanism pre-dates KAN-57 (the control channel could reach it), but
+  // this is the route a human can walk.
+  // -------------------------------------------------------------------------
+  console.log('\n8. switching space with the confirm still open');
+  {
+    await tabMenu(win, 0, 'Open Terminal');
+    await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
+    await win.waitForTimeout(1500);
+    await createSpace(win, 'Two');   // lands ON Two
+    await toSpace(1);
+    const before = await shape();
+    check('PRE-STATE: space 1 shows a files tab, a live shell, and a pane',
+      before.strip === 2 && before.panes === 1 && before.active === 1 && before.space === 'Space',
+      JSON.stringify(before));
+
+    await closeX(win, 1);
+    await settleModal(win);
+    check('PRE-STATE: closing the live shell raised the confirm', (await modals(win)) === 1,
+      JSON.stringify(await shape()));
+
+    await win.keyboard.press('Control+2');   // focus is the modal's Cancel button
+    await win.waitForTimeout(700);
+    const away = await shape();
+    check('PRE-STATE: Ctrl+2 switched space with the dialog still up',
+      away.space === 'Two' && away.modals === 1, JSON.stringify(away));
+
+    await clickDanger(win);
+    await toSpace(1);
+    const back = await shape();
+    check('BACK IN THE ORIGIN SPACE: the surviving tab is on screen, not a blank window body',
+      back.panes === 1 && back.active === 1, JSON.stringify(back));
+    check('…and the confirm still closed the tab it was asked about',
+      back.strip === 1 && back.space === 'Space', JSON.stringify(back));
+  }
+
+  // -------------------------------------------------------------------------
+  // 9. Deleting a space closes its PINNED tabs — and the confirm says so.
+  //
+  // The BEHAVIOUR is deliberate and stays: a space delete is explicit, already
+  // behind its own dialog, and the tool for "do not delete this" is pinning the
+  // SPACE. What was wrong is that it happened silently while every other close
+  // route in the app refuses a pinned tab. The sentence is the fix.
+  // -------------------------------------------------------------------------
+  console.log('\n9. deleting a space names the pinned tabs it will close');
+  {
+    await toSpace(2);
+    await win.click('.tab.add');
+    await win.waitForTimeout(700);
+    await tabMenu(win, 0, 'Open Terminal');
+    await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
+    await win.waitForTimeout(1500);
+    await tabMenu(win, 0, 'Pin tab');
+    const pre = await shape();
+    check('PRE-STATE: «Two» holds 2 tabs, one pinned and one a live shell',
+      pre.space === 'Two' && pre.strip === 2
+      && (await win.locator('.tab.pinned').count()) === 1,
+      `${JSON.stringify(pre)} pinned=${await win.locator('.tab.pinned').count()}`);
+
+    await openSpaceMenu(win);
+    await softClick(win.locator('.spacemenu-item', { hasText: /^Delete$/ }));
+    await settleModal(win);
+    const said = await modalText(win);
+    check('the delete confirm still counts the tabs and the live work',
+      /^Delete «Two» and close its 2 tabs\? 1 is a live terminal, and that work is not saved anywhere\./
+        .test(said), said);
+    check('…AND admits it will close the pinned tab too',
+      /1 is pinned — deleting the space closes it anyway\./.test(said), said);
+
+    await clickDanger(win);
+    await win.waitForTimeout(800);
+    const after = await shape();
+    check('and it does: the pinned tab went with the space (the decision, asserted)',
+      after.space === 'Space' && (await win.locator('.tab.pinned').count()) === 0,
+      `${JSON.stringify(after)} pinned=${await win.locator('.tab.pinned').count()}`);
+  }
+
+  await close();
+  fs.rmSync(PROFILE3, { recursive: true, force: true });
 }
 
 fs.rmSync(BEAT, { force: true });

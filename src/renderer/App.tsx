@@ -652,6 +652,15 @@ export function App() {
 
   const closeTab = (id: string) => {
     const { tabs: nowTabs, spaces: nowSpaces, active: nowActive } = committed.current;
+    // THE SPACE THAT OWNS THE TAB, not the one you happen to be standing in
+    // (KAN-57 review). A confirm outlives the render that opened it, and Ctrl+1..9
+    // is live while it is up — so "close a live terminal, switch space, click
+    // Continue" used to remove the id from the WRONG space: the origin kept the
+    // dead id in `tabIds`, in its layout cell and as its remembered
+    // `activeTabId`, and coming back to it focused a tab that no longer existed —
+    // a blank window body. Falls back to the active space only when nothing owns
+    // the id, which `withoutTab`/`removeTab` then treat as the no-op it is.
+    const ownerId = nowSpaces.find((s) => s.tabIds.includes(id))?.id ?? activeSpaceIdRef.current;
     const t = nowTabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
     lastActivated.current.delete(id);
@@ -664,10 +673,10 @@ export function App() {
     // `removeTab` drops the id from its cell and takes the rectangle away only
     // when nothing is left in it.
     setSpaces((ss) => {
-      const removed = removeTabFromSpace(ss, activeSpaceIdRef.current, id);
+      const removed = removeTabFromSpace(ss, ownerId, id);
       if (removed === ss) return ss;
       return removed.map((s) =>
-        s.id === activeSpaceIdRef.current && s.layout
+        s.id === ownerId && s.layout
           ? withLayout(s, s.layout, removeTab(s.layout, id))
           : s);
     });
@@ -680,9 +689,11 @@ export function App() {
         // closeTabs loop shrinks it — intersected with `remaining`, which DOES
         // shrink across composed updaters, so KAN-44's "close the focused
         // member last" fix still lands on a real survivor.
-        const mine = new Set(
-          nowSpaces.find((s) => s.id === activeSpaceIdRef.current)?.tabIds ?? [],
-        );
+        // `ownerId` rather than the active space: this arm only runs when the
+        // closed tab IS the globally active one, in which case the two are the
+        // same space — but there is then exactly one right answer to "which
+        // strip re-picks focus", and it is the one the tab was on.
+        const mine = new Set(nowSpaces.find((s) => s.id === ownerId)?.tabIds ?? []);
         const survivors = remaining.filter((x) => mine.has(x.id));
         // Plain MRU. KAN-46 needed a "prefer a survivor that HAS a pane" pass
         // here, because the old model let a space member sit in no cell at all
@@ -745,12 +756,20 @@ export function App() {
   const requestClose = (ids: readonly string[], mode: 'ask' | 'now' = 'ask'): string[] => {
     const byId = new Map(committed.current.tabs.map((t) => [t.id, t] as const));
     const resolved = ids.map((i) => byId.get(i)).filter((t): t is Tab => t !== undefined);
-    // PINNED MEANS UN-CLOSABLE, everywhere. Hiding the `×` was never the
-    // guarantee it looked like: the context menu, Ctrl+W and the control
-    // channel all closed a pinned tab freely. The escape is Unpin, which sits
-    // one item above the (now greyed) Close in the same menu. Refused ids are
-    // dropped from the batch rather than failing it, so unpinning one tab of a
-    // group does not block closing the rest.
+    // PINNED MEANS UN-CLOSABLE ON EVERY ROUTE THAT CLOSES A TAB. Hiding the `×`
+    // was never the guarantee it looked like: the context menu, Ctrl+W and the
+    // control channel all closed a pinned tab freely. The escape is Unpin, which
+    // sits one item above the (now greyed) Close in the same menu. Refused ids
+    // are dropped from the batch rather than failing it, so unpinning one tab of
+    // a group does not block closing the rest.
+    //
+    // THE ONE EXCEPTION, and it is deliberate: deleting a SPACE closes its whole
+    // membership, pinned tabs included, and `onDeleteSpace` does not route
+    // through here. Deleting a space is an explicit act behind its own confirm,
+    // and the tool for "do not delete this" is pinning the SPACE — a tab pin
+    // gates tab closes, not space deletes. The delete confirm names the pinned
+    // members out loud (`deleteSpaceReason`) so the exception is stated where the
+    // user is, not only in this comment.
     const refused = resolved.filter((t) => t.pinned);
     const rest = resolved.filter((t) => !t.pinned);
     const doomed = rest.map((t) => t.id);
@@ -1018,11 +1037,14 @@ export function App() {
       case 'closeTab': {
         const { tabId } = req.args;
         if (!tabs.some((t) => t.id === tabId)) throw new Error(`control: unknown tab ${tabId}`);
-        // ponytail: `closeTab` revokes membership from the ACTIVE space, so
-        // closing a tab a background space owns leaves that space's `tabIds`
-        // holding a dead id — harmless (sliceOf drops it, sanitize() prunes it
-        // on the next write) but untidy. Scope this to `activeSpace` if a
-        // caller ever needs closing to be space-exact.
+        // Closing a tab a BACKGROUND space owns is space-exact: `closeTab`
+        // resolves the owner off `committed.current.spaces` rather than off
+        // whichever space is active. It did not used to, and the dead id it left
+        // in the background space's `tabIds` / layout cell / `activeTabId` was
+        // written off as untidy-but-harmless — until KAN-57's confirm (with
+        // KAN-59's Ctrl+1..9, live over a terminal AND over the modal's Cancel
+        // button) gave a human a way to reach the same state, where it renders
+        // as a blank window body. See `closeTab`.
         //
         // 'now': THE CONTROL CHANNEL DOES NOT CONFIRM, deliberately. There is
         // no human on it — main gives up after 15s, so a modal nobody answers
@@ -1726,9 +1748,12 @@ export function App() {
       // App owns the join because `status` is keyed by ptyId, not by tab id —
       // SpaceMenu only renders the answer. Every member of the space, not just
       // the visible ones: deleting it closes all of them.
-      risksOf={(spaceId): CloseRisk[] => {
-        const s = spaces.find((x) => x.id === spaceId);
-        return sliceOf(s?.tabIds ?? [], tabs).map((t) => closeRisk(t, status));
+      tabsOf={(spaceId): { risks: CloseRisk[]; pinnedCount: number } => {
+        const members = sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs);
+        return {
+          risks: members.map((t) => closeRisk(t, status)),
+          pinnedCount: members.filter((t) => t.pinned).length,
+        };
       }}
     />
   );

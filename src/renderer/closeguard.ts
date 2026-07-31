@@ -85,13 +85,31 @@ export function closeReason(risks: readonly CloseRisk[]): string | null {
   return `Close ${risks.length} tabs? ${phraseOf(risks)} — that work is not saved anywhere.`
 }
 
-/** The space-delete sentence. Byte-identical to the pre-KAN-57 wording when
- *  nothing in the space is live, so the common case reads unchanged; the live
- *  clause is the part that was missing, and it is the unrecoverable part. */
+/**
+ * The space-delete sentence. Byte-identical to the pre-KAN-57 wording when
+ * nothing in the space is live and nothing in it is pinned, so the common case
+ * reads unchanged; the live clause is the part that was missing, and it is the
+ * unrecoverable part.
+ *
+ * THE PINNED CLAUSE (KAN-57 review). Deleting a space closes its pinned tabs —
+ * `onDeleteSpace` closes the whole membership and does not route through
+ * `requestClose`'s pinned filter. That behaviour is deliberate: a space delete is
+ * explicit and already confirmed, and a space you do not want deleted can itself
+ * be pinned. What is NOT acceptable is doing it silently, when the same pin
+ * refuses every other close route in the app — so the sentence says so, and the
+ * user's pin means what the dialog says it means rather than what a comment
+ * elsewhere claims.
+ */
 export function deleteSpaceReason(
-  name: string, tabCount: number, risks: readonly CloseRisk[],
+  name: string, tabCount: number, risks: readonly CloseRisk[], pinnedCount: number,
 ): string {
   const base = `Delete «${name}» and close its ${tabCount} tab${tabCount === 1 ? '' : 's'}?`
   const p = phraseOf(risks)
-  return p ? `${base} ${p}, and that work is not saved anywhere.` : base
+  const clauses = [
+    ...(p ? [`${p}, and that work is not saved anywhere.`] : []),
+    ...(pinnedCount > 0
+      ? [`${pinnedCount} ${pinnedCount === 1 ? 'is pinned' : 'are pinned'} — deleting the space closes ${pinnedCount === 1 ? 'it' : 'them'} anyway.`]
+      : []),
+  ]
+  return clauses.length ? `${base} ${clauses.join(' ')}` : base
 }

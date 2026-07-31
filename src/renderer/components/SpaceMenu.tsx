@@ -52,14 +52,16 @@ export interface SpaceMenuProps {
   /** Pin / unpin a space (KAN-57). Gates exactly one operation — Delete — and
    *  says nothing at all about the space's TABS. */
   onTogglePin: (id: string, pinned: boolean) => void
-  /** The live-work risk of a space's tabs, for the delete confirm. App owns the
-   *  join because `status` is keyed by ptyId, not by tab id; this component only
-   *  renders the answer. */
-  risksOf: (spaceId: string) => CloseRisk[]
+  /** What the delete confirm has to say about a space's tabs (KAN-57): the
+   *  live-work risk of each, and how many are PINNED — a space delete closes
+   *  those too, and the sentence has to admit it. App owns the join because
+   *  `status` is keyed by ptyId, not by tab id; this component only renders the
+   *  answer. */
+  tabsOf: (spaceId: string) => { risks: CloseRisk[]; pinnedCount: number }
 }
 
 export function SpaceMenu({
-  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, risksOf,
+  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, tabsOf,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -251,10 +253,11 @@ export function SpaceMenu({
       {confirmDeleteId && (() => {
         const target = uniqueSpaces.find((s) => s.id === confirmDeleteId)
         if (!target) return null
+        const { risks, pinnedCount } = tabsOf(target.id)
         return (
           <ConfirmDialog
             request={{
-              reason: deleteSpaceReason(target.name, target.tabIds.length, risksOf(target.id)),
+              reason: deleteSpaceReason(target.name, target.tabIds.length, risks, pinnedCount),
               confirmLabel: 'Delete',
               confirm: () => {
                 // Re-check: the menu item that opens this modal is gated on

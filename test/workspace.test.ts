@@ -165,7 +165,17 @@ describe('sanitize', () => {
 
   // KAN-57.
   describe('pinned', () => {
-    it('round-trips pinned:true, including through a JSON write', () => {
+    // REGRESSION GUARD, not a discriminator (KAN-57 review, D-5). Deleting
+    // sanitize's `pinned: s.pinned === true ? true : undefined` leaves this
+    // GREEN, because the `...s` spread above it carries the field through raw —
+    // so it can never fail for a value that is already `true`, and no rewrite
+    // short of dropping the spread would change that. The line's real job is
+    // COERCION and ABSENCE, and the two assertions below are what hold it up
+    // ('coerces hand-edited garbage' is the one that reds). This one is kept
+    // because it is the only thing pinning the end-to-end claim the feature
+    // makes — a pinned space survives a write and a read — which would otherwise
+    // rest on nobody.
+    it('round-trips pinned:true, including through a JSON write  [REGRESSION GUARD]', () => {
       const w = base()
       w.spaces[0].pinned = true
       const out = sanitize(w)
