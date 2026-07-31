@@ -208,7 +208,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
           setConfirmRequest({
             reason: r.reason,
             typed: r.typed,
-            retry: async (word: string) => { if (await runGuarded(paths, make, word)) load(); },
+            confirm: async (word: string) => { if (await runGuarded(paths, make, word)) load(); },
           });
         } else notify(r.reason, 6000);
       } else notify('That item is busy — try again in a moment.');
@@ -252,7 +252,10 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   const newFile = () => createThenRename((c) => newFileCmd(dir, 'New file', c));
 
   const doDelete = async () => {
-    const paths = confirmDel; setConfirmDel(null);
+    // The dialog clears `confirmDel` itself, once this settles — so the modal
+    // stays up for the duration of the delete instead of vanishing and leaving
+    // the list looking untouched until the op lands.
+    const paths = confirmDel;
     if (!paths?.length) return;
     if (!(await runGuarded(paths, (c) => deleteCmd(paths, c)))) return;
     setSelection(emptySelection()); load();
@@ -509,16 +512,17 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       </ul>
       <StatusBar count={shown.length} selected={selection.indices.size} mode={mode} onToggleMode={toggleMode} />
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
+      {/* The shared ConfirmDialog (KAN-57), same as the policy round-trip below
+          — this was the third hand-rolled copy of the same markup. */}
       {confirmDel && (
-        <div className="modal-backdrop" onClick={() => setConfirmDel(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <p>Delete {confirmDel.length} item(s)? They can be restored with Ctrl+Z or from the Recycle Bin.</p>
-            <div className="modal-actions">
-              <button className="danger" onClick={doDelete}>Delete</button>
-              <button onClick={() => setConfirmDel(null)}>Cancel</button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          request={{
+            reason: `Delete ${confirmDel.length} item(s)? They can be restored with Ctrl+Z or from the Recycle Bin.`,
+            confirmLabel: 'Delete',
+            confirm: doDelete,
+          }}
+          onClose={() => setConfirmDel(null)}
+        />
       )}
       {confirmRequest && (
         <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />

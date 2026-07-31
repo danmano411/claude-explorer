@@ -103,7 +103,14 @@ import { reorder } from '../shared/tabreorder'
  * (`layout`) ride through the spreads untouched. Deliberately not a duplicate
  * `Space` interface.
  */
-export type Spaced = { id: string; name: string; tabIds: string[]; activeTabId?: string }
+export type Spaced = {
+  id: string
+  name: string
+  tabIds: string[]
+  activeTabId?: string
+  /** KAN-57. Absent means unpinned; see `Space.pinned` in ../shared/types.ts. */
+  pinned?: boolean
+}
 
 /**
  * A fresh, empty space.
@@ -168,6 +175,27 @@ export function renameSpace<T extends Spaced>(spaces: readonly T[], spaceId: str
 }
 
 /**
+ * Pins/unpins a space, which gates exactly one thing: `deleteSpace`.
+ *
+ * Unpinning DELETES the key rather than writing `false` (the `stripActiveTab`
+ * precedent), so a space that was never pinned and one that has been unpinned
+ * persist identically and neither writes a field a pre-KAN-57 reader would see.
+ *
+ * No-op (same reference) for an unknown spaceId or a state that already holds —
+ * the caller re-renders off identity like every other mutator here.
+ */
+export function setSpacePinned<T extends Spaced>(spaces: readonly T[], spaceId: string, pinned: boolean): T[] {
+  const i = spaces.findIndex((s) => s.id === spaceId)
+  if (i === -1) return spaces as T[]
+  if (!!spaces[i].pinned === pinned) return spaces as T[]
+  if (!pinned) {
+    const { pinned: _drop, ...rest } = spaces[i]
+    return replaceAt(spaces, i, rest as T)
+  }
+  return replaceAt(spaces, i, { ...spaces[i], pinned: true })
+}
+
+/**
  * Removes a space. `closedTabIds` is the membership it owned: those tabs go
  * away with it, and killing their PTYs is the caller's job (see the module
  * doc). Refused, never silently allowed, when it is the only space left.
@@ -181,6 +209,13 @@ export function renameSpace<T extends Spaced>(spaces: readonly T[], spaceId: str
  * `activeSpaceId` handed in named nothing — passing a stale one through
  * untouched just because it was not the space being deleted would hand the
  * caller a dangling id it never had a way to notice.
+ *
+ * `PINNED` (KAN-57) is checked here, in the data layer, and not only in the menu
+ * that hides the button: the refusal has to hold for every caller, and refusing
+ * BEFORE `closedTabIds` is built means a pinned space can never hand out the tab
+ * list whose PTYs the caller is licensed to kill. Order is identity → the user's
+ * explicit instruction → the structural floor, so a pinned lone space reports
+ * `PINNED` — the thing it can actually undo.
  */
 export function deleteSpace<T extends Spaced>(
   spaces: readonly T[],
@@ -188,9 +223,10 @@ export function deleteSpace<T extends Spaced>(
   spaceId: string,
 ):
   | { ok: true; spaces: T[]; activeSpaceId: string; closedTabIds: string[] }
-  | { ok: false; reason: 'NO_SUCH_SPACE' | 'LAST_SPACE' } {
+  | { ok: false; reason: 'NO_SUCH_SPACE' | 'PINNED' | 'LAST_SPACE' } {
   const i = spaces.findIndex((s) => s.id === spaceId)
   if (i === -1) return { ok: false, reason: 'NO_SUCH_SPACE' }
+  if (spaces[i].pinned) return { ok: false, reason: 'PINNED' }
   if (spaces.length <= 1) return { ok: false, reason: 'LAST_SPACE' }
 
   const closedTabIds = [...spaces[i].tabIds]

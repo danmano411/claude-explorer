@@ -20,8 +20,10 @@ import {
 } from '../shared/groups';
 import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
-  reorderInSpace, setActiveTab, switchSpace,
+  reorderInSpace, setActiveTab, setSpacePinned, switchSpace,
 } from './spaces';
+import { closeReason, closeRisk, type CloseRisk } from './closeguard';
+import type { ConfirmRequest } from './opresult';
 import type {
   ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
@@ -32,6 +34,7 @@ import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { SettingsModal } from './components/SettingsModal';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import { SpawnConfirm } from './components/SpawnConfirm';
 import { SpaceMenu } from './components/SpaceMenu';
 import { LONE_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } from './TabBar';
@@ -78,6 +81,10 @@ export function App() {
   /** The Ctrl+Shift+G arrangement picker (KAN-56). Just open/closed — it stages
    *  nothing, which is what makes Escape inert. */
   const [picker, setPicker] = useState(false);
+  /** The close confirm (KAN-57), or null. State-driven like every other modal
+   *  here rather than a promise-returning `confirm()` helper — a resolver
+   *  parked in a ref dangles if the component unmounts. */
+  const [pendingClose, setPendingClose] = useState<ConfirmRequest | null>(null);
   const status = usePtyStatus();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
@@ -538,7 +545,11 @@ export function App() {
   const menuHandler = useRef<(cmd: string, arg?: string) => void>(() => {});
   menuHandler.current = (cmd, arg) => {
     if (cmd === 'new-tab') addTab();
-    else if (cmd === 'close-tab') { if (active) closeTab(active); }
+    // Ctrl+W / File ▸ Close Tab. Through the chokepoint like everything else,
+    // so an ambient keystroke cannot kill a live session or a pinned tab — and
+    // a refusal here closes NOTHING, rather than falling through to a
+    // consolation victim.
+    else if (cmd === 'close-tab') { if (active) requestClose([active]); }
     else if (cmd === 'open-settings') setShowSettings(true);
     else if (arg && (cmd === 'open-path' || cmd === 'open-file')) {
       // Before restore commits, queue: setTabs(restored) would wipe this tab.
@@ -629,8 +640,41 @@ export function App() {
     });
   };
 
+  /**
+   * The COMMITTED tab list / space list / focus, for callbacks that OUTLIVE the
+   * render that created them (KAN-57).
+   *
+   * Every other closure in this file answers a click, so "this render's values"
+   * and "now" are the same instant. A confirm dialog breaks that: it stays open
+   * for as long as the user looks at it, and in that window a tab can be closed
+   * by the control channel, moved to another pane or another space, pinned, or
+   * have its pty exit. Acting on the closure that opened the dialog is exactly
+   * the KAN-37 shape — a replacing write computed from a stale snapshot — and
+   * here it would close whatever now sits at a name the user has already
+   * stopped looking at.
+   *
+   * Written from an effect with no dependency list, so it only ever holds state
+   * React has actually COMMITTED — never a value queued mid-render. During a
+   * synchronous burst (the `closeNow` loop) it does not move, which is
+   * precisely what the closure gave before, so nothing about the existing paths
+   * changes: `remaining` still shrinks across composed updaters and KAN-44's
+   * "close the focused member last" still lands on a real survivor.
+   */
+  const committed = useRef({ tabs, spaces, active });
+  useEffect(() => { committed.current = { tabs, spaces, active }; });
+
   const closeTab = (id: string) => {
-    const t = tabs.find((x) => x.id === id);
+    const { tabs: nowTabs, spaces: nowSpaces, active: nowActive } = committed.current;
+    // THE SPACE THAT OWNS THE TAB, not the one you happen to be standing in
+    // (KAN-57 review). A confirm outlives the render that opened it, and Ctrl+1..9
+    // is live while it is up — so "close a live terminal, switch space, click
+    // Continue" used to remove the id from the WRONG space: the origin kept the
+    // dead id in `tabIds`, in its layout cell and as its remembered
+    // `activeTabId`, and coming back to it focused a tab that no longer existed —
+    // a blank window body. Falls back to the active space only when nothing owns
+    // the id, which `withoutTab`/`removeTab` then treat as the no-op it is.
+    const ownerId = nowSpaces.find((s) => s.tabIds.includes(id))?.id ?? activeSpaceIdRef.current;
+    const t = nowTabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
     lastActivated.current.delete(id);
     // Route the space's layout through `removeTab` too, exactly like the "Close
@@ -642,23 +686,27 @@ export function App() {
     // `removeTab` drops the id from its cell and takes the rectangle away only
     // when nothing is left in it.
     setSpaces((ss) => {
-      const removed = removeTabFromSpace(ss, activeSpaceIdRef.current, id);
+      const removed = removeTabFromSpace(ss, ownerId, id);
       if (removed === ss) return ss;
       return removed.map((s) =>
-        s.id === activeSpaceIdRef.current && s.layout
+        s.id === ownerId && s.layout
           ? withLayout(s, s.layout, removeTab(s.layout, id))
           : s);
     });
     setTabs((ts) => {
       const remaining = closeTabList(ts, id);
-      if (id === active) {
+      if (id === nowActive) {
         // Re-pick from THIS SPACE's survivors: a tab another space owns is not
         // on this strip, and focusing it would leave the window showing a pane
         // with no tab. `mine` is this render's membership — a superset as a
         // closeTabs loop shrinks it — intersected with `remaining`, which DOES
         // shrink across composed updaters, so KAN-44's "close the focused
         // member last" fix still lands on a real survivor.
-        const mine = new Set(activeSpace?.tabIds ?? []);
+        // `ownerId` rather than the active space: this arm only runs when the
+        // closed tab IS the globally active one, in which case the two are the
+        // same space — but there is then exactly one right answer to "which
+        // strip re-picks focus", and it is the one the tab was on.
+        const mine = new Set(nowSpaces.find((s) => s.id === ownerId)?.tabIds ?? []);
         const survivors = remaining.filter((x) => mine.has(x.id));
         // Plain MRU. KAN-46 needed a "prefer a survivor that HAS a pane" pass
         // here, because the old model let a space member sit in no cell at all
@@ -674,6 +722,85 @@ export function App() {
       }
       return remaining;
     });
+  };
+
+  /**
+   * Close these ids for real, no questions. The ONLY caller of `closeTab`.
+   *
+   * Re-resolves every id against the COMMITTED tab list rather than against
+   * whatever was true when the caller decided — an id can name nothing by now
+   * (closed from the control channel, or by the pane it lived in going away),
+   * and a confirm must never act on a name that has since moved: dropping the
+   * unknown ones is what makes an orphaned confirm a no-op instead of a wrong
+   * close. `pinned` is re-checked here too, for the same reason SpaceMenu
+   * re-checks `canDeleteSpace` inside its own modal.
+   *
+   * KAN-44's ordering lives here rather than in the group-close loop it used to
+   * live in, because every close path now composes through this one: `closeTab`
+   * re-picks focus from `remaining`, which still holds the rest of the batch,
+   * so the call that sees `id === active` must be the one running against the
+   * already-shrunk list — i.e. the focused member goes last.
+   */
+  const closeNow = (ids: readonly string[]) => {
+    const byId = new Map(committed.current.tabs.map((t) => [t.id, t] as const));
+    const nowActive = committed.current.active;
+    const doomed = ids
+      .map((i) => byId.get(i))
+      .filter((t): t is Tab => t !== undefined && !t.pinned);
+    [...doomed.filter((t) => t.id !== nowActive), ...doomed.filter((t) => t.id === nowActive)]
+      .forEach((t) => closeTab(t.id));
+  };
+
+  /**
+   * THE CHOKEPOINT. Every close anything can ask for goes through here — the
+   * strip's `×`, the tab context menu, "Close group's tabs", File ▸ Close Tab /
+   * Ctrl+W, and the control channel — which is what makes the two guards below
+   * hold *everywhere* rather than on whichever path a ticket happened to name.
+   *
+   * Returns the ids it REFUSED. `[]` means the close is under way: immediately,
+   * or behind a confirm the caller cannot see and must not wait for.
+   *
+   * Always takes a LIST. That is the whole answer to "ask once for a group":
+   * one batch, one risk assessment, one modal. A single close is `[id]`, not a
+   * special case.
+   *
+   * `mode: 'now'` skips the CONFIRM only — never the pinned refusal.
+   */
+  const requestClose = (ids: readonly string[], mode: 'ask' | 'now' = 'ask'): string[] => {
+    const byId = new Map(committed.current.tabs.map((t) => [t.id, t] as const));
+    const resolved = ids.map((i) => byId.get(i)).filter((t): t is Tab => t !== undefined);
+    // PINNED MEANS UN-CLOSABLE ON EVERY ROUTE THAT CLOSES A TAB. Hiding the `×`
+    // was never the guarantee it looked like: the context menu, Ctrl+W and the
+    // control channel all closed a pinned tab freely. The escape is Unpin, which
+    // sits one item above the (now greyed) Close in the same menu. Refused ids
+    // are dropped from the batch rather than failing it, so unpinning one tab of
+    // a group does not block closing the rest.
+    //
+    // THE ONE EXCEPTION, and it is deliberate: deleting a SPACE closes its whole
+    // membership, pinned tabs included, and `onDeleteSpace` does not route
+    // through here. Deleting a space is an explicit act behind its own confirm,
+    // and the tool for "do not delete this" is pinning the SPACE — a tab pin
+    // gates tab closes, not space deletes. The delete confirm names the pinned
+    // members out loud (`deleteSpaceReason`) so the exception is stated where the
+    // user is, not only in this comment.
+    const refused = resolved.filter((t) => t.pinned);
+    const rest = resolved.filter((t) => !t.pinned);
+    const doomed = rest.map((t) => t.id);
+    if (doomed.length) {
+      const reason = mode === 'now' ? null : closeReason(rest.map((t) => closeRisk(t, status)));
+      // The common case — files, viewers, a finished Claude tab, a dead shell —
+      // is byte-for-byte what it was: one click, no modal, nothing awaited.
+      if (reason === null) closeNow(doomed);
+      else setPendingClose({
+        reason,
+        confirmLabel: doomed.length > 1 ? 'Close tabs' : 'Close tab',
+        // Cancel abandons the WHOLE batch, including the members that carried
+        // no risk: a half-completed group close the user just declined is a
+        // worse end state than either, and re-issuing it costs one right-click.
+        confirm: () => closeNow(doomed),
+      });
+    }
+    return refused.map((t) => t.id);
   };
 
   // Group-aware: the same positional move, plus "did it land inside a group's
@@ -766,24 +893,19 @@ export function App() {
       setTabs(next.tabs);
     },
     closeTabs: (groupId) => {
-      // closeTab already kills the pty and re-picks focus; it uses setTabs's
-      // functional form, so several calls in this loop compose (KAN-37). The
-      // empty-group prune above then drops the group itself.
+      // ONE call, not a loop of them — which is the whole of how a group close
+      // asks ONCE: `requestClose` assesses the batch and raises at most one
+      // modal for it. The KAN-44 "close the focused member last" ordering moved
+      // into `closeNow` with the rest of the close mechanics.
       //
-      // closeTab's re-pick, though, reads `active` from ITS OWN render
-      // closure — so only the FIRST call in this loop can win that race, and
-      // it picks from `remaining`, which still contains every other doomed
-      // member. Closing the focused member last means the call that actually
-      // sees `id === active` is the one running against the already-shrunk
-      // list, so it picks a real survivor instead of stranding `active` on a
-      // tab that no longer exists (KAN-44 review #1).
-      // Scoped to THIS strip's slice: `closeTab` revokes membership from the
-      // ACTIVE space, so it may only ever be handed tabs this space owns — and
-      // a group that also has members in another pane keeps those (the chip you
-      // right-clicked is the one you closed).
-      const doomed = sliceFor(key).filter((t) => t.groupId === groupId);
-      [...doomed.filter((t) => t.id !== active), ...doomed.filter((t) => t.id === active)]
-        .forEach((t) => closeTab(t.id));
+      // Scoped to THIS strip's slice because the chip you right-clicked is the
+      // one you closed: a group that also has members in another pane keeps
+      // those. NOT because `closeTab` needs it to be — it resolves the owning
+      // space itself since the KAN-57 review, and handing it a tab from another
+      // space is space-exact rather than corrupting. A pinned tab can never be
+      // in this batch (`setPinned` strips `groupId`), so nothing here can be
+      // refused.
+      requestClose(sliceFor(key).filter((t) => t.groupId === groupId).map((t) => t.id));
     },
   });
 
@@ -934,12 +1056,32 @@ export function App() {
       case 'closeTab': {
         const { tabId } = req.args;
         if (!tabs.some((t) => t.id === tabId)) throw new Error(`control: unknown tab ${tabId}`);
-        // ponytail: `closeTab` revokes membership from the ACTIVE space, so
-        // closing a tab a background space owns leaves that space's `tabIds`
-        // holding a dead id — harmless (sliceOf drops it, sanitize() prunes it
-        // on the next write) but untidy. Scope this to `activeSpace` if a
-        // caller ever needs closing to be space-exact.
-        closeTab(tabId);
+        // Closing a tab a BACKGROUND space owns is space-exact: `closeTab`
+        // resolves the owner off `committed.current.spaces` rather than off
+        // whichever space is active. It did not used to, and the dead id it left
+        // in the background space's `tabIds` / layout cell / `activeTabId` was
+        // written off as untidy-but-harmless — until KAN-57's confirm (with
+        // KAN-59's Ctrl+1..9, live over a terminal AND over the modal's Cancel
+        // button) gave a human a way to reach the same state, where it renders
+        // as a blank window body. See `closeTab`.
+        //
+        // 'now': THE CONTROL CHANNEL DOES NOT CONFIRM, deliberately. There is
+        // no human on it — main gives up after 15s, so a modal nobody answers
+        // turns every agent `closeTab` into the one error ControlOp's own doc
+        // says must never be auto-retried. A caller that named a tab id by hand
+        // has already been explicit; the modal exists to catch the misclick,
+        // and there is no click.
+        // ponytail: if KAN-40 ever exposes closeTab as an MCP tool the caller
+        // becomes a fallible model, and the op then wants `args.force?: boolean`
+        // (refuse a live tab, opt in) rather than a modal. Today mcp.ts exposes
+        // listTabs only — do not add it before then.
+        //
+        // The pinned refusal is NOT skipped, and it is reported rather than
+        // swallowed: the drain turns this throw into the channel's existing
+        // typed `{ ok: false, error }` shape, exactly like the unknown-tab
+        // refusal above.
+        if (requestClose([tabId], 'now').length)
+          throw new Error(`control: tab ${tabId} is pinned`);
         return null;
       }
       case 'openViewerTab':
@@ -1628,7 +1770,9 @@ export function App() {
     splitActions,
     status,
     onSelect: selectTab,
-    onClose: closeTab,
+    // Both the `×` and the context menu's Close land here (KAN-57) — never on
+    // `closeTab`, which `closeNow` is now the only caller of.
+    onClose: (id: string) => { requestClose([id]); },
     onAdd: () => addTab(key),
     onReorder: reorderTabs(key),
     onReorderGroup: reorderGroup(key),
@@ -1648,6 +1792,17 @@ export function App() {
       onCreate={onCreateSpace}
       onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
       onDelete={onDeleteSpace}
+      onTogglePin={(id, pinned) => setSpaces((ss) => setSpacePinned(ss, id, pinned))}
+      // App owns the join because `status` is keyed by ptyId, not by tab id —
+      // SpaceMenu only renders the answer. Every member of the space, not just
+      // the visible ones: deleting it closes all of them.
+      tabsOf={(spaceId): { risks: CloseRisk[]; pinnedCount: number } => {
+        const members = sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs);
+        return {
+          risks: members.map((t) => closeRisk(t, status)),
+          pinnedCount: members.filter((t) => t.pinned).length,
+        };
+      }}
     />
   );
 
@@ -1802,8 +1957,11 @@ export function App() {
         />
       )}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
-      {/* Last, so it is over every other modal: whatever else is open, this is
-          the one asking to run code. */}
+      {pendingClose && (
+        <ConfirmDialog request={pendingClose} onClose={() => setPendingClose(null)} />
+      )}
+      {/* Last, so it is over every other modal — including KAN-57's close confirm
+          above: whatever else is open, this is the one asking to run code. */}
       {spawnAsk && <SpawnConfirm request={spawnAsk} onAnswer={answerSpawn} />}
     </div>
   );
