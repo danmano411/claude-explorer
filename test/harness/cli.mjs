@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { launchApp } from './app.mjs';
 
 const require = createRequire(import.meta.url);
@@ -53,10 +54,14 @@ const check = (name, pass, detail = '') => {
  * it to die. Resolves the exit code, or null if it was still alive after 6 s —
  * which is what "it became a second app instead of forwarding" looks like.
  */
-function secondInstance(...args) {
-  const child = spawn(ELECTRON, [`--user-data-dir=${PROFILE}`, ENTRY, ...args], {
+function fireSecondInstance(...args) {
+  return spawn(ELECTRON, [`--user-data-dir=${PROFILE}`, ENTRY, ...args], {
     cwd: ROOT, stdio: 'ignore',
   });
+}
+
+function secondInstance(...args) {
+  const child = fireSecondInstance(...args);
   return new Promise((resolve) => {
     const t = setTimeout(() => { child.kill(); resolve(null); }, 6_000);
     child.once('exit', (code) => { clearTimeout(t); resolve(code); });
@@ -72,12 +77,20 @@ const activeTitle = (win) =>
   win.locator('.tab.active').first().textContent().then(clean);
 
 let beforeRestart; // instance 1's tab titles, for the restore-race check
+let baselineMs;    // instance 1's launch→tab-strip time, the BEFORE number for check 7
 
 // --- instance 1: cold start straight onto a path ---------------------------
 console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
 {
+  const launchedAt = Date.now();
   const { win, close } = await launchApp({ userDataDir: PROFILE, extraArgs: ['--open', ROOT] });
   await win.waitForSelector('.tab:not(.add)');
+  // The same measurement check 7 makes, on the same code path, with a --open
+  // the OS can answer instantly — i.e. what a launch costs on this machine
+  // right now. Taken here rather than hardcoded because these harnesses run
+  // alongside builds in other worktrees and a fixed millisecond budget would
+  // either flake under load or be too loose to catch anything.
+  baselineMs = Date.now() - launchedAt;
   await win.waitForTimeout(2_000); // restore + the gated argv tab behind it
 
   // 1. cold start lands on the path. Fresh profile, so: the home tab plus ours.
@@ -163,6 +176,75 @@ console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
   check('an unreachable path opens no tab and still exits 0',
     badCode === 0 && afterBad === beforeBad, `exit ${badCode}, ${beforeBad} -> ${afterBad} tabs`);
 
+  // 6. KAN-65 — the DoS. `--open \\10.255.255.n\s` makes the app canonicalize
+  //    AND stat a path whose SMB host never answers: ~21 s per syscall (21,056
+  //    ms measured), negative-cached per host so a different n stalls fresh
+  //    every time. Spelt synchronously in main that was ~42 s of pinned process
+  //    per launch — no IPC, no pty:data forwarding, no menu, no paint — from an
+  //    unauthenticated one-line loop, because anyone who can start a process as
+  //    this user can send that.
+  //
+  //    The probe is a REAL filesystem round-trip — fs:list, i.e. a readdir plus
+  //    a stat per row, in main — and NOT an event-loop ping. That distinction is
+  //    the whole reason the fix serialises as well as awaits: `await` moves the
+  //    stall off the event loop but not off libuv's four-thread pool, so timers
+  //    keep firing and a ping reports a perfectly healthy app while every fs
+  //    call in it is parked for 20 s.
+  //
+  //    Timed HERE, not inside the renderer with performance.now(). Playwright
+  //    reaches the page through the browser process's CDP endpoint, so a frozen
+  //    main blocks the evaluate itself: the in-page clock never starts and
+  //    honestly reports 20 ms for a call the harness waited 20.8 SECONDS for.
+  //    That spelling passed against the frozen build. Wall clock around the
+  //    whole round trip is the only number that cannot be fooled that way, and
+  //    the race is what stops a truly wedged main from hanging the harness (the
+  //    evaluate is left to settle on its own — hence the bare catch).
+  const probe = async () => {
+    const t = Date.now();
+    const p = win.evaluate((dir) => window.api.fsList(dir).then(() => true, () => true), ROOT);
+    p.catch(() => {});
+    const ok = await Promise.race([p, new Promise((r) => setTimeout(() => r(false), 40_000))]);
+    return [Date.now() - t, ok === true];
+  };
+
+  const [idleMs] = await probe();
+  // Four, not one: four is what it takes to hold every libuv worker, and it is
+  // one line of shell. Distinct hosts because Windows negative-caches per host
+  // — measured here, realpathSync.native on a cold \\10.255.255.n\s is 21,033
+  // ms and on a warm one is 0 ms, so reusing a host would make the flood free
+  // after the first launch.
+  const floodAt = Date.now();
+  const flood = [21, 22, 23, 24].map((n) =>
+    fireSecondInstance('--open', `\\\\10.255.255.${n}\\s`));
+  // A child exits only after requestSingleInstanceLock has handed its payload to
+  // the primary's message loop, so "it exited 0" is the witness that main really
+  // was asked to resolve a dead host — without it a probe that merely ran before
+  // the children got going would pass against the very build this exists to
+  // fail. Against the frozen build they cannot exit (their SendMessage is
+  // waiting on a message loop that is inside realpathSync), which is the same
+  // symptom seen from the other end.
+  const exits = Promise.all(flood.map((c) => new Promise((r) => {
+    const t = setTimeout(() => r(false), 45_000);
+    c.once('exit', (code) => { clearTimeout(t); r(code === 0); });
+  })));
+
+  // Sampled across the whole resolution window rather than once: the launches
+  // are handled one at a time, and the worst sample is the one that counts.
+  let floodMs = 0;
+  let floodOk = true;
+  while (Date.now() - floodAt < 30_000) {
+    const [ms, ok] = await probe();
+    floodMs = Math.max(floodMs, ms);
+    if (!ok) { floodOk = false; break; }
+    await win.waitForTimeout(250);
+  }
+  const forwarded = (await exits).filter(Boolean).length;
+  check('the window still serves a real filesystem request while four unreachable UNC --opens resolve',
+    floodOk && floodMs < 3_000 && forwarded === flood.length,
+    `folder listing: ${idleMs}ms idle -> worst ${floodMs}ms under the flood`
+      + `${floodOk ? '' : ' (never completed)'}; ${forwarded}/${flood.length} launches forwarded and exited 0`);
+  for (const c of flood) c.kill();
+
   beforeRestart = await titles(win);
   await win.waitForTimeout(1_500); // the debounced workspace save is 400ms
   await close();
@@ -200,6 +282,69 @@ console.log('\ninstance 2 — relaunch with --open, expect restore + one appende
     `last "${ts[ts.length - 1]}", active index ${activeIndex} of ${ts.length}`);
 
   await close();
+}
+
+// --- instance 3: the COLD-START half of the DoS ----------------------------
+// KAN-65 has two halves and check 6 only covers one of them: it fires --opens
+// at an app that is already up. This is the launch itself, which is where the
+// old code did its damage first — whenReady resolved argv BEFORE createWindow(),
+// so `"Claude Explorer.exe" --open \\10.255.255.n\s` bought ~21 s of no window
+// at all, from an unauthenticated caller. Putting one `await` back in front of
+// createWindow() restores exactly that (measured: 23.3 s to first window) and
+// leaves every other check in this file green, which is why this one exists.
+console.log('\ninstance 3 — cold start with --open on an unreachable UNC host');
+{
+  const dead = (n) => `\\\\10.255.255.${n}\\s`;
+  // Random octets, and two DIFFERENT ones. Windows negative-caches an SMB host
+  // that never answers, so a hardcoded number would be answered from cache on a
+  // re-run minutes later: the launch would be fast for the wrong reason and this
+  // check would pass against a frozen build without anything ever stalling —
+  // vacuous, which is worse than absent. The witness gets its own host for the
+  // same reason: resolving one here must not warm the one the app is given.
+  const host = 30 + Math.floor(Math.random() * 100);
+  const witnessHost = host + 100;
+  // Started BEFORE the launch, in THIS process: an independent measurement of
+  // what the app is being asked to do. If an unreachable UNC host stops costing
+  // ~21 s on this machine (different network, a DNS/SMB stack that fails fast),
+  // the number below proves nothing — so say so and fail, rather than pass for
+  // free. It runs concurrently, so it costs no wall clock the app was not going
+  // to spend anyway; it is a separate process from the app, so it competes for
+  // none of main's four libuv workers.
+  const witnessAt = Date.now();
+  const witness = promisify(fs.realpath.native)(dead(witnessHost))
+    .then(() => Date.now() - witnessAt, () => Date.now() - witnessAt);
+
+  // Its own throwaway profile: a genuine cold start with nothing to restore, so
+  // this is comparable with the baseline, and not the primary for PROFILE.
+  const coldProfile = `${PROFILE}-cold`;
+  fs.rmSync(coldProfile, { recursive: true, force: true });
+  const at = Date.now();
+  let coldMs;
+  let tabs = 0;
+  try {
+    // 60 s, well past the ~30 s two of these syscalls cost back to back: a
+    // launch that never produces a window must be reported as a FAILURE with a
+    // number, not as an exception that takes the whole harness down.
+    const { win, close } = await launchApp({
+      userDataDir: coldProfile, extraArgs: ['--open', dead(host)], timeout: 60_000,
+    });
+    await win.waitForSelector('.tab:not(.add)', { timeout: 60_000 });
+    coldMs = Date.now() - at;
+    tabs = (await titles(win)).length;
+    await close();
+  } catch (e) {
+    coldMs = Date.now() - at;
+    console.log(`  (launch never gave a usable window: ${e.message.split('\n')[0]})`);
+  }
+  const witnessMs = await witness;
+  // Only the home tab: the dead path is unreachable, so it opens nothing (check
+  // 5's rule) — and a painted tab strip is the proof the window is really up and
+  // running its renderer, not merely a handle Playwright got hold of.
+  check('a cold start whose argv names an unreachable UNC host still paints its window immediately',
+    witnessMs > 5_000 && coldMs < baselineMs + 8_000 && tabs === 1,
+    `window + tab strip in ${coldMs}ms (baseline ${baselineMs}ms for a local --open), ${tabs} tab; `
+      + `${dead(witnessHost)} took ${witnessMs}ms to resolve here`
+      + (witnessMs > 5_000 ? '' : ' — NOT SLOW, so this check proved nothing'));
 }
 
 const failed = results.filter((r) => !r.pass);

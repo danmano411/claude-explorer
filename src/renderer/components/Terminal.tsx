@@ -147,6 +147,20 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
     // terminal, and pasting would be the one action that throws it away. So a
     // right-click on a selection is a no-op, deliberately.
     // term.paste, not ptyWrite, so bracketing matches Ctrl+V.
+    //
+    // KAN-63, decided: when the application has requested mouse tracking, a
+    // right-click puts BOTH the SGR button-2 press/release AND this paste on
+    // the wire. Windows Terminal suppresses its own paste in that case, on the
+    // grounds that the app asked for the mouse. We deliberately do not. Claude
+    // Code requests tracking and does nothing with button-2, and a Claude tab
+    // is exactly where a user wants right-click paste — matching Windows
+    // Terminal would cost the feature its main use to protect a TUI nobody
+    // here runs. Two consequences to know before changing this: `vim -c 'set
+    // mouse=a'` in a tab both moves the cursor and pastes, and because xterm
+    // forwards mouse events instead of selecting under tracking,
+    // `hasSelection()` is always false there — so the selection exception
+    // above only ever fires in a plain shell. Revisit if a real mouse TUI
+    // becomes a normal thing to run in a tab.
     const el = ref.current;
     const onContextMenu = () => {
       if (term.hasSelection()) return;

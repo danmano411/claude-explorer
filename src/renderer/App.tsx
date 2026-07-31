@@ -22,7 +22,7 @@ import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, setSpacePinned, switchSpace,
 } from './spaces';
-import { closeReason, closeRisk, type CloseRisk } from './closeguard';
+import { closeReason, closeRisk, moveTabReason, type CloseRisk } from './closeguard';
 import type { ConfirmRequest } from './opresult';
 import type {
   ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
@@ -85,6 +85,11 @@ export function App() {
    *  here rather than a promise-returning `confirm()` helper — a resolver
    *  parked in a ref dangles if the component unmounts. */
   const [pendingClose, setPendingClose] = useState<ConfirmRequest | null>(null);
+  /** The move-to-another-space confirm (KAN-66), or null. Its OWN state rather
+   *  than a second use of `pendingClose`: nothing is being closed, so sharing
+   *  the field would put two unrelated questions behind one nullable and let a
+   *  close confirm and a move confirm silently overwrite each other. */
+  const [pendingMove, setPendingMove] = useState<ConfirmRequest | null>(null);
   const status = usePtyStatus();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
@@ -1234,6 +1239,124 @@ export function App() {
     setActive(focusOf(r.spaces.find((s) => s.id === r.activeSpaceId)));
   };
 
+  // --- moving a tab / a group to another space (KAN-66) ---------------------
+  //
+  // `addTabToSpace` IS the move primitive and has been since KAN-45: it evicts
+  // the id from every OTHER space before appending, which is the only reason the
+  // exactly-one-owner invariant survives (spaces.ts). So there is no second
+  // primitive here, and in particular NO `removeTabFromSpace` call — doing both
+  // would revoke membership twice and, on any path where the add is refused,
+  // leave the tab owned by nobody: unreachable, with a live pty nothing can
+  // close.
+  //
+  // The DESTINATION needs no GRID placement step. A member with no `GridCell` is
+  // a legal (not broken) state, and the `layout` memo above adopts one into the
+  // focused pane the moment that space is rendered — its comment names "moved to
+  // another space" as the case it exists for, and `migrateLayout` does the same
+  // repair on the persisted copy.
+  //
+  // It does need an ORDER step, for a PINNED tab only. `addTabToSpace` appends,
+  // which is right for the ordinary tab it was written for and wrong for a
+  // pinned one: the strip holds every pinned tab left of every unpinned one
+  // (`normalize`, shared/groups.ts), so appending draws it at the far RIGHT —
+  // and then `sanitize()`, which normalizes on write as well as on read, hoists
+  // it to the front on disk, so the tab silently jumps to the other end of the
+  // strip on the next launch. Slid to the seam here with the same
+  // `reorderInSpace` the drag uses. Not a second normalizer (spaces.ts is
+  // explicit that repair lives in `sanitize()` and nowhere else): this is the
+  // caller placing its own insert, exactly as `setPinned` does for a pin.
+  //
+  // The SOURCE does. `addTabToSpace` only touches `tabIds`, so a split source
+  // space is left with a `GridCell` naming a tab it no longer owns. `closeTab`
+  // carries this exact obligation and this mirrors it: the render-time `compact`
+  // hides the hole while you are looking at that space, but the layout WRITTEN
+  // to disk still has the dead cell, and a hole whose track a neighbour still
+  // occupies never compacts away — so it comes back on restart (KAN-46 #2).
+  const spacesAfterMove = (ss: Space[], spaceId: string, ids: readonly string[]): Space[] => {
+    const isPinned = new Set(committed.current.tabs.filter((t) => t.pinned).map((t) => t.id));
+    return ids.reduce((acc, id) => {
+      const ownerId = acc.find((s) => s.tabIds.includes(id))?.id;
+      const added = addTabToSpace(acc, spaceId, id);
+      if (added === acc) return acc; // unknown space, or already a member
+      const dest = added.find((s) => s.id === spaceId)!;
+      const next = isPinned.has(id)
+        ? reorderInSpace(added, spaceId, dest.tabIds.length - 1,
+            dest.tabIds.filter((x) => x !== id && isPinned.has(x)).length)
+        : added;
+      return next.map((s) => {
+        if (s.id !== ownerId || !s.layout) return s;
+        const vacated = removeTab(s.layout, id);
+        // Same reference when the tab had no cell: rewriting `tabIds` from the
+        // cells then would drop any OTHER un-celled member out of the space.
+        return vacated === s.layout ? s : withLayout(s, s.layout, vacated);
+      });
+    }, ss);
+  };
+
+  /**
+   * Move `ids`, in order, into `spaceId`. The one place either route lands.
+   *
+   * Resolved against the COMMITTED state, not this render's closure: the confirm
+   * below outlives the render that opened it, and Ctrl+1..9 is live while it is
+   * up — the same hazard `closeTab` documents.
+   *
+   * `ungroup` strips the groupId, and is true for exactly one case: a grouped
+   * tab moving ON ITS OWN (see `moveTabReason`). A whole group keeps its
+   * members' tags, because `Workspace.groups` is a flat registry — the run just
+   * reappears in the destination strip and `normalize()` closes it up there.
+   *
+   * The user is NOT taken to the destination. They are still looking at the
+   * space they moved the tab out of; only `active` re-picks, and only when the
+   * tab that left was the one with focus, exactly as a close does.
+   */
+  const moveToSpace = (ids: readonly string[], spaceId: string, ungroup: boolean) => {
+    const { spaces: nowSpaces, active: nowActive } = committed.current;
+    if (!ids.length || !nowSpaces.some((s) => s.id === spaceId)) return;
+    const ownerId = nowSpaces.find((s) => ids.some((id) => s.tabIds.includes(id)))?.id;
+    if (!ownerId || ownerId === spaceId) return;
+    if (ungroup)
+      setTabs((ts) => ts.map((t) => {
+        if (!ids.includes(t.id) || t.groupId === undefined) return t;
+        const { groupId: _drop, ...rest } = t;
+        return rest;
+      }));
+    setSpaces((ss) => spacesAfterMove(ss, spaceId, ids));
+    // Re-run against the committed list for the focus decision only — the
+    // `onDeleteSpace` idiom: the write above is the functional one, this is a
+    // synchronous side effect that depends on nothing else being queued.
+    if (ids.includes(nowActive) && ownerId === activeSpaceIdRef.current)
+      setActive(focusOf(spacesAfterMove(nowSpaces, spaceId, ids).find((s) => s.id === ownerId)));
+  };
+
+  const moveTabToSpace = (tabId: string, spaceId: string) => {
+    const { tabs: nowTabs, spaces: nowSpaces } = committed.current;
+    const t = nowTabs.find((x) => x.id === tabId);
+    // A tab already in that space is not a move, so there is nothing to ask
+    // about. `moveToSpace` declines the same case, but it does so BELOW the
+    // confirm — so without this guard a grouped tab raises a dialog naming a
+    // consequence, the user accepts it, and nothing whatsoever happens. The menu
+    // route cannot reach it (the submenu filters the owning space out); the DROP
+    // route can, and the owning space's own row is the one nearest the pointer
+    // when the switcher springs open under the drag.
+    if (!t || nowSpaces.find((s) => s.tabIds.includes(tabId))?.id === spaceId) return;
+    const reason = moveTabReason(t.groupId !== undefined);
+    // null means do not prompt AT ALL — the ungrouped tab, the pinned tab and
+    // the whole-group move all move on one click, with no modal.
+    if (reason === null) { moveToSpace([tabId], spaceId, false); return; }
+    setPendingMove({ reason, confirmLabel: 'Move tab', confirm: () => moveToSpace([tabId], spaceId, true) });
+  };
+
+  const moveGroupToSpace = (groupId: string, spaceId: string) => {
+    const { tabs: nowTabs, spaces: nowSpaces } = committed.current;
+    const byId = new Map(nowTabs.map((t) => [t.id, t] as const));
+    // In the OWNING space's order, so the run arrives the way it read. A group
+    // lives in exactly one space (TabBar's "Add to …" filter is what keeps it
+    // that way), so this is also every member there is.
+    const owner = nowSpaces.find((s) => s.tabIds.some((id) => byId.get(id)?.groupId === groupId));
+    if (!owner) return;
+    moveToSpace(owner.tabIds.filter((id) => byId.get(id)?.groupId === groupId), spaceId, false);
+  };
+
   // Ctrl+1..9 selects the nth space.
   //
   // KAN-59: this used to be gated by `isTypingTarget`, which made it dead
@@ -1778,6 +1901,13 @@ export function App() {
    * a coordinate — the list, and where its order is written back to — which is
    * what `key` threads through `applyToSlice` / `reorderTabs` / `togglePin`.
    */
+  /** Where "Move Tab to ▸" can send something (KAN-66). Every strip in the
+   *  window draws ONE space — the active one — so "except the tab's own space"
+   *  is "except the active space", and App is the only place that knows it. */
+  const otherSpaces = spaces
+    .filter((s) => s.id !== activeSpaceId)
+    .map((s) => ({ id: s.id, name: s.name }));
+
   const stripProps = (key: CellKey | null, list: Tab[]) => ({
     tabs: list,
     groups,
@@ -1796,6 +1926,9 @@ export function App() {
     onOpenExplorer,
     onOpenTerminal,
     onOpenIde,
+    otherSpaces,
+    onMoveTabToSpace: moveTabToSpace,
+    onMoveGroupToSpace: moveGroupToSpace,
     paneKey: key,
   });
 
@@ -1808,6 +1941,12 @@ export function App() {
       onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
       onDelete={onDeleteSpace}
       onTogglePin={(id, pinned) => setSpaces((ss) => setSpacePinned(ss, id, pinned))}
+      // KAN-66: dropping a tab / a group on a space row is the same operation
+      // the strip's "Move Tab to ▸" is, down to the same function — so the
+      // confirm, the source-pane cleanup and the focus re-pick cannot drift
+      // between the gesture and the menu.
+      onMoveTab={moveTabToSpace}
+      onMoveGroup={moveGroupToSpace}
       // App owns the join because `status` is keyed by ptyId, not by tab id —
       // SpaceMenu only renders the answer. Every member of the space, not just
       // the visible ones: deleting it closes all of them.
@@ -1863,6 +2002,10 @@ export function App() {
               <FileBrowser
                 cwd={t.cwd}
                 tabId={t.id}
+                // KAN-62 finding #1: which pane's keyboard shortcuts fire —
+                // `active` is the one focus truth (see "THE FOCUSED PANE IS
+                // DERIVED" above), not a second copy of it.
+                focused={t.id === active}
                 onNavigate={(p) =>
                   update(t.id, { cwd: p, ...(t.renamed ? {} : { title: basename(p) }) })
                 }
@@ -1974,6 +2117,9 @@ export function App() {
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       {pendingClose && (
         <ConfirmDialog request={pendingClose} onClose={() => setPendingClose(null)} />
+      )}
+      {pendingMove && (
+        <ConfirmDialog request={pendingMove} onClose={() => setPendingMove(null)} />
       )}
       {/* Last, so it is over every other modal — including KAN-57's close confirm
           above: whatever else is open, this is the one asking to run code. */}

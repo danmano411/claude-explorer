@@ -161,6 +161,17 @@ export interface Api {
   // main handler) do not apply, because electron's `clipboard` is reachable from
   // the preload directly.
   clipboardHasImage(): boolean
+  // KAN-62. Sync, same reason as the two above: this is a plain preload
+  // function, not a channel. Used by the file pane's Copy/Cut so a path can be
+  // pasted into a Claude tab (term.paste brackets it, and Claude Code attaches
+  // an image path itself — see Terminal.tsx) or into any other text field.
+  clipboardWriteText(text: string): void
+  // KAN-62 finding #2. Sync, same reason as the three above. Whether the OS
+  // clipboard already holds something that looks like a real file-drop
+  // (Explorer's CF_HDROP, which Chromium's clipboard abstraction surfaces as
+  // a uri-list/filename-shaped format) — used to skip clipboardWriteText
+  // rather than blow away a pending real Explorer copy/paste.
+  clipboardHasFileDrop(): boolean
   // `arg` carries the path for the CLI/Explorer entry point ('open-path' |
   // 'open-file'); the menu-click commands never set it.
   onMenuCommand(cb: (cmd: string, arg?: string) => void): () => void

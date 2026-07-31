@@ -86,6 +86,32 @@ export function closeReason(risks: readonly CloseRisk[]): string | null {
 }
 
 /**
+ * MOVING A TAB TO ANOTHER SPACE (KAN-66), or **null when the move needs no
+ * dialog at all** — the same contract as `closeReason`, and here for the same
+ * selectivity rule stated at the top of this file.
+ *
+ * Exactly one move is questioned, and it is not questioned because it is
+ * destructive — nothing dies, the pty keeps running and the scrollback is
+ * untouched — but because it silently changes something the user did not ask
+ * for: a grouped tab moving ON ITS OWN leaves its group. It has to, since a
+ * group is one contiguous run inside ONE strip and a group straddling two
+ * spaces would draw as two runs of the same folder, with rename/recolor/
+ * ungroup acting on both at once (the cross-space split TabBar's "Add to …"
+ * filter already refuses).
+ *
+ * Everything else moves silently: an ungrouped tab, a pinned tab (a pin governs
+ * closing and ordering, not which space a tab lives in), and a WHOLE group —
+ * which keeps its members together and so loses nothing at all. Confirming
+ * those too would train the click-through that makes the one dialog that
+ * matters invisible.
+ */
+export function moveTabReason(grouped: boolean): string | null {
+  return grouped
+    ? 'This tab will be removed from the current group and will be moved to that space.'
+    : null
+}
+
+/**
  * The space-delete sentence. Byte-identical to the pre-KAN-57 wording when
  * nothing in the space is live and nothing in it is pinned, so the common case
  * reads unchanged; the live clause is the part that was missing, and it is the
