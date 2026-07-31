@@ -17,3 +17,19 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   const tag = (target as HTMLElement | null)?.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA'
 }
+
+/**
+ * The app's own text boxes — the address bar, the search box, the tab / group /
+ * space rename inputs — and NOT a terminal, whose focus sink is a `<textarea>`.
+ *
+ * The difference from `isTypingTarget` is deliberate and is the whole reason
+ * there are two predicates: that one answers "may I take a plain Ctrl+<key>?",
+ * to which a terminal says no; this one answers "may I take a Ctrl+Shift
+ * chord?", to which a terminal says yes. Ctrl+Shift+<letter> is not a distinct
+ * control code — xterm sends the same ^G for Ctrl+G and Ctrl+Shift+G — which is
+ * precisely why every terminal emulator (Windows Terminal, VS Code, GNOME
+ * Terminal) reserves that row for the app. See App.tsx's grid-picker keybind.
+ */
+export function isTextBox(target: EventTarget | null): boolean {
+  return (target as HTMLElement | null)?.tagName === 'INPUT'
+}

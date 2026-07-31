@@ -4,10 +4,16 @@ import {
   closeTabList, openViewerTabList, type Tab,
 } from './tabs';
 import {
-  closePane as closePaneIn, compact, showIn, single, split as splitLayout,
+  cellAt, cellKey, cellOf, closeCell, compact, insertAtSeam, layoutTabIds, moveCellBeside,
+  moveTab, neighbour, readingOrder, reflow, removeTab, setCellTabs, showTab, single, splitCell,
+  swapCells, type CellKey, type Side,
 } from './gridlayout';
-import { gridPlacement } from './splitgrid';
+import {
+  dividerId, dropZone, gridPlacement, zoneId,
+  type Box, type DropZone, type PaneBox, type SeamBox,
+} from './splitgrid';
 import { SplitDividers } from './components/SplitDividers';
+import { GridPicker } from './components/GridPicker';
 import {
   addToGroup, deleteGroup, moveGroupRun, newGroup, recolorGroup, removeFromGroup,
   renameGroup, reorderWithGroups, setCollapsed, setPinned,
@@ -16,8 +22,8 @@ import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, switchSpace,
 } from './spaces';
-import type { Space, TabGroup } from '../shared/types';
-import { isTypingTarget } from './keys';
+import type { GridCell, GridLayout, Space, TabGroup } from '../shared/types';
+import { isTextBox, isTypingTarget } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -25,9 +31,19 @@ import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { SettingsModal } from './components/SettingsModal';
 import { SpaceMenu } from './components/SpaceMenu';
-import { TabBar, type GroupActions, type SplitActions } from './TabBar';
+import { LONE_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } from './TabBar';
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+
+/** `tabId`'s pane, addressed the way every gridlayout op wants it. */
+const keyOfTab = (layout: GridLayout, tabId: string | undefined | null): CellKey | null => {
+  const c = tabId ? cellOf(layout, tabId) : null;
+  return c ? cellKey(c) : null;
+};
+
+/** How far the pointer must travel before an Alt+press on a pane becomes a
+ *  drag rather than the click-to-focus it would otherwise have been. */
+const PANE_DRAG_PX = 4;
 
 /** A space's ordered tab records: `tabIds` (the order) resolved against the tab
  *  store (the records). An id with no record is dropped rather than rendered as
@@ -50,11 +66,31 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  /** The Ctrl+Shift+G arrangement picker (KAN-56). Just open/closed — it stages
+   *  nothing, which is what makes Escape inert. */
+  const [picker, setPicker] = useState(false);
   const status = usePtyStatus();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
   // fractions against its box.
   const contentRef = useRef<HTMLDivElement>(null);
+  // --- direct manipulation (KAN-56) ---------------------------------------
+  /** The always-mounted drop indicator. Written to directly, never through
+   *  React — see `paint` below. */
+  const indicatorRef = useRef<HTMLDivElement>(null);
+  /** `zoneId` of what the indicator is currently showing, so a pointer move
+   *  that stays inside one zone touches the DOM zero times. */
+  const lastZone = useRef('none');
+  /** Pane and seam rectangles, measured ONCE per drag (they cannot move while
+   *  one is in flight) and container-relative, which is the coordinate space
+   *  `dropZone` and the indicator both speak. */
+  const dropGeom = useRef<{ panes: PaneBox[]; seams: SeamBox[]; origin: DOMRect } | null>(null);
+  /** A pane being moved — by its strip (the title-bar grab) or by Alt+its body
+   *  — below or above the movement threshold. Addressed by CELL, because the
+   *  thing being dragged is the pane and its whole tab set, not one tab. */
+  const paneDrag = useRef<
+    { key: CellKey; x: number; y: number; moved: boolean; pointerId: number } | null
+  >(null);
   const lastActivated = useRef<Map<string, number>>(new Map());
   const spawning = useRef<Set<string>>(new Set());
   // An argv/Explorer open is APPENDED to whatever restore produces, never
@@ -92,7 +128,7 @@ export function App() {
   const activeSpace = spaces.find((s) => s.id === activeSpaceId);
   const spaceTabs = sliceOf(activeSpace?.tabIds ?? [], tabs);
 
-  // --- split view (KAN-46) -------------------------------------------------
+  // --- split view (KAN-46 / KAN-56) ----------------------------------------
   //
   // HOW PLACEMENT COMPOSES WITH THE FLAT PANE LIST. Split view does not own the
   // panes and never re-parents one. `.content` keeps being the single flat
@@ -105,9 +141,18 @@ export function App() {
   // xterm that loses alt-screen mode and its scrollback, so the only thing a
   // split is allowed to change about a pane is its `style`.
   //
-  // `layout: null` therefore needs no special case: `gridPlacement` returns an
-  // empty container style and no pane styles, which leaves `.content` exactly
-  // the block box it is today with one visible `inset: 0` pane in it.
+  // KAN-56 makes a pane a window with its OWN tab strip, and that structure is
+  // exactly why the strips are FLAT SIBLINGS too — a `<Pane>` component owning
+  // its strip and its children would re-parent every xterm in the window on
+  // every cross-pane move and on every `layout: null <-> grid` transition. Each
+  // cell instead gets a `.paneslot` (absolute, same grid-area, pointer-events
+  // none) holding only its strip, and the tab's `.pane` gets `top: STRIP_PX`
+  // from `gridPlacement`. Moving a tab between panes therefore changes exactly
+  // one thing: the `gridArea`/`top` on a node React never unmounts.
+  //
+  // `layout: null` needs no special case: `gridPlacement` returns an empty
+  // container style, no pane styles and no strips, which leaves `.content`
+  // exactly the block box it is today with one visible `inset: 0` pane in it.
 
   /**
    * The layout as it may actually be RENDERED.
@@ -119,15 +164,38 @@ export function App() {
    * because it also covers a `workspace.json` that predates the pruning. The
    * persisted copy self-heals through `sanitize()`, which drops the same cells
    * on the next write.
+   *
+   * KAN-56 adds the other half of the same obligation: a live member with NO
+   * cell is unreachable, because no strip lists it. It is adopted by the
+   * focused pane — the same rule `sanitize()` applies to a tab orphaned across
+   * spaces, one doctrine rather than two.
    */
   const layout = useMemo(() => {
     const l = activeSpace?.layout;
     if (!l) return null;
-    const live = new Set(sliceOf(activeSpace!.tabIds, tabs).map((t) => t.id));
-    const cells = l.cells.filter((c) => live.has(c.tabId));
-    if (!cells.length) return null;
-    return cells.length === l.cells.length ? l : compact({ ...l, cells });
-  }, [activeSpace, tabs]);
+    const members = sliceOf(activeSpace!.tabIds, tabs).map((t) => t.id);
+    const live = new Set(members);
+    const seen = new Set<string>();
+    const cells: GridCell[] = [];
+    for (const c of l.cells) {
+      const ids = c.tabIds.filter((id) => live.has(id) && !seen.has(id));
+      if (!ids.length) continue; // the whole pane died with its tabs
+      ids.forEach((id) => seen.add(id));
+      cells.push(
+        ids.length === c.tabIds.length && ids.includes(c.activeTabId)
+          ? c
+          : { ...c, tabIds: ids, activeTabId: ids.includes(c.activeTabId) ? c.activeTabId : ids[0] },
+      );
+    }
+    if (cells.length < 2) return null; // one pane is not a split
+    const orphans = members.filter((id) => !seen.has(id));
+    if (orphans.length) {
+      const host = cells.find((c) => c.tabIds.includes(active)) ?? readingOrder({ ...l, cells })[0];
+      cells[cells.indexOf(host)] = { ...host, tabIds: [...host.tabIds, ...orphans] };
+    }
+    const same = cells.length === l.cells.length && cells.every((c, i) => c === l.cells[i]);
+    return same ? l : compact({ ...l, cells });
+  }, [activeSpace, tabs, active]);
 
   const placement = useMemo(
     () => gridPlacement(layout, activeSpace?.colFractions, activeSpace?.rowFractions),
@@ -136,12 +204,26 @@ export function App() {
 
   const activeTab = spaceTabs.find((t) => t.id === active);
 
-  /** The tabs with a pane on screen. Without a split that is just the active
-   *  tab, which is what makes the single-pane path literally unchanged. */
+  /** The tabs with a pane on screen — one per cell, its `activeTabId`. Without
+   *  a split that is just the active tab, which is what makes the single-pane
+   *  path literally unchanged. */
   const visible = placement.split
     ? spaceTabs.filter((t) => placement.panes[t.id])
     : activeTab ? [activeTab] : [];
   const visibleIds = new Set(visible.map((t) => t.id));
+
+  /**
+   * THE FOCUSED PANE IS DERIVED, never stored: it is whichever cell holds
+   * `active`. One focus truth, nothing extra to persist and nothing to keep in
+   * sync — `cell.activeTabId` is per-pane memory ("what this window was
+   * showing"), `active` is "which window has focus".
+   */
+  const focusedKey = layout && active ? keyOfTab(layout, active) : null;
+
+  /** One strip's ordered records: a pane's own `tabIds`, or — with no split —
+   *  the space's whole slice, which is the single global strip. */
+  const sliceFor = (key: CellKey | null): Tab[] =>
+    key !== null && layout ? sliceOf(cellAt(layout, key)?.tabIds ?? [], tabs) : spaceTabs;
 
   /** The active space through `fn`, everything else untouched. */
   const mapActiveSpace = (fn: (s: Space) => Space) =>
@@ -152,15 +234,15 @@ export function App() {
   // that field). setActiveTab refuses a tab the space does not own, so the
   // membership update always has to be queued before this.
   //
-  // KAN-46: the strip stays global and single while a split is up, so clicking
-  // a tab has to say WHICH pane it lands in. It lands in the focused one —
-  // `showIn` swaps it for the tab that was there, which keeps its place on the
-  // strip and simply stops being visible. Clicking a tab that already has a
-  // pane is a plain focus move (showIn no-ops), which is also what a click
-  // inside a pane produces via `onPointerDownCapture` below. With no layout
-  // there is nothing to retarget and this is byte-for-byte what it always was.
+  // KAN-56: a tab belongs to exactly one pane, so clicking it can only ever mean
+  // "show it in ITS pane and give that pane focus". `showTab` does the first
+  // half and setting `active` does the second, which is the whole of what makes
+  // the focused pane derivable. It no-ops when the tab is already its pane's
+  // active one, i.e. for a plain focus move between panes — which is also what
+  // a click inside a pane body produces via `onPointerDownCapture` below. With
+  // no layout there is nothing to retarget and this is byte-for-byte what it
+  // always was.
   const selectTab = (id: string) => {
-    const from = active;
     lastActivated.current.set(id, Date.now());
     setActive(id);
     setSpaces((ss) => {
@@ -168,10 +250,10 @@ export function App() {
       // that too, and the debounced persist keys off `spaces` identity.
       const i = ss.findIndex((s) => s.id === activeSpaceIdRef.current);
       const l = i === -1 ? null : ss[i].layout;
-      const next = l && showIn(l, from, id);
-      const retargeted =
-        next && next !== l ? ss.map((s, k) => (k === i ? { ...s, layout: next } : s)) : ss;
-      return setActiveTab(retargeted, activeSpaceIdRef.current, id);
+      const next = l && showTab(l, id);
+      const shown =
+        next && next !== l ? ss.map((s, k) => (k === i ? withLayout(s, l, next) : s)) : ss;
+      return setActiveTab(shown, activeSpaceIdRef.current, id);
     });
   };
 
@@ -180,50 +262,93 @@ export function App() {
     setSpaces((ss) => addTabToSpace(ss, activeSpaceIdRef.current, id));
 
   /**
-   * Run a groups.ts membership op on the ACTIVE SPACE's slice, writing the
-   * changed tab records back to the global store and the resulting id order back
-   * to that space's `tabIds`.
+   * Run a groups.ts membership op on ONE STRIP's slice, writing the changed tab
+   * records back to the global store and the resulting id order back to where
+   * that order lives: the pane's `cell.tabIds`, or — with no split — the
+   * space's `tabIds`.
    *
    * Group ops REORDER — `addToGroup` pulls a tab to its group's right edge,
    * `removeFromGroup` pushes it just past the run — and the strip is the slice.
    * Running them on the global array alone would tag the tab correctly and leave
-   * the strip drawing a shredded group, because `tabIds` (which is the order)
-   * never moved. The order written is a permutation of the slice, so membership
-   * and the exactly-one-owner rule are untouched by construction.
+   * the strip drawing a shredded group, because the order never moved. The
+   * order written is a permutation of the slice, so membership and the
+   * exactly-one-owner rule are untouched by construction — which is also
+   * exactly what `setCellTabs` refuses anything but.
    *
-   * Menu-driven, one user click per call, so reading `spaceTabs` from this
-   * render's closure is safe (KAN-37's composition hazard is about several
-   * updates issued before a single commit, which a context menu cannot do).
+   * KAN-56 pushes that one level down, the same relaxation KAN-45 already made
+   * when contiguity moved from the global tab list to a space's slice: a group
+   * run is contiguous within a PANE strip, and a group may legitimately appear
+   * in two panes at once, each drawing its own chip for the members it holds.
+   *
+   * Menu-driven, one user click per call, so reading this render's closure is
+   * safe (KAN-37's composition hazard is about several updates issued before a
+   * single commit, which a context menu cannot do).
    */
-  const applyToSlice = (fn: (slice: Tab[]) => Tab[]) => {
-    const after = fn(spaceTabs);
-    if (after === spaceTabs) return;
+  const applyToSlice = (key: CellKey | null) => (fn: (slice: Tab[]) => Tab[]) => {
+    const slice = sliceFor(key);
+    const after = fn(slice);
+    if (after === slice) return;
     const patched = new Map(after.map((t) => [t.id, t] as const));
+    const order = after.map((t) => t.id);
     setTabs((ts) => ts.map((t) => patched.get(t.id) ?? t));
-    setSpaces((ss) =>
-      ss.map((s) => (s.id === activeSpaceIdRef.current ? { ...s, tabIds: after.map((t) => t.id) } : s)));
+    setSpaces((ss) => ss.map((s) => {
+      if (s.id !== activeSpaceIdRef.current) return s;
+      // The RENDERED layout, which is the one `sliceFor` read `slice` out of and
+      // the one `key` was measured against — the same base every pane-level op
+      // here uses. Writing `s.layout` instead would, the moment the memo repairs
+      // anything (an un-celled member adopted, an anchor re-ranked by compact),
+      // hand `setCellTabs` an order that is not a permutation of THAT layout's
+      // cell; it would refuse, and `withLayout` would still rewrite `tabIds` to
+      // the cells' concatenation — silently dropping the un-celled member out of
+      // the space until a restart re-adopted it.
+      if (key === null || !layout) return { ...s, tabIds: order };
+      return withLayout(s, layout, setCellTabs(layout, key, order));
+    }));
   };
 
   /**
-   * The open-a-tab twin of `applyToSlice`: membership via `addTabToSpace` (which
-   * also evicts the id from any other space, so exactly-one-owner survives a
-   * dedupe hit on a tab another space had), then position.
+   * Membership AND placement for a newly opened tab: `addTabToSpace` (which also
+   * evicts the id from any other space, so exactly-one-owner survives a dedupe
+   * hit on a tab another space had), then which pane it lands in, then its
+   * position within that pane's strip.
    *
-   * Separate from `applyToSlice` because the auto-link paths resolve `groupId`
-   * INSIDE setTabs's updater, against the list React is about to commit rather
-   * than this render's closure (KAN-47: the await before them is a pty spawn,
-   * long enough for an ungroup to land) — so this takes those fresh `records`
-   * instead of reading `spaceTabs`. `tabIds` carries no groupId, which is why
-   * the placement has to be derived from records at all.
+   * With a layout up the pane is not optional — a member with no cell is
+   * unreachable, because no strip lists it — so every open path answers "which
+   * pane?" by construction rather than by a rule anyone has to remember:
+   * `pane` for a per-pane `+`, else the cell of the tab it was opened FROM
+   * (auto-link, KAN-47), else the focused pane.
+   *
+   * `records` is the tab list React is about to commit rather than this render's
+   * closure: the auto-link paths resolve `groupId` inside setTabs's updater,
+   * because the await before them is a pty spawn — long enough for an ungroup to
+   * land. `tabIds` carries no groupId, which is why the placement has to be
+   * derived from records at all.
    */
-  const placeInSpace = (id: string, groupId: string | undefined, records: Tab[]) => {
+  const landTab = (
+    id: string,
+    opts: { pane?: CellKey | null; from?: string; group?: string; records?: Tab[] } = {},
+  ) => {
     addToActiveSpace(id);
-    if (groupId === undefined) return;
-    setSpaces((ss) =>
-      ss.map((s) =>
-        s.id === activeSpaceIdRef.current
-          ? { ...s, tabIds: addToGroup(sliceOf(s.tabIds, records), id, groupId).map((t) => t.id) }
-          : s));
+    const { group, records } = opts;
+    const regroup = (slice: Tab[]) =>
+      group === undefined || !records ? null : addToGroup(slice, id, group).map((t) => t.id);
+    setSpaces((ss) => ss.map((s) => {
+      if (s.id !== activeSpaceIdRef.current) return s;
+      const l = s.layout;
+      if (!l) {
+        const order = regroup(sliceOf(s.tabIds, records ?? []));
+        return order ? { ...s, tabIds: order } : s;
+      }
+      const first = readingOrder(l)[0];
+      if (!first) return s;
+      const host = (opts.pane && cellAt(l, opts.pane) ? opts.pane : null)
+        ?? keyOfTab(l, opts.from) ?? keyOfTab(l, active) ?? cellKey(first);
+      const moved = moveTab(l, id, host);
+      if (moved === l) return s;
+      const cell = cellOf(moved, id)!;
+      const order = regroup(sliceOf(cell.tabIds, records ?? []));
+      return withLayout(s, l, order ? setCellTabs(moved, cellKey(cell), order) : moved);
+    }));
   };
 
   /** Which tab a space should focus when you arrive at it. */
@@ -440,10 +565,13 @@ export function App() {
 
   // KAN-47: `+` / Ctrl+T has no source tab — it's the global "new tab" action,
   // same as Chrome's own new-tab button never joining a group. Stays far-right.
-  const addTab = async () => {
+  // KAN-56: `pane` is the strip whose `+` was pressed, which is how a per-pane
+  // `+` answers "which pane does this open into?" without a rule. Ctrl+T and
+  // the File menu pass none and land in the focused pane.
+  const addTab = async (pane?: CellKey | null) => {
     const home = await window.api.fsHome();
     const t = newFilesTab(home);
-    setTabs((ts) => [...ts, t]); addToActiveSpace(t.id); selectTab(t.id);
+    setTabs((ts) => [...ts, t]); landTab(t.id, { pane }); selectTab(t.id);
   };
 
   // KAN-47: called from the CLI/Explorer-context-menu 'open-path' arm and from
@@ -451,7 +579,7 @@ export function App() {
   // to inherit from. Stays far-right, same as today.
   const openFolderTab = (p: string) => {
     const t = newFilesTab(p);
-    setTabs((ts) => [...ts, t]); addToActiveSpace(t.id); selectTab(t.id);
+    setTabs((ts) => [...ts, t]); landTab(t.id); selectTab(t.id);
   };
 
   // Opening a file gets its own first-class tab (never a split pane — a split
@@ -482,7 +610,7 @@ export function App() {
       const groupId = link ? ts.find((t) => t.id === sourceId)?.groupId : undefined;
       if (groupId !== undefined) expand(groupId);
       const { tabs: next, id } = openViewerTabList(ts, filePath, mode, groupId, scope);
-      placeInSpace(id, groupId, next);
+      landTab(id, { group: groupId, records: next, from: sourceId });
       selectTab(id);
       return next;
     });
@@ -492,18 +620,20 @@ export function App() {
     const t = tabs.find((x) => x.id === id);
     if (t?.ptyId) window.api.ptyKill(t.ptyId);
     lastActivated.current.delete(id);
-    // Route the space's layout through closePaneIn too, exactly like the "Close
+    // Route the space's layout through `removeTab` too, exactly like the "Close
     // pane" menu item — not just membership. Without this the render-time
     // `layout` memo only ever `compact`s dead cells away, which can only drop a
     // track that is empty on EVERY row/col; a hole whose track is still occupied
     // by a neighbour (an L-shaped or T-shaped tiling) stays a hole forever
-    // (KAN-46 review #2). `closePaneIn` no-ops when `id` has no cell.
+    // (KAN-46 review #2). KAN-56: only the LAST tab of a pane closes the pane —
+    // `removeTab` drops the id from its cell and takes the rectangle away only
+    // when nothing is left in it.
     setSpaces((ss) => {
       const removed = removeTabFromSpace(ss, activeSpaceIdRef.current, id);
       if (removed === ss) return ss;
       return removed.map((s) =>
         s.id === activeSpaceIdRef.current && s.layout
-          ? { ...s, layout: closePaneIn(s.layout, id) }
+          ? withLayout(s, s.layout, removeTab(s.layout, id))
           : s);
     });
     setTabs((ts) => {
@@ -517,24 +647,15 @@ export function App() {
         // member last" fix still lands on a real survivor.
         const mine = new Set(activeSpace?.tabIds ?? []);
         const survivors = remaining.filter((x) => mine.has(x.id));
-        // Prefer a PLACED survivor (one with a pane) when a split is up. MRU
-        // alone can pick a tab with no cell — after a restore `lastActivated` is
-        // empty, every survivor ties at 0, and `reduce` takes the first one in
-        // `remaining`'s (tab-store) order, which is not necessarily one anyone
-        // can currently see. Reproduced with a 3-pane split where the strip's
-        // first tab is a member evicted from its cell by `showIn` (KAN-46 review
-        // #3): re-picking it left the active tab highlighted on the strip with
-        // no visible pane, and clicking it was a no-op (`showIn` treats
-        // `tabId === focusedTabId` as already-shown). With no split `layout` is
-        // null, `placedIds` is empty, and this falls through to plain MRU —
-        // byte-for-byte the old behaviour.
-        const placedIds = new Set(layout?.cells.map((c) => c.tabId) ?? []);
-        const pool = survivors.some((x) => placedIds.has(x.id))
-          ? survivors.filter((x) => placedIds.has(x.id))
-          : survivors;
+        // Plain MRU. KAN-46 needed a "prefer a survivor that HAS a pane" pass
+        // here, because the old model let a space member sit in no cell at all
+        // and re-picking one left the strip highlighting a tab with nothing on
+        // screen. KAN-56 makes that state unrepresentable — every member is in
+        // exactly one pane, and `selectTab` shows it there — so the preference
+        // has nothing left to express.
         // Most-recently-activated survivor; '' only when the space is now empty.
-        setActive(pool.length
-          ? pool.reduce((a, b) =>
+        setActive(survivors.length
+          ? survivors.reduce((a, b) =>
             (lastActivated.current.get(b.id) ?? 0) > (lastActivated.current.get(a.id) ?? 0) ? b : a).id
           : '');
       }
@@ -554,21 +675,33 @@ export function App() {
   // If that landing spot's group happens to be collapsed, `expand` it: a tab
   // dropped beside a collapsed group joins it per groups.ts's inclusive edge
   // rule and would then simply not be rendered (KAN-44 review #2).
-  const reorderTabs = (from: number, insert: number) => {
-    const moved = spaceTabs[from];
+  const reorderTabs = (key: CellKey | null) => (from: number, insert: number) => {
+    const slice = sliceFor(key);
+    const moved = slice[from];
     if (!moved) return;
-    const next = reorderWithGroups(spaceTabs, from, insert);
+    const next = reorderWithGroups(slice, from, insert);
     const newGroupId = next.find((t) => t.id === moved.id)?.groupId;
-    // Where the tab ACTUALLY landed, not where the drag asked it to: KAN-53
-    // makes reorderWithGroups clamp `insert` into the dragged tab's own region
-    // (pinned tabs are held left of every unpinned one), and reorderInSpace
-    // holds ids only, so it cannot re-derive that. Reading the landing index
-    // back off the result keeps the two in step by construction rather than by
-    // two clamp formulas being kept identical.
-    const landed = next.findIndex((t) => t.id === moved.id);
-    setSpaces((ss) => reorderInSpace(ss, activeSpaceIdRef.current, from, landed));
+    setSpaces((ss) => ss.map((s) => {
+      if (s.id !== activeSpaceIdRef.current) return s;
+      // A pane strip's order IS its cell's `tabIds`, so the whole permutation
+      // goes straight through `setCellTabs` — which refuses anything that is
+      // not one, so a reorder can never add or lose a tab. Against the RENDERED
+      // layout, for the reason spelled out in `applyToSlice`: `slice` came from
+      // it, so `next` is a permutation of ITS cell, not necessarily of the raw
+      // one's.
+      if (key !== null && layout)
+        return withLayout(s, layout, setCellTabs(layout, key, next.map((t) => t.id)));
+      // Where the tab ACTUALLY landed, not where the drag asked it to: KAN-53
+      // makes reorderWithGroups clamp `insert` into the dragged tab's own region
+      // (pinned tabs are held left of every unpinned one), and reorderInSpace
+      // holds ids only, so it cannot re-derive that. Reading the landing index
+      // back off the result keeps the two in step by construction rather than by
+      // two clamp formulas being kept identical.
+      const landed = next.findIndex((t) => t.id === moved.id);
+      return reorderInSpace([s], s.id, from, landed)[0];
+    }));
     if (newGroupId === moved.groupId) return;
-    // Only the tag changes in the store; the position lives in `tabIds`.
+    // Only the tag changes in the store; the position lives in the strip order.
     setTabs((ts) => ts.map((t) => (t.id === moved.id ? next.find((x) => x.id === moved.id)! : t)));
     if (newGroupId !== undefined) expand(newGroupId);
   };
@@ -577,8 +710,12 @@ export function App() {
   // moveGroupRun is a permutation of the slice that changes no record, so only
   // the space's `tabIds` actually moves. Nothing to expand — a collapsed run
   // drags as the one thing it looks like.
-  const reorderGroup = (groupId: string, insert: number) =>
-    applyToSlice((sl) => moveGroupRun(sl, groupId, insert));
+  // KAN-56: a group chip drags within its OWN strip only.
+  // ponytail: dragging a whole group run BETWEEN panes is not offered — drag its
+  // tabs individually; add it when someone with a 6-tab group in the wrong pane
+  // complains.
+  const reorderGroup = (key: CellKey | null) => (groupId: string, insert: number) =>
+    applyToSlice(key)((sl) => moveGroupRun(sl, groupId, insert));
 
   // A group with no members left is invisible (segments() only emits runs of
   // real tabs) but would still clutter the "Add to …" menu forever. Prune it
@@ -596,14 +733,14 @@ export function App() {
   //
   // The three membership ops go through `applyToSlice` because they MOVE the tab
   // in the strip, and the strip is the active space's slice — see its doc.
-  const groupActions: GroupActions = {
+  const groupActionsFor = (key: CellKey | null): GroupActions => ({
     create: (tabId) => {
       const g = newGroup('Group', groups);
       setGroups([...groups, g]);
-      applyToSlice((sl) => addToGroup(sl, tabId, g.id));
+      applyToSlice(key)((sl) => addToGroup(sl, tabId, g.id));
     },
-    add: (tabId, groupId) => applyToSlice((sl) => addToGroup(sl, tabId, groupId)),
-    remove: (tabId) => applyToSlice((sl) => removeFromGroup(sl, tabId)),
+    add: (tabId, groupId) => applyToSlice(key)((sl) => addToGroup(sl, tabId, groupId)),
+    remove: (tabId) => applyToSlice(key)((sl) => removeFromGroup(sl, tabId)),
     rename: (groupId, name) => setGroups((gs) => renameGroup(gs, groupId, name.trim() || 'Group')),
     recolor: (groupId, color) => setGroups((gs) => recolorGroup(gs, groupId, color)),
     toggleCollapsed: (groupId) =>
@@ -627,13 +764,15 @@ export function App() {
       // sees `id === active` is the one running against the already-shrunk
       // list, so it picks a real survivor instead of stranding `active` on a
       // tab that no longer exists (KAN-44 review #1).
-      // Scoped to the strip's slice: `closeTab` revokes membership from the
-      // ACTIVE space, so it may only ever be handed tabs this space owns.
-      const doomed = spaceTabs.filter((t) => t.groupId === groupId);
+      // Scoped to THIS strip's slice: `closeTab` revokes membership from the
+      // ACTIVE space, so it may only ever be handed tabs this space owns — and
+      // a group that also has members in another pane keeps those (the chip you
+      // right-clicked is the one you closed).
+      const doomed = sliceFor(key).filter((t) => t.groupId === groupId);
       [...doomed.filter((t) => t.id !== active), ...doomed.filter((t) => t.id === active)]
         .forEach((t) => closeTab(t.id));
     },
-  };
+  });
 
   /**
    * Pin / unpin (KAN-53). Same shape as the three group membership ops and for
@@ -643,8 +782,10 @@ export function App() {
    * `setPinned` also drops the groupId, which `applyToSlice` writes through
    * because it replaces whole records.
    */
-  const togglePin = (id: string) =>
-    applyToSlice((sl) => setPinned(sl, id, !sl.find((t) => t.id === id)?.pinned));
+  // KAN-56: per PANE, the same way Chrome pins per window — a pinned tab is held
+  // left of every unpinned one in the strip it is actually drawn in.
+  const togglePin = (key: CellKey | null) => (id: string) =>
+    applyToSlice(key)((sl) => setPinned(sl, id, !sl.find((t) => t.id === id)?.pinned));
 
   // A new conversation gets its id assigned here rather than discovered later:
   // reading back "whichever jsonl appeared in this folder" cannot tell two tabs
@@ -675,7 +816,7 @@ export function App() {
   const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
     const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
     const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd), sessionId);
-    setTabs((ts) => [...ts, t]); addToActiveSpace(t.id); selectTab(t.id);
+    setTabs((ts) => [...ts, t]); landTab(t.id); selectTab(t.id);
   };
 
   // Feature 5: open a plain shell terminal tab at a folder.
@@ -695,7 +836,7 @@ export function App() {
       // Inside the updater, not after it: `selectTab` must be queued AFTER the
       // membership write or setActiveTab refuses a tab the space does not own
       // yet, and the space would remember the wrong focus.
-      placeInSpace(t.id, groupId, next);
+      landTab(t.id, { group: groupId, records: next, from: sourceId });
       selectTab(t.id);
       return next;
     });
@@ -800,17 +941,21 @@ export function App() {
   }, [spaces, activeSpaceId]);
 
   /**
-   * Everything a `.pane` element needs. The focus ring and the click-to-focus
-   * handler are both split-only: with one pane there is nothing to disambiguate,
-   * and attaching a `selectTab` to the whole content area would make a click on
-   * a file row a state write it is not today.
+   * Everything a `.pane` element needs. The click-to-focus handler is split-only:
+   * with one pane there is nothing to disambiguate, and attaching a `selectTab`
+   * to the whole content area would make a click on a file row a state write it
+   * is not today.
    *
    * Capture phase, deliberately: xterm stops propagation on its own container,
    * so a bubbling handler never sees a click inside a terminal — exactly the
    * pane you most need to be able to focus by clicking it.
+   *
+   * KAN-56: the focus RING moved to the cell's `.paneslot`, which covers the
+   * strip as well as the body — the thing that has focus is the pane, and a ring
+   * that stopped at the strip's bottom edge would say otherwise.
    */
   const paneProps = (t: Tab) => ({
-    className: placement.split && t.id === active ? 'pane pane-focused' : 'pane',
+    className: 'pane',
     style: placement.panes[t.id],
     'data-pane': t.id,
     ...(placement.split ? { onPointerDownCapture: () => selectTab(t.id) } : {}),
@@ -823,93 +968,539 @@ export function App() {
     mapActiveSpace((s) => ({ ...s, colFractions: cols, rowFractions: rows }));
 
   /**
-   * Split the FOCUSED pane and show `tabId` in the half that appears.
+   * THE ONLY PLACE A LAYOUT IS WRITTEN (KAN-56), which is what lets three rules
+   * live in one place instead of at every call site:
    *
-   * With no layout yet the focused pane is the whole content area, so the split
-   * starts from `single(active)`. `splitLayout` returns its input unchanged
-   * when it cannot do anything (nothing focused, or `tabId` already has a
-   * pane), and that no-op is what keeps a pointless menu click from
-   * materialising a 1x1 grid where `layout: null` was.
+   * 1. FRACTIONS describe TRACKS, not panes, so they survive an operation
+   *    exactly when that axis's track count survives it — which is also
+   *    `normalizeFractions`'s own fallback condition, so the two can never
+   *    disagree. Cleared per AXIS, not per operation: a column split has no
+   *    opinion about row heights. Never keep an array whose length disagrees
+   *    with the count, or it resurrects later when the count wanders back.
+   * 2. `Space.tabIds` is kept EQUAL to the cells' `tabIds` concatenated in
+   *    reading order, so there is exactly one order truth while a layout is up
+   *    and collapsing back to `layout: null` costs nothing.
+   * 3. FEWER THAN TWO CELLS IS NOT A SPLIT. Collapsing it here rather than
+   *    tolerating it is what keeps `layout: null` the single spelling of
+   *    "classic tabs" — and it is how the Ctrl+Shift+G 1x1 pick, and closing
+   *    the second-to-last pane, get back there with every tab preserved.
    *
-   * Fractions are dropped: the track count changed, so the old ones describe a
-   * grid that no longer exists.
+   * A `next` of `null` (an op that reports "no split any more") leaves `tabIds`
+   * alone: it was already the reading-order concatenation, so the recovered
+   * single strip reads exactly like the panes did.
+   */
+  const withLayout = (s: Space, prev: GridLayout | null, next: GridLayout | null): Space => {
+    const grid = next && next.cells.length >= 2 ? next : null;
+    return {
+      ...s,
+      tabIds: next ? layoutTabIds(next) : s.tabIds,
+      layout: grid,
+      colFractions: prev && grid && grid.cols === prev.cols ? s.colFractions : undefined,
+      rowFractions: prev && grid && grid.rows === prev.rows ? s.rowFractions : undefined,
+    };
+  };
+
+  /**
+   * Move `tabId` out of its pane into a NEW one on `side` of it.
+   *
+   * With no layout yet the one pane is the whole content area holding every tab
+   * of the space, which is precisely what `single()` spells — so the first split
+   * is cut out of that rather than being a special case. `splitCell` refuses
+   * when `tabId` is the sole tab of the pane being cut (that would empty it),
+   * and the strip only offers the menu item when it has two or more tabs, so the
+   * two agree.
    *
    * Bases off the RENDERED `layout` memo, not `s.layout` — a layout whose cells
-   * all belonged to since-closed tabs is a corpse (`{cells: []}` before
-   * sanitize's KAN-46 review #1 fix, and a pre-fix workspace.json can still hand
-   * one to a fresh session): falling back to `s.layout` finds cells but no
-   * `focusedTabId` among them, `splitLayout` no-ops, and split view is dead for
-   * the rest of the space's life. `layout` has already had exactly that case
-   * pruned to `null`, which is what lets the `single(active)` fallback fire.
+   * all belonged to since-closed tabs is a corpse, and `layout` has already had
+   * exactly that case pruned to `null`, which is what lets the `single()`
+   * fallback fire.
    */
-  const splitPane = (tabId: string, axis: 'col' | 'row') => {
+  const splitPane = (tabId: string, side: Side) => {
     mapActiveSpace((s) => {
-      const base = layout ?? (active ? single(active) : null);
-      if (!base) return s;
-      const next = splitLayout(base, active, tabId, axis);
+      const base = layout ?? single(s.tabIds, active);
+      const host = keyOfTab(base, tabId);
+      if (!host) return s;
+      const next = splitCell(base, host, tabId, side);
       if (next === base) return s;
-      return { ...s, layout: next, colFractions: undefined, rowFractions: undefined };
+      return withLayout(s, layout, next);
     });
-    selectTab(tabId); // queued after the split, so `showIn` finds it placed and no-ops
+    selectTab(tabId); // queued after the split, so `showTab` finds it and no-ops
   };
 
-  /** Removes a pane. The tab stays on the strip — panes are placement, the strip
-   *  is reachability. The last pane going away restores `layout: null`. */
-  const closePane = (tabId: string) => {
-    const survivor = layout?.cells.find((c) => c.tabId !== tabId)?.tabId;
-    mapActiveSpace((s) => {
-      // Same reasoning as `splitPane`: base off the pruned `layout` memo, not
-      // `s.layout`, or a corpse layout (all cells dead) leaves this a no-op too.
-      if (!layout) return s;
-      return {
-        ...s,
-        layout: closePaneIn(layout, tabId),
-        colFractions: undefined,
-        rowFractions: undefined,
-      };
-    });
-    // Closing the pane you were in leaves focus on a tab with nothing on screen.
-    if (tabId === active && survivor) selectTab(survivor);
+  /**
+   * Close a PANE without closing its tabs: they merge, in order, into the
+   * neighbour that absorbs its rectangle. Closing the second-to-last pane
+   * restores `layout: null`, whose implicit single pane holds everything.
+   */
+  const closePane = (key: CellKey) => {
+    if (!layout) return;
+    const next = closeCell(layout, key);
+    if (next === layout) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+    // The focused tab has just moved into another pane and may not be the tab
+    // that pane was showing. Queued after the write, so it acts on the merged
+    // layout; a no-op when focus was elsewhere.
+    if (active) selectTab(active);
   };
+
+  // --- direct manipulation (KAN-56) ----------------------------------------
+  //
+  // Two gestures, one hit-test. Dragging a tab off a STRIP into the pane area
+  // and dragging a PANE (by its strip's background, or Alt + its body) both
+  // resolve a zone through `dropZone`, and then land through DIFFERENT model
+  // calls — because a tab and a pane are now different things. An edge quarter
+  // splits the pane under the pointer / moves a pane beside it, a centre joins
+  // that pane's tab set / swaps the two panes, a divider inserts a full-run
+  // track. A strip is a real element with its own handlers, so it never reaches
+  // here at all: it wins over the edge quarter beneath it by hit-testing, not
+  // by a priority rule.
+  //
+  // Nothing here re-parents a pane. Every operation is a pure
+  // GridLayout -> GridLayout transform, so `gridPlacement` still emits styles
+  // for the flat, always-mounted list `.content` has always held — which is
+  // KAN-23 made structural, not a rule anyone has to remember (see the render
+  // comments below).
+
+  const paneEl = (tabId: string) =>
+    contentRef.current?.querySelector<HTMLElement>(`[data-pane="${CSS.escape(tabId)}"]`) ?? null;
+
+  /** A cell's `.paneslot` — the strip's holder, and what the focus ring and the
+   *  drag lift are applied to (it covers strip + body, which is the pane). */
+  const slotEl = (key: CellKey) =>
+    contentRef.current?.querySelector<HTMLElement>(`[data-cell="${CSS.escape(key)}"]`) ?? null;
+
+  /**
+   * Freeze the rectangles CSS Grid produced, container-relative — the
+   * coordinate space `dropZone` and the indicator both speak.
+   *
+   * ONCE per drag, not per move: nothing can resize a pane while one is in
+   * flight, and re-measuring 60x/second is exactly the cost this path exists to
+   * avoid.
+   *
+   * The rect measured per cell is its ACTIVE TAB's `.pane`, which is the pane
+   * BODY — `gridPlacement` gives it `top: STRIP_PX`, so the strip is already
+   * excluded and the edge quarters are computed over what the user sees as the
+   * pane. `lone` (the dragged tab is the only one in its pane) suppresses the
+   * seam zones, because taking it out removes the pane, and that compacts and
+   * re-ranks the very track indices a seam is identified by — offering a zone
+   * the model will reject is worse than not offering it at all.
+   */
+  const measureDrop = (lone: boolean) => {
+    const node = contentRef.current;
+    if (!node) return null;
+    const origin = node.getBoundingClientRect();
+    const rel = (r: DOMRect): Box =>
+      ({ left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height });
+    // With no split there is exactly one pane — the active tab's, filling the
+    // whole content box, which is the `single()` layout's only cell. That is the
+    // case the first-split gesture starts from, which is why this is not gated
+    // on `placement.split`.
+    const cells: [CellKey, string][] = placement.split
+      ? placement.cells.map((c) => [cellKey(c), c.activeTabId] as [CellKey, string])
+      : active ? [['0,0', active]] : [];
+    const panes: PaneBox[] = [];
+    for (const [cell, tabId] of cells) {
+      const el = paneEl(tabId);
+      if (el) panes.push({ cell, ...rel(el.getBoundingClientRect()) });
+    }
+    const seams: SeamBox[] = [];
+    if (!lone)
+      for (const d of placement.dividers) {
+        const el = node.querySelector<HTMLElement>(`[data-divider="${dividerId(d)}"]`);
+        if (el) seams.push({ ...d, ...rel(el.getBoundingClientRect()) });
+      }
+    const g = { panes, seams, origin };
+    dropGeom.current = g;
+    return g;
+  };
+
+  /**
+   * The drop indicator, written STRAIGHT to the DOM — the same precedent
+   * `SplitDividers` sets for a divider drag, and for the same reason: a
+   * setState per pointermove re-renders the whole app ~60x/second.
+   *
+   * A move that stays inside one zone costs nothing at all (the `zoneId`
+   * compare returns early); one that crosses a boundary costs exactly two
+   * attribute writes. `cssText` in one assignment rather than five property
+   * sets, which would be five separate mutation records for no gain.
+   */
+  const paint = (z: DropZone) => {
+    const el = indicatorRef.current;
+    const id = zoneId(z);
+    if (!el || id === lastZone.current) return;
+    lastZone.current = id;
+    el.dataset.zone = z.kind === 'none' ? '' : id;
+    el.style.cssText = z.kind === 'none'
+      ? ''
+      : `display:block;left:${z.box.left}px;top:${z.box.top}px;`
+        + `width:${z.box.width}px;height:${z.box.height}px`;
+  };
+
+  /** Every way a drag can stop mattering. Ref- and DOM-only on purpose, so the
+   *  mount-once listeners below can hold the first render's copy without ever
+   *  going stale. */
+  const endDrop = () => { dropGeom.current = null; paint({ kind: 'none' }); };
+
+  const endPaneDrag = () => {
+    const node = contentRef.current;
+    node?.classList.remove('dragging-pane');
+    for (const n of node?.querySelectorAll('.pane-dragging') ?? []) n.classList.remove('pane-dragging');
+    endDrop();
+  };
+
+  /**
+   * Land a dragged TAB in zone `z`.
+   *
+   * ORDERING RULE: the layout is written first and `selectTab` second, or
+   * `selectTab`'s own `showTab` runs against the pane the tab has not moved into
+   * yet. And focus only moves when the layout really changed, because a refused
+   * drop must not have a side effect either.
+   */
+  const applyTabDrop = (tabId: string, z: DropZone) => {
+    if (!tabId || z.kind === 'none') return;
+    // A centre drop with no grid up is just "show this tab" — every tab is
+    // already in the one pane. Materialising a 1x1 layout would turn `.content`
+    // into a grid for nothing visible.
+    if (z.kind === 'centre' && !layout) { selectTab(tabId); return; }
+    // An EDGE drop with no grid is the headline gesture — it is what creates the
+    // first split — so that one starts from the implicit single pane.
+    const base = layout ?? (z.kind === 'edge' ? single(activeSpace?.tabIds ?? [], active) : null);
+    if (!base) return;
+    const next =
+      z.kind === 'centre' ? moveTab(base, tabId, z.cell)
+        : z.kind === 'edge' ? splitCell(base, z.cell, tabId, z.side)
+          : insertAtSeam(base, tabId, z.axis, z.index, z.start, z.end);
+    if (next === base) return; // refused
+    mapActiveSpace((s) => withLayout(s, layout, next));
+    selectTab(tabId);
+  };
+
+  /**
+   * Land a dragged PANE in zone `z` — the whole window, tab set intact.
+   *
+   * A centre drop SWAPS the two panes' rectangles and an edge drop moves this
+   * one beside the target, both of which leave every track count alone, so both
+   * axes' dragged fractions survive. Seams are never offered for a pane drag
+   * (`measureDrop(true)`): there is no meaning to inserting a track for a pane
+   * that already has one.
+   */
+  /**
+   * A tab dropped on ANOTHER pane's strip: it joins that pane's set at the
+   * pointer's insert index. `moveTab` takes it out of whichever pane held it,
+   * and removes that pane if it was the last tab in it.
+   */
+  const adoptInto = (key: CellKey) => (tabId: string, insert: number) => {
+    if (!layout) return;
+    const next = moveTab(layout, tabId, key, insert);
+    if (next === layout) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+    selectTab(tabId);
+  };
+
+  const applyPaneDrop = (key: CellKey, z: DropZone) => {
+    if (!layout) return;
+    const next =
+      z.kind === 'centre' ? swapCells(layout, key, z.cell)
+        : z.kind === 'edge' ? moveCellBeside(layout, key, z.cell, z.side)
+          : layout;
+    if (next === layout) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+  };
+
+  const zoneAt = (
+    g: NonNullable<typeof dropGeom.current>, clientX: number, clientY: number,
+  ) => dropZone(g.panes, g.seams, clientX - g.origin.left, clientY - g.origin.top);
+
+  // A tab dragged off the strip.
+  //
+  // CAPTURE phase, and that is not cosmetic: FileBrowser's directory rows
+  // `stopPropagation()` on `drop` for ANY drag (`onDrop` there is gated on
+  // `e.isDirectory`, not on `app.drag`), so a bubbling handler here never sees
+  // a tab dropped onto a folder row — the single most likely place to drop one,
+  // since a file pane is mostly folder rows. Capture runs root->target, before
+  // that stop.
+  //
+  // Both handlers return untouched unless the drag carries TAB_MIME, so a FILE
+  // drag reaches FileBrowser's own handlers byte-for-byte as it does today.
+  // Inside that gate the tab drop DOES stop propagating: `dropInto` would only
+  // no-op on it, and letting it through would leave a row's drop-target
+  // highlight behind.
+  //
+  // KAN-56: a pane STRIP is a real element with its own drop handling, so a drag
+  // over one is left alone entirely — that is how "the strip beats the edge
+  // quarter underneath it" is enforced, by hit-testing rather than by a priority
+  // rule this function would have to encode. The indicator is cleared on the way
+  // in so a zone painted a pixel earlier does not sit there while the pointer is
+  // over a strip.
+  const onStrip = (e: React.DragEvent<HTMLDivElement>) =>
+    !!(e.target as Element).closest?.('[data-panestrip]');
+
+  const contentDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+    if (onStrip(e)) { endDrop(); return; }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const g = dropGeom.current ?? measureDrop(e.dataTransfer.types.includes(LONE_MIME));
+    if (g) paint(zoneAt(g, e.clientX, e.clientY));
+  };
+
+  const contentDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    const g = dropGeom.current;
+    if (!e.dataTransfer.types.includes(TAB_MIME) || !g || onStrip(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const z = zoneAt(g, e.clientX, e.clientY);
+    endDrop();
+    applyTabDrop(e.dataTransfer.getData(TAB_MIME), z);
+  };
+
+  /**
+   * PRIMARY entry: a press on a pane strip's own background (KAN-56).
+   *
+   * A pane has a title bar now, and dragging a window by its title bar is the
+   * idiom this whole feature emulates. It conflicts with nothing — the strip is
+   * chrome over neither an xterm nor a file list, `.tabbar` is already
+   * `user-select: none`, and TabBar excludes tabs/chips/buttons before calling
+   * this, so the tab drag (which is HTML5 DnD on a `draggable` element) and this
+   * (pointer events) can never both start.
+   *
+   * Pointer events rather than DnD deliberately: the DOM stays readable mid-drag
+   * (the harness depends on that) and there is no `dataTransfer` to contend
+   * with. Capture is taken on `.content` so the moves and the up land on the
+   * handlers below wherever the pointer goes, exactly as SplitDividers does on
+   * its 9px handles.
+   */
+  const onStripGrab = (key: CellKey) => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!placement.split) return;
+    e.preventDefault();
+    paneDrag.current = { key, x: e.clientX, y: e.clientY, moved: false, pointerId: e.pointerId };
+    contentRef.current?.setPointerCapture(e.pointerId);
+  };
+
+  /**
+   * SECOND entry: Alt + primary drag on a pane BODY — the only way to grab a
+   * pane whose strip is scrolled or covered.
+   *
+   * CAPTURE phase on `.content`, and the same reasoning as `paneProps`'
+   * click-to-focus: xterm stops propagation on its own container, so a bubbling
+   * handler never sees a press inside a terminal. Stopping the synthetic event
+   * here — while the browser is still at the root — means it never reaches
+   * xterm or FileBrowser at all, and `preventDefault()` suppresses the
+   * compatibility `mousedown` that would otherwise start an xterm text
+   * selection or an HTML5 file drag on a FileBrowser row.
+   *
+   * WITHOUT Alt none of that happens: the event is not intercepted, so plain
+   * drags reach xterm and FileBrowser byte-for-byte as they do today. Alt is
+   * the only modifier this app has not already spent (Ctrl = copy /
+   * toggle-select, Shift = move / range-select), and Alt+drag-to-move is the
+   * tiling-WM idiom a split-pane user already knows.
+   */
+  const onPaneDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!placement.split || !e.altKey || e.button !== 0 || !layout) return;
+    const el = e.target as Element;
+    if (el.closest?.('[data-panestrip]')) return; // the strip's own grab handles it
+    const tabId = el.closest?.('[data-pane]')?.getAttribute('data-pane');
+    const key = tabId ? keyOfTab(layout, tabId) : null;
+    if (!key) return;
+    e.preventDefault();
+    e.stopPropagation();
+    paneDrag.current = { key, x: e.clientX, y: e.clientY, moved: false, pointerId: e.pointerId };
+    // Same trick SplitDividers uses on its 9px handles: a drag that outruns the
+    // pane keeps delivering moves, with no window listeners to forget to remove.
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onPaneMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = paneDrag.current;
+    if (!g) return;
+    if (!g.moved) {
+      if (Math.abs(e.clientX - g.x) < PANE_DRAG_PX && Math.abs(e.clientY - g.y) < PANE_DRAG_PX) return;
+      g.moved = true;
+      measureDrop(true);
+      contentRef.current?.classList.add('dragging-pane');
+      // opacity + outline, NEVER a transform: a transformed ancestor changes an
+      // xterm's containing block and its getBoundingClientRect, which breaks
+      // fit and selection maths, and creates a stacking context that can hide
+      // the divider handles. The slot is what lifts, so the strip lifts with the
+      // body — the pane is one window, not a body with a hat.
+      slotEl(g.key)?.classList.add('pane-dragging');
+      const shown = layout && cellAt(layout, g.key)?.activeTabId;
+      if (shown) paneEl(shown)?.classList.add('pane-dragging');
+    }
+    const geom = dropGeom.current;
+    if (geom) paint(zoneAt(geom, e.clientX, e.clientY));
+  };
+
+  const onPaneUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = paneDrag.current;
+    const geom = dropGeom.current;
+    paneDrag.current = null;
+    if (!g) return;
+    endPaneDrag();
+    // Below the threshold this was a click, and a click on a pane (or on its
+    // strip's background) is the focus move `paneProps` would have made had the
+    // capture handler not swallowed it.
+    if (!g.moved) {
+      const shown = layout && cellAt(layout, g.key)?.activeTabId;
+      if (shown) selectTab(shown);
+      return;
+    }
+    if (e.type === 'pointercancel' || !geom) return;
+    applyPaneDrop(g.key, zoneAt(geom, e.clientX, e.clientY));
+  };
+
+  // Escape aborts a pane drag with no state change; `dragend` clears an
+  // indicator left over from a drag that ended somewhere else.
+  //
+  // Alt keyup must not pop the native menu bar out from under a drag.
+  // ponytail: Chromium already cancels menu activation once a mouse press
+  // intervenes, so this is only the belt. If some Windows build still flashes
+  // the menu, gate the drag on Alt at pointerdown only and drop the guard on
+  // the first pointermove.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (!paneDrag.current) return;
+      if (e.type === 'keyup') { if (e.key === 'Alt') e.preventDefault(); return; }
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      paneDrag.current = null;
+      endPaneDrag();
+    };
+    const done = () => endDrop();
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('keyup', key, true);
+    window.addEventListener('dragend', done, true);
+    return () => {
+      window.removeEventListener('keydown', key, true);
+      window.removeEventListener('keyup', key, true);
+      window.removeEventListener('dragend', done, true);
+    };
+  }, []);
+
+  /**
+   * Re-tile the panes into `cols` x `rows`. Nothing is ever closed: a target
+   * with fewer cells than there are panes MERGES tab sets (`reflow`'s own rule),
+   * so a 1x1 pick is the way back to classic tabs with every tab preserved and
+   * ordered as the panes read — `withLayout` collapses that single cell to
+   * `layout: null`.
+   */
+  const applyReflow = (cols: number, rows: number) => {
+    setPicker(false);
+    if (!layout) return; // no panes to rearrange
+    const next = reflow(layout, cols, rows);
+    if (!next) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+  };
+
+  /** Ctrl+Arrow inside the picker: swap the focused pane with its neighbour.
+   *  Committed per press, exactly like SplitDividers' arrow-key resize, and
+   *  therefore explicitly NOT part of what Escape reverts. */
+  const movePane = (dir: Side) => {
+    if (!layout || !focusedKey) return;
+    const n = neighbour(layout, focusedKey, dir);
+    if (!n) return;
+    const next = swapCells(layout, focusedKey, n);
+    if (next === layout) return;
+    mapActiveSpace((s) => withLayout(s, layout, next));
+  };
+
+  // Ctrl+Shift+G — the grid picker. Registered in the CAPTURE phase at window
+  // and, unlike Ctrl+1..9 above, NOT gated by `isTypingTarget`.
+  //
+  // Ctrl+Shift+<letter> is not a distinct control code: xterm sends the same ^G
+  // for Ctrl+G and Ctrl+Shift+G, which is precisely why every terminal emulator
+  // reserves the Ctrl+Shift row for itself. A plain Ctrl+1 must reach the shell;
+  // this must not. Capture at window is the first thing in the event path, so
+  // xterm's own textarea listener never runs and no ^G reaches the pty —
+  // preventDefault alone would be too late.
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.key.toLowerCase() !== 'g') return;
+      if (isTextBox(e.target)) return; // rename / address / search boxes only
+      e.preventDefault();
+      e.stopPropagation();
+      setPicker((p) => !p);
+    };
+    window.addEventListener('keydown', h, true);
+    return () => window.removeEventListener('keydown', h, true);
+  }, []);
 
   const splitActions: SplitActions = {
-    placed: placement.split ? Object.keys(placement.panes) : active ? [active] : [],
     split: placement.split,
     onSplit: splitPane,
     onClosePane: closePane,
   };
 
+  /**
+   * Every prop ONE strip needs — the single global one (`key === null`, no
+   * layout) or one pane's.
+   *
+   * A pane strip REUSES TabBar rather than forking a second strip component,
+   * and that is the whole reason group runs, pinned tabs, the sliding drag and
+   * the context menu behave in a pane exactly as they do in the window: there
+   * is one implementation, not two to keep in step. Everything that differs is
+   * a coordinate — the list, and where its order is written back to — which is
+   * what `key` threads through `applyToSlice` / `reorderTabs` / `togglePin`.
+   */
+  const stripProps = (key: CellKey | null, list: Tab[]) => ({
+    tabs: list,
+    groups,
+    groupActions: groupActionsFor(key),
+    splitActions,
+    status,
+    onSelect: selectTab,
+    onClose: closeTab,
+    onAdd: () => addTab(key),
+    onReorder: reorderTabs(key),
+    onReorderGroup: reorderGroup(key),
+    onTogglePin: togglePin(key),
+    onRename,
+    onOpenExplorer,
+    onOpenTerminal,
+    onOpenIde,
+    paneKey: key,
+  });
+
+  const spaceMenu = (
+    <SpaceMenu
+      spaces={spaces}
+      activeSpaceId={activeSpaceId}
+      onSwitch={switchToSpace}
+      onCreate={onCreateSpace}
+      onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
+      onDelete={onDeleteSpace}
+    />
+  );
+
   return (
     <div className="app">
-      <TabBar
-        tabs={spaceTabs}
-        groups={groups}
-        groupActions={groupActions}
-        splitActions={splitActions}
-        activeId={active}
-        status={status}
-        onSelect={selectTab}
-        onClose={closeTab}
-        onAdd={addTab}
-        onReorder={reorderTabs}
-        onReorderGroup={reorderGroup}
-        onTogglePin={togglePin}
-        onRename={onRename}
-        onOpenExplorer={onOpenExplorer}
-        onOpenTerminal={onOpenTerminal}
-        onOpenIde={onOpenIde}
-        spaceMenu={
-          <SpaceMenu
-            spaces={spaces}
-            activeSpaceId={activeSpaceId}
-            onSwitch={switchToSpace}
-            onCreate={onCreateSpace}
-            onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
-            onDelete={onDeleteSpace}
-          />
-        }
-      />
-      <div className="content" ref={contentRef} style={placement.container}>
+      {/* With a layout up the top bar keeps its CHROME and loses its tabs: the
+          same element, the same height, the same bottom rule, so nothing jumps
+          — the tab list and the `+` have moved into the per-pane strips, which
+          is what makes "which pane does a new tab open into?" answerable by
+          construction instead of by a rule. With no layout this is byte-for-byte
+          the strip it has always been. */}
+      {placement.split
+        ? <div className="tabbar spacebar">{spaceMenu}</div>
+        : <TabBar {...stripProps(null, spaceTabs)} activeId={active} spaceMenu={spaceMenu} />}
+      <div
+        className="content"
+        ref={contentRef}
+        style={placement.container}
+        // KAN-56. The drag handlers govern TAB drags only, so a file drag
+        // reaches FileBrowser exactly as before; the pointer handlers do
+        // nothing at all without Alt held. Capture phase — see contentDrop.
+        onDragOverCapture={contentDragOver}
+        onDropCapture={contentDrop}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) endDrop();
+        }}
+        onPointerDownCapture={onPaneDown}
+        onPointerMove={onPaneMove}
+        onPointerUp={onPaneUp}
+        onPointerCancel={onPaneUp}
+      >
         {/* Files and viewer panes are mounted only while visible, exactly as
             they were before split view — a FileBrowser has no alt-screen mode
             and no scrollback to lose, so there is nothing to keep alive off
@@ -963,6 +1554,43 @@ export function App() {
             </div>
           ) : null,
         )}
+        {/* PER-PANE TAB STRIPS (KAN-56), and they are FLAT SIBLINGS of the panes
+            for exactly the reason the panes themselves are flat: a component
+            that wrapped a pane's strip AND its content would re-parent every
+            xterm in the window on every cross-pane move and on every
+            `layout: null <-> grid` transition, which is KAN-23 per pane per
+            drag. So a cell gets a `.paneslot` carrying only its strip, placed
+            on the same grid by the same `grid-area` mechanism, and the tab's
+            own `.pane` is merely pushed down by `top: STRIP_PX` — a RESIZE of
+            an existing node, which Terminal.tsx already coalesces (KAN-50).
+
+            The slot is `pointer-events: none` so it cannot eat a click meant
+            for the pane under it; the strip inside re-enables them. A strip
+            remounting when its cell's anchor changes (a swap, a reflow) is
+            provably harmless — a strip holds no xterm, no scrollback and no
+            process. Only the terminal hosts are identity-critical, and they are
+            keyed by tab id in a parent that never changes.
+
+            The FOCUS RING lives here rather than on the pane: the thing with
+            focus is the whole window-like region, strip included. */}
+        {placement.cells.map((c) => {
+          const key = cellKey(c);
+          return (
+            <div
+              key={key}
+              className={c.tabIds.includes(active) ? 'paneslot pane-focused' : 'paneslot'}
+              data-cell={key}
+              style={placement.strips[key]}
+            >
+              <TabBar
+                {...stripProps(key, sliceOf(c.tabIds, tabs))}
+                activeId={c.activeTabId}
+                onAdopt={adoptInto(key)}
+                onPaneGrab={onStripGrab(key)}
+              />
+            </div>
+          );
+        })}
         {/* Handles only — no pane is a child of this component. Last, so a
             handle sits above the panes in paint order as well as in z-index. */}
         <SplitDividers
@@ -970,7 +1598,31 @@ export function App() {
           containerRef={contentRef}
           onResize={persistFractions}
         />
+        {/* The drop indicator (KAN-56). A SIBLING of the panes, never a
+            wrapper, and permanently mounted — conditional rendering would be a
+            React state change per drag, and the first-split gesture needs it
+            up before any split exists. Absolutely positioned with no grid
+            placement, so it takes `.content`'s padding box and does NOT become
+            a grid item; `pointer-events: none` guarantees it cannot eat a
+            dragover. Everything about it is written by `paint`. */}
+        <div className="drop-indicator" data-zone="" aria-hidden ref={indicatorRef} />
       </div>
+      {/* Rendered as a child of `.app`, NOT of `.content`, and that placement is
+          load-bearing: any in-flow child of a grid container is auto-placed into
+          the first free cell, so a popover inside `.content` would silently
+          claim a pane's rectangle (splitgrid.ts's container contract). */}
+      {picker && (
+        <GridPicker
+          // 0 with no split up: there is no arrangement to pick, so `canReflow`
+          // refuses every cell and the picker says so instead of offering a
+          // 1x1 that would only materialise the grid `layout: null` already is.
+          count={layout?.cells.length ?? 0}
+          anchor={contentRef.current?.getBoundingClientRect() ?? null}
+          onApply={applyReflow}
+          onMovePane={movePane}
+          onClose={() => setPicker(false)}
+        />
+      )}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );

@@ -9,7 +9,13 @@
 //     sibling — never re-parented, merely hidden when it is not on screen
 //     (that is KAN-23: an xterm that changes parent loses alt-screen mode and
 //     its scrollback);
-//   - each pane's whole contribution to the layout is `placement.panes[id]`.
+//   - each pane's whole contribution to the layout is `placement.panes[id]`;
+//   - one `.paneslot` per CELL (KAN-56), a FLAT SIBLING of the panes carrying
+//     that pane's strip and the focus ring, placed on the same grid by the same
+//     `grid-area` mechanism. A `<Pane>` component owning both the strip and the
+//     content would re-parent every xterm on every cross-pane move, which is
+//     the same KAN-23 constraint one level up — so the two are siblings and the
+//     tab's own `.pane` is merely pushed down by `top: STRIP_PX`.
 //
 // Every stand-in has the SAME shape as Terminal.tsx's outer node (a div at
 // width:100%/height:100% carrying its own ResizeObserver), so the harness
@@ -18,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GridCell, GridLayout } from '../../src/shared/types';
 import { SplitDividers } from '../../src/renderer/components/SplitDividers';
+import { cellKey } from '../../src/renderer/gridlayout';
 import { gridPlacement } from '../../src/renderer/splitgrid';
 import '../../src/renderer/index.css';
 
@@ -27,8 +34,12 @@ H.__roFires = {};     // tabId -> times the stand-in's OWN ResizeObserver fired
 H.__lastResize = null;
 H.__resizeCalls = 0;
 
+// KAN-56: a cell is a WINDOW with its own ordered strip, not a tab. One tab per
+// cell here on purpose — this is the GEOMETRY harness, and a pane's rectangle
+// does not depend on how many tabs its strip lists. Multi-tab panes, cross-pane
+// tab drags and strip order are splitview.mjs's job, against the real app.
 const cell = (tabId: string, col: number, row: number, colSpan = 1, rowSpan = 1): GridCell =>
-  ({ tabId, col, row, colSpan, rowSpan });
+  ({ tabIds: [tabId], activeTabId: tabId, col, row, colSpan, rowSpan });
 
 const grid = (cols: number, rows: number): GridLayout => {
   const cells: GridCell[] = [];
@@ -123,7 +134,7 @@ function Harness() {
       {ALL.map((id) => (
         <div
           key={id}
-          className={`pane${id === s.focused ? ' pane-focused' : ''}`}
+          className="pane"
           data-pane={id}
           style={placement.panes[id]}
           hidden={placement.split ? !placement.panes[id] : id !== s.focused}
@@ -132,6 +143,27 @@ function Harness() {
           <Stand tabId={id} />
         </div>
       ))}
+      {/* One slot per cell, flat sibling of the panes, holding ONLY the strip —
+          and wearing the focus ring, because with KAN-56 the thing that has
+          focus is the whole window-like region, strip included. `pointer-events:
+          none` on the slot (index.css) is what keeps it from eating a click
+          meant for the pane underneath, which the focus section relies on. */}
+      {placement.cells.map((c) => {
+        const key = cellKey(c);
+        return (
+          <div
+            key={key}
+            className={c.tabIds.includes(s.focused ?? '') ? 'paneslot pane-focused' : 'paneslot'}
+            data-cell={key}
+            style={placement.strips[key]}
+          >
+            {/* TabBar's own outer node, verbatim in class: `.panestrip` is what
+                carries `--panestrip-h`, so a drift between that and
+                splitgrid.ts's STRIP_PX shows up as real geometry here. */}
+            <div className="tabbar panestrip" data-panestrip={key}>{c.activeTabId}</div>
+          </div>
+        );
+      })}
       <SplitDividers
         placement={placement}
         containerRef={contentRef}

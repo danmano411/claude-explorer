@@ -133,12 +133,34 @@ export interface TabGroup {
 }
 
 /**
- * One cell of a split view. Rectangles rather than a left/right binary, so
- * `colSpan`/`rowSpan` let an m x n block sit anywhere in an N x N grid. Maps
- * straight onto CSS Grid, which is why there is no layout maths anywhere.
+ * One pane of a split view: a window-like region with its OWN ordered set of
+ * tabs and its own strip (KAN-56). Rectangles rather than a left/right binary
+ * or a split tree, so `colSpan`/`rowSpan` let an m x n block sit anywhere in an
+ * N x N grid. Maps straight onto CSS Grid, which is why there is no layout
+ * maths anywhere.
+ *
+ * INVARIANT, enforced by sanitize() (src/main/workspace.ts) and by
+ * gridPlacement() at render: with a layout present, every member of
+ * `Space.tabIds` is in EXACTLY ONE cell's `tabIds`. A tab in no cell is
+ * unreachable — it renders nowhere and no strip lists it. `layout: null` is
+ * shorthand for "one pane holding every tab of the space", which is why the
+ * classic single-strip path needs no cells at all.
+ *
+ * PERSISTED SHAPE CHANGE: 0.7.0 wrote one tab per cell as a single
+ * `{ tabId, col, row, colSpan, rowSpan }`. Those files are migrated forward in
+ * sanitize() by shape detection — `Workspace.version` stays 1, since the cell
+ * is self-describing and a downgrade degrades to `layout: null` rather than
+ * corrupting. Without that migration the membership filter reads `undefined`
+ * for every old cell and silently drops the whole layout.
  */
 export interface GridCell {
-  tabId: string
+  /** Ordered — THIS pane's strip order. Never empty: a cell that loses its
+   *  last tab is removed and its rectangle absorbed. */
+  tabIds: string[]
+  /** Which of `tabIds` this pane shows. Always a member. Per-pane memory;
+   *  `Space.activeTabId` is the global focus and names the FOCUSED pane's
+   *  active tab, so the focused pane is derived, never stored. */
+  activeTabId: string
   col: number // 0-based
   row: number
   colSpan: number
@@ -148,6 +170,8 @@ export interface GridCell {
 export interface GridLayout {
   cols: number
   rows: number
+  /** Fewer than 2 cells is not a split: every write chokepoint collapses such
+   *  a layout to `null` rather than leaving two ways to express one state. */
   cells: GridCell[]
 }
 
@@ -156,7 +180,11 @@ export interface GridLayout {
 export interface Space {
   id: string
   name: string
-  tabIds: string[] // ordered; membership of this space
+  /** Ordered; membership of this space. Authoritative for strip ORDER only
+   *  while `layout === null` — with a layout present it is kept equal to the
+   *  cells' `tabIds` concatenated in reading order, so there is exactly one
+   *  order truth and collapsing back to `layout: null` is free (KAN-56). */
+  tabIds: string[]
   // A cell naming a tab that has left this space is pruned in TWO places, both
   // of them chokepoints, so no caller carries the obligation (KAN-45
   // integration review #4): `sanitize()` (src/main/workspace.ts) drops it on
