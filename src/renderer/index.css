@@ -14,6 +14,11 @@
   --font-serif: "Times New Roman", Georgia, serif;
   --font-mono:  "Cascadia Mono", "Consolas", ui-monospace, monospace;
   --radius: 3px;
+  /* A pane's own tab strip (KAN-56). MUST equal splitgrid.ts's STRIP_PX: the
+     pane's grid-area style is built in JS, so the JS copy is load-bearing too.
+     ponytail: two sources for one number; fold into a CSS var read if it
+     drifts. */
+  --panestrip-h: 30px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -602,8 +607,10 @@ body {
   outline: none;
 }
 
-/* The focused pane's ring, applied by App.tsx only while a split is up (a lone
-   pane needs no "which one is focused").
+/* The focused pane's ring, applied by App.tsx to that cell's `.paneslot` while
+   a split is up (a lone pane needs no "which one is focused"). On the SLOT, not
+   on the pane: with KAN-56 the focused thing is the whole window-like region,
+   and a ring that stopped at the strip's bottom edge would say otherwise.
 
    An OUTLINE pulled inwards, not a border and not an inset box-shadow. A border
    shrinks the content box and would force every terminal in the grid to re-fit
@@ -643,6 +650,61 @@ body {
    the divider handles. Pointing is the indicator's job, not the pane's. */
 .pane-dragging { opacity: 0.55; outline: 2px dashed var(--clay); outline-offset: -2px; }
 .content.dragging-pane { cursor: grabbing; user-select: none; }
+
+/* ===== M5: per-pane tab strips (KAN-56) =====
+
+   One slot per cell, placed on the SAME grid as the panes by the same
+   `grid-area` mechanism (an absolutely positioned child with a definite grid
+   position takes that cell as its containing block, so `inset: 0` fills it).
+   It holds ONLY the strip — the pane's content is still a flat sibling of
+   `.content`, merely pushed down by the `top` gridPlacement() gives it, which
+   is what keeps a cross-pane move a resize instead of a re-parent (KAN-23).
+
+   `pointer-events: none` so the slot cannot eat a click destined for the pane
+   underneath; the strip re-enables them for itself. z-index sits below the
+   divider handles (2) and the drop indicator (3). */
+.paneslot { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.paneslot > .panestrip { pointer-events: auto; }
+
+/* A pane's strip is `.tabbar` at pane scale: same palette, same tab shape, same
+   bottom rule — smaller, because a pane is not a window. Everything here is a
+   size, never a colour. */
+.panestrip {
+  min-height: var(--panestrip-h);
+  padding: 4px 6px 0;
+  /* The BACKGROUND is the pane's title bar (TabBar's onPaneGrab fires only when
+     the press lands on the strip itself), so it says so. Every child sets its
+     own cursor, so this shows on exactly the region that can be grabbed. A
+     strip full enough to have no background left has none — Alt + the pane body
+     is the fallback for that, and for a strip scrolled out from under you. */
+  cursor: grab;
+  /* NARROW PANES. Tabs shrink first (`.tab-title` already ellipsizes), so a
+     three-tab pane at 200px shows three readable stubs rather than pushing the
+     `+` out of reach — which is the pre-existing `.tabbar` failure mode, and
+     far easier to hit in a pane. Past the point where shrinking runs out the
+     strip scrolls, with the bar hidden (30px has no room for one) and `+`
+     pinned to the right edge so there is always a way to open a tab here. */
+  overflow-x: auto;
+  overflow-y: hidden; /* `visible` would be coerced to `auto` and scroll by a px */
+  scrollbar-width: none;
+}
+.panestrip::-webkit-scrollbar { display: none; }
+.panestrip .tab {
+  flex: 0 1 auto; min-width: 0; max-width: 160px;
+  padding: 2px 8px; font-size: 13px;
+}
+.panestrip .tab.active { padding-top: 1px; max-width: 24ch; }
+.panestrip .tab.add {
+  flex: none; position: sticky; right: 0;
+  padding: 0 8px; font-size: 15px;
+}
+.panestrip .group-label { margin: 1px; padding: 0 6px; font-size: 12px; }
+.panestrip .tabgroup { padding: 0 2px; }
+
+/* No `.spacebar` rule on purpose: the top bar with a split up is `.tabbar` with
+   only the SpaceMenu in it, and SpaceMenu already centres itself — same
+   element, same height, same rule, so switching into split view moves no
+   chrome. The class is a hook for the harness, not a style. */
 
 /* The MxN arrangement picker (Ctrl+Shift+G). Fixed and centred over `.content`
    by App.tsx — see the render comment there for why it must not live inside it.

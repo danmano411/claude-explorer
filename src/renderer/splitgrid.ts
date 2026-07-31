@@ -1,10 +1,10 @@
 import type { CSSProperties } from 'react'
 import type { GridCell, GridLayout } from '../shared/types'
-import { inBounds, occupies, type Side } from './gridlayout'
+import { cellKey, inBounds, occupies, type CellKey, type Side } from './gridlayout'
 
 /** Re-exported so a caller doing drop handling imports one module, not two;
  *  `gridlayout` remains the single definition. */
-export type { Side }
+export type { Side, CellKey }
 
 /**
  * Pure geometry for the split-view render layer (KAN-46), the sibling of
@@ -24,17 +24,30 @@ export type { Side }
  * window on every `layout: null <-> grid` transition.
  *
  * So `gridPlacement()` computes styles for the elements App already has: one
- * style object for the existing flat container, one `grid-area` per tabId. The
- * panes are never re-parented, never re-keyed, never touched — only their
- * `style` changes. `layout: null` needs no special case at all: it returns an
- * empty container style, which leaves the container exactly the block box it is
- * today with one visible `inset: 0` pane in it.
+ * style object for the existing flat container, one `grid-area` for each cell's
+ * ACTIVE tab, and one for each cell's `.paneslot` (which carries that pane's
+ * strip, and is a flat sibling for the same reason). The panes are never
+ * re-parented, never re-keyed, never touched — only their `style` changes, and
+ * moving a tab between panes is therefore one `gridArea` write on a node that
+ * stays put. `layout: null` needs no special case at all: it returns an empty
+ * container style, which leaves the container exactly the block box it is today
+ * with one visible `inset: 0` pane in it.
  */
 
 /** Width of the visible seam between panes, painted by the grid's own `gap`
  *  showing the container background through. Once, on the container — not a
  *  ring per pane, which would double up on every interior edge. */
 export const SEAM_PX = 1
+
+/**
+ * Height of a pane's own tab strip (KAN-56). A pane is a window and a window
+ * has a title bar; the strip is that bar, and the pane BODY starts below it.
+ *
+ * ponytail: two sources for one number — this and `--panestrip-h` in
+ * index.css. The pane's grid-area style is built here in JS, so the JS copy is
+ * load-bearing; fold it into a CSS-var read if the two ever drift.
+ */
+export const STRIP_PX = 30
 
 /**
  * Track sizes are kept normalised to `sum === count`, so an untouched grid is
@@ -231,9 +244,14 @@ export interface GridPlacement {
   /** Spread onto the existing flat pane container. `{}` when `split` is false,
    *  so the container stays exactly the block box it is without split view. */
   container: CSSProperties
-  /** `tabId` -> the style for that tab's existing pane element. A tab absent
-   *  from this map has no pane in the grid and must not be shown. */
+  /** A cell's ACTIVE `tabId` -> the style for that tab's existing pane element.
+   *  A tab absent from this map is not the active tab of any cell and must not
+   *  be shown. Carries `top: STRIP_PX` so the pane starts below its own strip. */
   panes: Record<string, CSSProperties>
+  /** `cellKey` -> the style for that cell's `.paneslot`, which carries the
+   *  pane's strip. Empty when `split` is false: with no layout there is one
+   *  global strip and no slots at all. */
+  strips: Record<CellKey, CSSProperties>
   dividers: Divider[]
   /** Normalised track sizes, for the drag handler. */
   cols: number[]
@@ -243,7 +261,7 @@ export interface GridPlacement {
 }
 
 const EMPTY: GridPlacement = {
-  split: false, container: {}, panes: {}, dividers: [], cols: [1], rows: [1], cells: [],
+  split: false, container: {}, panes: {}, strips: {}, dividers: [], cols: [1], rows: [1], cells: [],
 }
 
 /**
@@ -260,11 +278,14 @@ const EMPTY: GridPlacement = {
  * true the container must contain only panes and dividers.
  *
  * `layout.cells` is sanitised here, not trusted: it comes from `workspace.json`,
- * a file on disk. `gridlayout` enforces three invariants that a hand-edited file
- * does not — in bounds, one cell per tab, no overlaps — and all three matter at
- * render time. Out of bounds makes CSS grid invent implicit tracks and wrecks
- * the layout; a duplicate `tabId` makes two panes claim one terminal; an
- * overlap stacks panes silently. First cell wins, the rest are dropped.
+ * a file on disk. `gridlayout` enforces the invariants a hand-edited file does
+ * not — in bounds, no overlaps, a tab in exactly one cell, a non-empty strip
+ * whose `activeTabId` is a member — and all of them matter at render time. Out
+ * of bounds makes CSS grid invent implicit tracks and wrecks the layout; a tab
+ * id claimed twice makes two panes claim one terminal; an overlap stacks panes
+ * silently. First cell wins: a repeated tab id is dropped from the LATER cell
+ * rather than taking the whole cell down with it, and a cell left with no tabs
+ * is dropped.
  */
 export function gridPlacement(
   layout: GridLayout | null | undefined,
@@ -274,21 +295,37 @@ export function gridPlacement(
   if (!layout) return EMPTY
 
   const seenTab = new Set<string>()
+  const seenCell = new Set<CellKey>()
   const taken = new Set<string>()
   const cells: GridCell[] = []
   for (const c of layout.cells) {
-    if (!c.tabId || seenTab.has(c.tabId) || !inBounds(layout, c)) continue
+    if (seenCell.has(cellKey(c)) || !Array.isArray(c.tabIds) || !inBounds(layout, c)) continue
+    const tabIds = c.tabIds.filter((id) => id && !seenTab.has(id))
+    if (!tabIds.length) continue
     const keys = occupies(c)
     if (keys.some((k) => taken.has(k))) continue
-    seenTab.add(c.tabId)
+    for (const id of tabIds) seenTab.add(id)
+    seenCell.add(cellKey(c))
     for (const k of keys) taken.add(k)
-    cells.push(c)
+    cells.push({
+      ...c,
+      tabIds,
+      activeTabId: tabIds.includes(c.activeTabId) ? c.activeTabId : tabIds[0],
+    })
   }
   if (!cells.length) return EMPTY
 
   const clean: GridLayout = { cols: layout.cols, rows: layout.rows, cells }
   const panes: Record<string, CSSProperties> = {}
-  for (const c of cells) panes[c.tabId] = cellArea(c)
+  const strips: Record<CellKey, CSSProperties> = {}
+  for (const c of cells) {
+    // The pane and its strip share a grid area; the pane is pushed down by the
+    // strip's height. `top` beats the stylesheet's `inset: 0` from the style
+    // attribute, so this is a RESIZE of a node that never moves — which is what
+    // keeps an xterm alive across a pane change (KAN-23).
+    panes[c.activeTabId] = { ...cellArea(c), top: STRIP_PX }
+    strips[cellKey(c)] = cellArea(c)
+  }
 
   return {
     split: true,
@@ -302,6 +339,7 @@ export function gridPlacement(
       background: 'var(--line)',
     },
     panes,
+    strips,
     dividers: dividers(clean),
     cols: normalizeFractions(colFractions, layout.cols),
     rows: normalizeFractions(rowFractions, layout.rows),
@@ -323,13 +361,17 @@ export function gridPlacement(
 
 /** A measured box, in CONTAINER-RELATIVE px. */
 export interface Box { left: number; top: number; width: number; height: number }
-export interface PaneBox extends Box { tabId: string }
+/** A pane's BODY box — the cell minus its strip. The strip is a real element
+ *  with its own handlers, so a drop on it never reaches this hit-test at all;
+ *  that is how "the strip wins over the edge quarter" is enforced structurally
+ *  rather than by a fourth priority rule. */
+export interface PaneBox extends Box { cell: CellKey }
 export interface SeamBox extends Box { axis: 'col' | 'row'; index: number; start: number; end: number }
 
 export type DropZone =
   | { kind: 'none' }
-  | { kind: 'centre'; tabId: string; box: Box }
-  | { kind: 'edge'; tabId: string; side: Side; box: Box }
+  | { kind: 'centre'; cell: CellKey; box: Box }
+  | { kind: 'edge'; cell: CellKey; side: Side; box: Box }
   | { kind: 'seam'; axis: 'col' | 'row'; index: number; start: number; end: number; box: Box }
 
 /** How much of a pane, per edge, is "split here" rather than "replace this". */
@@ -341,8 +383,9 @@ export const EDGE_FRACTION = 0.25
  * to grab to bring it back (`resizeFractions`' own reasoning).
  *
  * ponytail: this measures the PANE, not the track the split will actually cut,
- * so a pane spanning several tracks can be refused slightly early. Measure the
- * track if anyone hits it.
+ * so a pane spanning several tracks can be refused slightly early. It also
+ * ignores the strip's `STRIP_PX`, so a row split is refused ~30px earlier than
+ * strictly necessary. Pass a per-axis minimum if anyone hits either.
  */
 export const MIN_SPLIT_PX = 2 * MIN_PANE_PX + SEAM_PX
 
@@ -377,7 +420,10 @@ function half(b: Box, side: Side): Box {
 }
 
 /**
- * Where a drop at `(x, y)` would go. Priority is seam > edge > centre.
+ * Where a drop at `(x, y)` would go. Priority is seam > strip > edge > centre —
+ * and the STRIP is not in this function at all, because it is a real element
+ * whose own handler takes the drop before the container's ever sees it. The
+ * boxes passed here are pane BODIES, so a strip cannot be hit by accident.
  *
  * THE GEOMETRY, and why it is distances-to-edges rather than four rectangles:
  * with `dl, dr, dt, db` the pointer's normalised distances to the four edges and
@@ -419,16 +465,16 @@ export function dropZone(
   const [side, m] = d.reduce((best, e) => (e[1] < best[1] ? e : best))
   const horiz = side === 'left' || side === 'right'
   if (m >= EDGE_FRACTION || (horiz ? p.width : p.height) < MIN_SPLIT_PX)
-    return { kind: 'centre', tabId: p.tabId, box: whole }
-  return { kind: 'edge', tabId: p.tabId, side, box: half(whole, side) }
+    return { kind: 'centre', cell: p.cell, box: whole }
+  return { kind: 'edge', cell: p.cell, side, box: half(whole, side) }
 }
 
 /** Stable identity of a zone. The caller compares this against the last one to
  *  decide whether to touch the DOM at all, which is what keeps a pointermove
  *  free of work. Seams reuse `dividerId`, so a zone and its handle agree. */
 export function zoneId(z: DropZone): string {
-  if (z.kind === 'centre') return `centre:${z.tabId}`
-  if (z.kind === 'edge') return `edge:${z.tabId}:${z.side}`
+  if (z.kind === 'centre') return `centre:${z.cell}`
+  if (z.kind === 'edge') return `edge:${z.cell}:${z.side}`
   if (z.kind === 'seam') return `seam:${dividerId(z)}`
   return 'none'
 }

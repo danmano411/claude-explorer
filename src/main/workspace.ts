@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { join } from 'node:path'
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
-import type { PersistedTab, Space, Workspace } from '../shared/types'
+import type { GridCell, GridLayout, PersistedTab, Space, Workspace } from '../shared/types'
 // Pure logic, no DOM and no electron — lives under shared/ (KAN-43 review D-5:
 // it used to sit under renderer/, which meant a main-process file importing it
 // pulled a renderer module into the main bundle). Importing it here is
@@ -21,6 +21,127 @@ export function emptyWorkspace(): Workspace {
     tabs: [],
     activeSpaceId: id,
   }
+}
+
+/** A finite integer >= `min`, or null. Geometry read off disk goes through
+ *  here so a hand-edited `"2"`, a `2.5` or a missing field can never become
+ *  NaN in a CSS grid-area. */
+function int(v: unknown, min: number): number | null {
+  const n = typeof v === 'number' ? Math.trunc(v) : NaN
+  return Number.isFinite(n) && n >= min ? n : null
+}
+
+/** Half-open rectangle intersection. Duplicating gridlayout's `overlaps` was
+ *  the alternative to importing a renderer module into the main bundle — the
+ *  thing the module doc above says this file will not do. Three lines. */
+function rectsOverlap(a: GridCell, b: GridCell): boolean {
+  return (
+    a.col < b.col + b.colSpan &&
+    b.col < a.col + a.colSpan &&
+    a.row < b.row + b.rowSpan &&
+    b.row < a.row + a.rowSpan
+  )
+}
+
+/**
+ * The layout as it survives a read: cells migrated forward from every shape
+ * this app has written, pruned against THIS space's membership, and with every
+ * remaining member adopted so "exactly one cell per tab" holds (KAN-56).
+ *
+ * Shape detection, not a version bump. 0.7.0 wrote one tab per cell as
+ * `{ tabId, col, row, colSpan, rowSpan }`; 0.8.0 writes an ordered `tabIds`
+ * plus the pane's own `activeTabId`. A cell is self-describing, so both are
+ * readable out of a `version: 1` file and a downgrade degrades to
+ * `layout: null` rather than corrupting. Reading the old shape with the new
+ * membership predicate would see `undefined` for every cell, drop them all, and
+ * silently destroy the split view of every upgrading user — which is the whole
+ * reason this function exists rather than one more `.filter`.
+ *
+ * Returns null for "not a split": fewer than two usable cells (one pane IS
+ * `layout: null`, and leaving two ways to say that is a permanent dead end —
+ * KAN-46 review #1), or track counts too broken to place anything against. A
+ * refusal here never loses a tab: the caller falls back to the single strip,
+ * which holds every member.
+ */
+function migrateLayout(
+  raw: unknown,
+  memberIds: readonly string[],
+  activeTabId: string | undefined,
+): GridLayout | null {
+  const l = raw as (Partial<GridLayout> & { cells?: unknown }) | null
+  if (!l || typeof l !== 'object' || !Array.isArray(l.cells)) return null
+  const cols = int(l.cols, 1)
+  const rows = int(l.rows, 1)
+  // Unusable track counts are not repairable without inventing a grid the user
+  // never chose. Deriving them from the cells would also make the out-of-bounds
+  // check below vacuous, which is the one thing keeping a corrupt rectangle out
+  // of the render path.
+  if (cols === null || rows === null) return null
+
+  const members = new Set(memberIds)
+  const seen = new Set<string>()
+  const cells: GridCell[] = []
+  for (const entry of l.cells as unknown[]) {
+    const c = entry as (Partial<GridCell> & { tabId?: unknown }) | null
+    if (!c || typeof c !== 'object') continue
+
+    // `tabIds` wins when both are present: a file carrying both was hand-edited,
+    // and the new field is the one it means.
+    const claimed = Array.isArray(c.tabIds) ? c.tabIds : typeof c.tabId === 'string' ? [c.tabId] : []
+    // Prune, in one pass, the two ways a cell can name a tab it may not have:
+    // one that has left this space (a cell naming another space's tab would
+    // paint that space's tab into this one's pane), and one an earlier cell
+    // already took (first occurrence wins, as everywhere else in sanitize).
+    const tabIds = claimed.filter(
+      (id): id is string => typeof id === 'string' && members.has(id) && !seen.has(id),
+    )
+    if (!tabIds.length) continue
+
+    const col = int(c.col, 0)
+    const row = int(c.row, 0)
+    if (col === null || row === null) continue
+    const cell: GridCell = {
+      tabIds,
+      activeTabId:
+        typeof c.activeTabId === 'string' && tabIds.includes(c.activeTabId)
+          ? c.activeTabId
+          : tabIds[0],
+      col,
+      row,
+      // A missing/garbage span is the one field worth guessing at: 1 is what
+      // every cell this app has ever written outside a deliberate split has.
+      colSpan: int(c.colSpan, 1) ?? 1,
+      rowSpan: int(c.rowSpan, 1) ?? 1,
+    }
+    if (col + cell.colSpan > cols || row + cell.rowSpan > rows) continue
+    if (cells.some((o) => rectsOverlap(o, cell))) continue
+
+    for (const id of tabIds) seen.add(id)
+    cells.push(cell)
+  }
+  if (cells.length < 2) return null
+
+  // Reading order (row, then col) is the canonical cell order: `Space.tabIds`
+  // is its concatenation, so the strip you get back on collapsing to
+  // `layout: null` reads the way the panes did.
+  cells.sort((a, b) => a.row - b.row || a.col - b.col)
+
+  // Orphans — THE normal case on upgrade, not an edge case: 0.7.0 held one tab
+  // per cell, so a 10-tab two-pane space arrives with 8 tabs in no pane at all,
+  // and a tab in no pane is unreachable (nothing renders it, no strip lists it).
+  // They join the pane holding the tab the user was last looking at, falling
+  // back to the top-left one — the same rule sanitize() already applies to a tab
+  // no space claims, and for the same reason: it lands where you are looking.
+  // Re-sorting by the file's own membership order restores the exact 0.7.0 strip
+  // order; it only ever runs when there is something to adopt.
+  const orphans = memberIds.filter((id) => !seen.has(id))
+  if (orphans.length) {
+    const recv =
+      cells.find((c) => activeTabId !== undefined && c.tabIds.includes(activeTabId)) ?? cells[0]
+    const rank = new Map(memberIds.map((id, i) => [id, i] as const))
+    recv.tabIds = [...recv.tabIds, ...orphans].sort((a, b) => rank.get(a)! - rank.get(b)!)
+  }
+  return { cols, rows, cells }
 }
 
 /**
@@ -49,6 +170,10 @@ export function emptyWorkspace(): Workspace {
  *    because every lookup in spaces.ts is a `findIndex` on the id.
  *  - **`activeTabId` names a member** of its own space, or is absent.
  *  - At least one space exists, and `activeSpaceId` names one of them.
+ *  - **Every member is in exactly one pane**, or there is no layout at all —
+ *    see `migrateLayout` above, which also carries 0.7.0's one-tab-per-cell
+ *    files forward. With a layout present `tabIds` equals the cells' tab lists
+ *    concatenated in reading order.
  */
 export function sanitize(raw: unknown): Workspace {
   const w = raw as Partial<Workspace> | null
@@ -120,7 +245,33 @@ export function sanitize(raw: unknown): Workspace {
   members[activeIdx].push(...tabs.filter((t) => !claimed.has(t.id)))
 
   const spaces = kept.map((s, i) => {
-    const tabIds = normalize(members[i], groups).map((t) => t.id)
+    const memberIds = members[i].map((t) => t.id)
+    const layout = migrateLayout(s.layout, memberIds, s.activeTabId)
+
+    // normalize() repairs the ordering invariants of a RENDERED strip
+    // (pinned-first, one contiguous run per group), so it runs over whatever a
+    // strip actually is: with a layout there is one strip per pane, so it runs
+    // per cell slice; without one there is a single strip, so the space slice
+    // IS the strip. Same relaxation KAN-45 made when contiguity moved from the
+    // flat tab list to a space's slice — one level further down.
+    const order = (ids: readonly string[]) =>
+      normalize(
+        ids.map((id) => byId.get(id)!),
+        groups,
+      ).map((t) => t.id)
+
+    // `tabIds` stays authoritative for membership either way, and for ORDER
+    // only when there is no layout: with one it is the cells' tab lists
+    // concatenated in reading order, so there is exactly one order truth and
+    // collapsing back to `layout: null` neither reorders nor loses a tab.
+    let tabIds: string[]
+    if (layout) {
+      for (const c of layout.cells) c.tabIds = order(c.tabIds)
+      tabIds = layout.cells.flatMap((c) => c.tabIds)
+    } else {
+      tabIds = order(memberIds)
+    }
+
     return {
       ...s,
       tabIds,
@@ -128,20 +279,7 @@ export function sanitize(raw: unknown): Workspace {
       // a blank pane. Absent (a v0.4.0 file) is fine — restore falls back to
       // the first tab.
       activeTabId: s.activeTabId && tabIds.includes(s.activeTabId) ? s.activeTabId : undefined,
-      // A cell is checked against THIS space's membership, not against every
-      // tab that exists: a cell naming a tab another space owns would paint
-      // that space's tab into this one's pane, which is the same phantom the
-      // one-owner rule exists to prevent.
-      //
-      // Empty (not just filtered) collapses to `null`: a layout whose cells all
-      // died is not a split any more, and leaving `{ cells: [] }` on disk (still
-      // truthy) is a permanent, silent dead end — splitPane bases off `s.layout`
-      // and never sees a reason to fall back to `single()` (KAN-46 review #1).
-      layout: (() => {
-        if (!s.layout || !Array.isArray(s.layout.cells)) return null
-        const cells = s.layout.cells.filter((c) => c && tabIds.includes(c.tabId))
-        return cells.length ? { ...s.layout, cells } : null
-      })(),
+      layout,
     }
   })
 
