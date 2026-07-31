@@ -52,11 +52,17 @@ const workspaceOf = (tabs: PersistedTab[]): Workspace => ({
 })
 
 describe('agentSpawnedTabCount', () => {
-  it('is 0 against an empty (never-written) workspace', () => {
+  it('is 0 against an empty (never-written) workspace, and is not just a stub that always says 0', () => {
     // getWorkspace() falls back to emptyWorkspace() when the file is absent —
     // exactly the state of a brand-new profile, which must not look like it
-    // is already at the cap.
+    // is already at the cap. On its own that expectation passes for a
+    // function that unconditionally returns 0, so this test also writes an
+    // agent-spawned tab afterward and requires the count to move to 1 — the
+    // only way to tell "correctly computed 0 from an empty workspace" apart
+    // from "always returns 0 no matter what's on disk".
     expect(agentSpawnedTabCount()).toBe(0)
+    setWorkspace(workspaceOf([tab('boundary-check', { agentSpawned: true })]))
+    expect(agentSpawnedTabCount()).toBe(1)
   })
 
   it('counts a restored terminal tab marked agentSpawned even though it has never had a process', () => {
