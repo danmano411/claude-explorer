@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { Workspace } from '../src/shared/types'
+import type { Space, Workspace } from '../src/shared/types'
 
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\userData' } }))
 
@@ -15,6 +15,12 @@ const base = (): Workspace => ({
   spaces: [{ id: 's1', name: 'Space', tabIds: ['t1', 't2'], layout: null }],
   activeSpaceId: 's1',
 })
+
+/** Cells by row then col — the canonical order `Space.tabIds` concatenates. */
+const strips = (s: Space) =>
+  [...(s.layout?.cells ?? [])]
+    .sort((a, b) => a.row - b.row || a.col - b.col)
+    .map((c) => c.tabIds)
 
 describe('sanitize', () => {
   it('passes a well-formed workspace through intact', () => {
@@ -42,18 +48,6 @@ describe('sanitize', () => {
     const out = sanitize(w)
     expect(out.tabs.map((t) => t.id)).toEqual(['t1', 't2'])
     expect(out.tabs[0].groupId).toBeUndefined()
-  })
-
-  it('drops grid cells pointing at tabs that are gone', () => {
-    const w = base()
-    w.spaces[0].layout = {
-      cols: 2, rows: 1,
-      cells: [
-        { tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
-        { tabId: 'ghost', col: 1, row: 0, colSpan: 1, rowSpan: 1 },
-      ],
-    }
-    expect(sanitize(w).spaces[0].layout!.cells.map((c) => c.tabId)).toEqual(['t1'])
   })
 
   it('repairs an activeSpaceId that names no space', () => {
@@ -131,9 +125,7 @@ describe('sanitize', () => {
 
   // KAN-43 review D-2: normalize() above can reorder `tabs`, but a space's
   // membership list used to keep the PRE-normalize order from the raw file —
-  // one document, two disagreeing orders. Invisible today (App.tsx renders
-  // `tabs`, not `tabIds`), but KAN-45's switcher reads `tabIds` directly, so it
-  // must agree with the order `tabs` actually ends up in.
+  // one document, two disagreeing orders.
   it('orders a space members to match the post-normalize tabs list', () => {
     const w = base()
     w.tabs = [
@@ -147,9 +139,6 @@ describe('sanitize', () => {
     expect(out.spaces[0].tabIds).toEqual(out.tabs.map((t) => t.id))
   })
 
-  // Same normalize() dedupe as groups.test.ts's D-3 case, exercised through the
-  // main sanitize() entry point: a hand-edited file listing one tab id twice in
-  // `tabIds` must not reach the renderer as two tabs sharing a React key.
   it('dedupes a space that lists the same tab id twice', () => {
     const w = base()
     w.spaces[0].tabIds = ['t1', 't2', 't2']
@@ -157,8 +146,7 @@ describe('sanitize', () => {
   })
 
   // KAN-53: pinned-before-unpinned is the second ordering invariant of the
-  // rendered strip, so it is repaired in the same single place as contiguity —
-  // not sorted in the component on every render.
+  // rendered strip, so it is repaired in the same single place as contiguity.
   it('hoists a pinned tab to the front of its space, dropping any group it was in', () => {
     const w = base()
     w.tabs = [
@@ -172,13 +160,319 @@ describe('sanitize', () => {
     expect(out.spaces[0].tabIds).toEqual(['t3', 't1', 't2', 't4'])
     expect(out.tabs.find((t) => t.id === 't3')?.groupId).toBeUndefined()
     expect(out.tabs.find((t) => t.id === 't3')?.pinned).toBe(true)
-    // g1's survivors are still one unbroken run.
     expect(out.spaces[0].tabIds.indexOf('t2') - out.spaces[0].tabIds.indexOf('t1')).toBe(1)
   })
 })
 
 /**
- * KAN-45 review D-4: these four repairs used to live in a second normalizer in
+ * KAN-56 — THE UPGRADE PATH.
+ *
+ * Shipped 0.7.0 wrote one tab per cell as `{ tabId, col, row, colSpan, rowSpan }`.
+ * 0.8.0 makes a cell a WINDOW: an ordered `tabIds` plus its own `activeTabId`.
+ * Read with the new membership predicate, a 0.7.0 cell reads `undefined` for
+ * every id, EVERY cell is dropped, and the split layout of every existing user
+ * is silently destroyed on first launch.
+ *
+ * These fixtures are therefore the literal bytes of a 0.7.0 `workspace.json`,
+ * parsed from text — NOT a round-trip of the new writer, which cannot catch this
+ * class of bug at all because it never emits the shape that breaks.
+ */
+describe('sanitize — 0.7.0 layout migration (KAN-56)', () => {
+  const V070 = `{
+    "version": 1,
+    "groups": [],
+    "tabs": [
+      { "id": "a", "view": "terminal", "cwd": "C:\\\\repo", "title": "a" },
+      { "id": "b", "view": "files", "cwd": "C:\\\\repo", "title": "b" },
+      { "id": "c", "view": "files", "cwd": "C:\\\\repo", "title": "c" },
+      { "id": "d", "view": "files", "cwd": "C:\\\\repo", "title": "d" },
+      { "id": "e", "view": "files", "cwd": "C:\\\\repo", "title": "e" },
+      { "id": "f", "view": "files", "cwd": "C:\\\\repo", "title": "f" },
+      { "id": "g", "view": "files", "cwd": "C:\\\\repo", "title": "g" },
+      { "id": "h", "view": "files", "cwd": "C:\\\\repo", "title": "h" },
+      { "id": "i", "view": "files", "cwd": "C:\\\\repo", "title": "i" },
+      { "id": "j", "view": "files", "cwd": "C:\\\\repo", "title": "j" }
+    ],
+    "spaces": [
+      {
+        "id": "s1",
+        "name": "Space",
+        "tabIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+        "activeTabId": "a",
+        "layout": {
+          "cols": 2,
+          "rows": 1,
+          "cells": [
+            { "tabId": "a", "col": 0, "row": 0, "colSpan": 1, "rowSpan": 1 },
+            { "tabId": "b", "col": 1, "row": 0, "colSpan": 1, "rowSpan": 1 }
+          ]
+        },
+        "colFractions": [1.2, 0.8],
+        "rowFractions": [1]
+      }
+    ],
+    "activeSpaceId": "s1"
+  }`
+
+  const v070 = () => JSON.parse(V070)
+
+  // THE assertion this whole section exists for. Against a build that reads only
+  // `cell.tabIds`, both cells drop, `cells.length < 2`, and layout is null.
+  it('keeps a 0.7.0 split alive instead of collapsing it to one pane', () => {
+    const s = sanitize(v070()).spaces[0]
+    expect(s.layout).not.toBeNull()
+    expect(s.layout!.cells).toHaveLength(2)
+    expect([s.layout!.cols, s.layout!.rows]).toEqual([2, 1])
+  })
+
+  // 0.7.0 held ONE tab per cell, so a 10-tab two-pane space arrives with 8 tabs
+  // in no pane at all — and a tab in no pane is unreachable: nothing renders it
+  // and no strip lists it. They join the pane holding the tab the user was last
+  // looking at, in the order the file already had them.
+  it('adopts the 8 tabs that were in no cell into the pane the user was looking at', () => {
+    const s = sanitize(v070()).spaces[0]
+    expect(strips(s)).toEqual([
+      ['a', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'],
+      ['b'],
+    ])
+    expect(s.layout!.cells[0].activeTabId).toBe('a')
+  })
+
+  // "The pane you were looking at" is the rule, not "the top-left one": those
+  // coincide in the fixture above, so this moves the focus to the second pane.
+  it('adopts them into whichever pane holds activeTabId, not just the first', () => {
+    const w = v070()
+    w.spaces[0].activeTabId = 'b'
+    expect(strips(sanitize(w).spaces[0])).toEqual([
+      ['a'],
+      ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'],
+    ])
+  })
+
+  it('loses no tab and duplicates none: every member is in exactly one cell', () => {
+    const before = v070()
+    const s = sanitize(before).spaces[0]
+    const placed = s.layout!.cells.flatMap((c) => c.tabIds)
+    expect([...placed].sort()).toEqual([...before.spaces[0].tabIds].sort())
+    expect(new Set(placed).size).toBe(placed.length)
+  })
+
+  // `Space.tabIds` is the cells' strips concatenated in reading order while a
+  // layout is present, so there is exactly one order truth and collapsing back
+  // to `layout: null` neither reorders nor loses a tab.
+  it('rewrites tabIds to the cells read in reading order', () => {
+    const s = sanitize(v070()).spaces[0]
+    expect(s.tabIds).toEqual(strips(s).flat())
+    expect(s.tabIds).toEqual(['a', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'b'])
+  })
+
+  it('carries the 0.7.0 track fractions through untouched', () => {
+    const s = sanitize(v070()).spaces[0]
+    expect(s.colFractions).toEqual([1.2, 0.8])
+    expect(s.rowFractions).toEqual([1])
+  })
+
+  it('falls back to the top-left pane when activeTabId names nothing placed', () => {
+    const w = v070()
+    delete w.spaces[0].activeTabId
+    // Listed out of reading order, to prove the fallback is the top-left cell
+    // and not merely the first entry in the array.
+    w.spaces[0].layout.cells.reverse()
+    expect(strips(sanitize(w).spaces[0])[0]).toEqual(['a', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+  })
+
+  // One pane IS `layout: null`, and leaving two ways to say that is a permanent
+  // dead end: the second one keeps a focus ring and a divider alive over what
+  // the user sees as ordinary tabs.
+  it('collapses a lone 0.7.0 cell to null, with the strip order untouched', () => {
+    const w = v070()
+    w.spaces[0].layout.cells.pop()
+    const s = sanitize(w).spaces[0]
+    expect(s.layout).toBeNull()
+    expect(s.tabIds).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+  })
+
+  // A cell naming a tab that has left the space would paint another space's tab
+  // into this one's pane. Pruning it can leave too few cells to be a split.
+  it('prunes a cell naming a tab that is not a member, and collapses if too few remain', () => {
+    const w = v070()
+    w.spaces[0].layout.cells[1].tabId = 'ghost'
+    const s = sanitize(w).spaces[0]
+    expect(s.layout).toBeNull()
+    expect(s.tabIds).toHaveLength(10)
+  })
+
+  it('keeps the split when a pruned cell still leaves two', () => {
+    const w = v070()
+    w.spaces[0].layout.cols = 3
+    w.spaces[0].layout.cells.push({ tabId: 'ghost', col: 2, row: 0, colSpan: 1, rowSpan: 1 })
+    w.spaces[0].layout.cells.push({ tabId: 'c', col: 2, row: 0, colSpan: 1, rowSpan: 1 })
+    const s = sanitize(w).spaces[0]
+    expect(strips(s).map((ids) => ids.length)).toEqual([8, 1, 1])
+    expect(strips(s)[2]).toEqual(['c'])
+  })
+
+  it('keeps a repeated tab id in the first cell only', () => {
+    const w = v070()
+    w.spaces[0].layout.cells[1].tabId = 'a'
+    const s = sanitize(w).spaces[0]
+    // The second cell is left with nothing to hold and goes, so this is no
+    // longer a split — but `a` is still in exactly one place.
+    expect(s.layout).toBeNull()
+    expect(s.tabIds.filter((id) => id === 'a')).toHaveLength(1)
+  })
+
+  it('sorts the cells into reading order however the file listed them', () => {
+    const w = v070()
+    w.spaces[0].layout.cols = 2
+    w.spaces[0].layout.rows = 2
+    w.spaces[0].layout.cells = [
+      { tabId: 'd', col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+      { tabId: 'c', col: 0, row: 1, colSpan: 1, rowSpan: 1 },
+      { tabId: 'b', col: 1, row: 0, colSpan: 1, rowSpan: 1 },
+      { tabId: 'a', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+    ]
+    const s = sanitize(w).spaces[0]
+    expect(s.layout!.cells.map((c) => c.tabIds[0])).toEqual(['a', 'b', 'c', 'd'])
+    expect(s.tabIds.slice(-3)).toEqual(['b', 'c', 'd'])
+  })
+
+  it('drops an out-of-bounds cell and re-adopts its tabs rather than losing them', () => {
+    const w = v070()
+    w.spaces[0].layout.cells.push({ tabId: 'c', col: 7, row: 0, colSpan: 1, rowSpan: 1 })
+    const s = sanitize(w).spaces[0]
+    expect(s.layout!.cells).toHaveLength(2)
+    expect(strips(s)[0]).toContain('c')
+    expect(s.tabIds).toHaveLength(10)
+  })
+
+  it('drops an overlapping cell and re-adopts its tabs', () => {
+    const w = v070()
+    w.spaces[0].layout.cells.push({ tabId: 'c', col: 1, row: 0, colSpan: 1, rowSpan: 1 })
+    const s = sanitize(w).spaces[0]
+    expect(s.layout!.cells).toHaveLength(2)
+    expect(strips(s)[1]).toEqual(['b']) // the first cell at 1,0 kept its rectangle
+    expect(strips(s)[0]).toContain('c')
+  })
+
+  // normalize() repairs the ordering invariants of a RENDERED strip, and with a
+  // layout there is one strip per PANE — so a pinned tab is hoisted inside its
+  // own pane, not dragged across the window into another one.
+  it('repairs pinned-first per pane, not per space', () => {
+    const w = v070()
+    w.tabs[3].pinned = true // 'd', which the orphan pass puts in the first pane
+    w.spaces[0].layout.cells[1] = { tabId: 'b', col: 1, row: 0, colSpan: 1, rowSpan: 1 }
+    const s = sanitize(w).spaces[0]
+    expect(strips(s)[0][0]).toBe('d')
+    expect(strips(s)[1]).toEqual(['b'])
+  })
+
+  it('keeps a group contiguous inside the pane that holds it', () => {
+    const w = v070()
+    w.groups = [{ id: 'g1', name: 'Repo', color: '#C15F3C', collapsed: false }]
+    w.tabs[0].groupId = 'g1' // 'a'
+    w.tabs[4].groupId = 'g1' // 'e'
+    const ids = strips(sanitize(w).spaces[0])[0]
+    expect(ids.indexOf('e') - ids.indexOf('a')).toBe(1)
+  })
+
+  it('still loads a 0.4.0 file, which has no layout field at all', () => {
+    const w = v070()
+    delete w.spaces[0].layout
+    const s = sanitize(w).spaces[0]
+    expect(s.layout).toBeNull()
+    expect(s.tabIds).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+  })
+
+  it('reads a file that mixes 0.7.0 and 0.8.0 cells in one array', () => {
+    const w = v070()
+    w.spaces[0].layout.cells = [
+      { tabId: 'a', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+      { tabIds: ['b', 'c'], activeTabId: 'c', col: 1, row: 0, colSpan: 1, rowSpan: 1 },
+    ]
+    const s = sanitize(w).spaces[0]
+    expect(strips(s)[1]).toEqual(['b', 'c'])
+    expect(s.layout!.cells[1].activeTabId).toBe('c')
+  })
+
+  it('prefers tabIds when a hand-edited cell carries both fields', () => {
+    const w = v070()
+    w.spaces[0].layout.cells[0] = {
+      tabId: 'c', tabIds: ['a'], activeTabId: 'a', col: 0, row: 0, colSpan: 1, rowSpan: 1,
+    }
+    expect(strips(sanitize(w).spaces[0])[0][0]).toBe('a')
+  })
+
+  it('repairs an activeTabId that is not in its own cell', () => {
+    const w = v070()
+    w.spaces[0].layout.cells = [
+      { tabIds: ['a', 'c'], activeTabId: 'zzz', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+      { tabIds: ['b'], activeTabId: 'b', col: 1, row: 0, colSpan: 1, rowSpan: 1 },
+    ]
+    expect(sanitize(w).spaces[0].layout!.cells[0].activeTabId).toBe('a')
+  })
+
+  // A truncated or hand-edited file must never throw and must never lose a tab:
+  // the fallback is the single strip, which holds every member.
+  it('is total on a malformed layout, and keeps every tab either way', () => {
+    for (const bad of [
+      42,
+      'nope',
+      [],
+      { cols: 2, rows: 1 },
+      { cols: 2, rows: 1, cells: 'nope' },
+      { cols: 'two', rows: 1, cells: [{ tabId: 'a', col: 0, row: 0 }, { tabId: 'b', col: 1, row: 0 }] },
+      { cols: 0, rows: 1, cells: [{ tabId: 'a', col: 0, row: 0 }] },
+      { cols: 2, rows: 1, cells: [null, 7, {}, { tabId: 5 }, { tabIds: 'a' }] },
+      { cols: 2, rows: 1, cells: [{ tabId: 'a', col: -1, row: 0 }, { tabId: 'b', col: 1.5, row: 0 }] },
+      { cols: 2, rows: 1, cells: [{ tabId: 'a', col: 0, row: 0, colSpan: null, rowSpan: 'x' }, { tabId: 'b', col: 1, row: 0 }] },
+    ]) {
+      const w = v070()
+      w.spaces[0].layout = bad
+      const s = sanitize(w).spaces[0]
+      const reachable = s.layout ? s.layout.cells.flatMap((c) => c.tabIds) : s.tabIds
+      expect([...reachable].sort()).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+      expect([...s.tabIds].sort()).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'])
+      if (!s.layout) continue
+      // ...and any layout that DID survive is renderable: a null or fractional
+      // track count reaches `grid-template-columns` as `NaNfr` and wrecks the
+      // whole window, which is worse than dropping the split.
+      const { cols, rows } = s.layout
+      expect(Number.isInteger(cols) && cols >= 1).toBe(true)
+      expect(Number.isInteger(rows) && rows >= 1).toBe(true)
+      for (const c of s.layout.cells) {
+        expect(Number.isInteger(c.col) && c.col >= 0).toBe(true)
+        expect(Number.isInteger(c.row) && c.row >= 0).toBe(true)
+        expect(Number.isInteger(c.colSpan) && c.colSpan >= 1).toBe(true)
+        expect(Number.isInteger(c.rowSpan) && c.rowSpan >= 1).toBe(true)
+        expect(c.col + c.colSpan).toBeLessThanOrEqual(cols)
+        expect(c.row + c.rowSpan).toBeLessThanOrEqual(rows)
+      }
+    }
+  })
+
+  it('guesses span 1 for a missing or garbage span rather than dropping the cell', () => {
+    const w = v070()
+    w.spaces[0].layout.cells = [
+      { tabId: 'a', col: 0, row: 0 },
+      { tabId: 'b', col: 1, row: 0, colSpan: 'wide', rowSpan: null },
+    ]
+    const s = sanitize(w).spaces[0]
+    expect(s.layout!.cells).toHaveLength(2)
+    expect(s.layout!.cells.map((c) => [c.colSpan, c.rowSpan])).toEqual([[1, 1], [1, 1]])
+  })
+
+  // Migration must be a fixed point: sanitize() runs on read AND on write, so a
+  // second pass that moved anything would churn the file on every save.
+  it('is idempotent — the migrated shape survives another pass unchanged', () => {
+    const once = sanitize(v070())
+    expect(sanitize(once)).toEqual(once)
+    expect(sanitize(JSON.parse(JSON.stringify(once)))).toEqual(once)
+  })
+})
+
+/**
+ * KAN-45 review D-4: these repairs used to live in a second normalizer in
  * src/renderer/spaces.ts, re-implementing what sanitize() already did and
  * disagreeing with it. They live here now, and only here.
  */
@@ -239,8 +533,6 @@ describe('sanitize — the spaces invariants', () => {
     expect(out.activeSpaceId).toBe(out.spaces[0].id)
   })
 
-  // An adopted tab may belong to a group that already has a run in that space;
-  // appending it blind would split the run the TabBar draws as one strip.
   it('keeps a group contiguous after adopting an orphan into its space', () => {
     const w = plain()
     w.groups = [{ id: 'g1', name: 'Repo', color: '#C15F3C', collapsed: false }]
@@ -252,8 +544,7 @@ describe('sanitize — the spaces invariants', () => {
   })
 
   // THE authority rule (see the module doc in src/renderer/spaces.ts): `tabIds`
-  // defines order, `tabs` is an unordered store. Deriving membership order from
-  // `tabs` instead silently undoes every reorderInSpace on the next save.
+  // defines order, `tabs` is an unordered store.
   it('believes tabIds order over the order of the global tabs array', () => {
     const w = plain()
     w.spaces[0].tabIds = ['t3', 't1']
@@ -276,31 +567,41 @@ describe('sanitize — the spaces invariants', () => {
   // this one's pane — the same phantom the one-owner rule exists to prevent.
   it('drops a grid cell pointing at a tab this space does not own', () => {
     const w = plain()
+    w.spaces[0].tabIds = ['t1', 't3']
+    w.spaces[0].layout = {
+      cols: 3, rows: 1,
+      cells: [
+        { tabIds: ['t1'], activeTabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+        { tabIds: ['t2'], activeTabId: 't2', col: 1, row: 0, colSpan: 1, rowSpan: 1 }, // s2 owns t2
+        { tabIds: ['t3'], activeTabId: 't3', col: 2, row: 0, colSpan: 1, rowSpan: 1 },
+      ],
+    }
+    const out = sanitize(w)
+    expect(strips(out.spaces[0])).toEqual([['t1'], ['t3']])
+    expect(out.spaces[1].tabIds).toEqual(['t2'])
+  })
+
+  // KAN-56 REVERSED this: a tab in no cell is unreachable — it renders nowhere
+  // and no strip lists it — so with a layout present it must be adopted into a
+  // pane, not left floating.
+  it('adopts a tab that no cell claims into a pane rather than stranding it', () => {
+    const w = plain()
+    w.spaces[0].tabIds = ['t1', 't2']
+    w.spaces[1].tabIds = []
     w.spaces[0].layout = {
       cols: 2, rows: 1,
       cells: [
-        { tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
-        { tabId: 't2', col: 1, row: 0, colSpan: 1, rowSpan: 1 }, // s2 owns t2
+        { tabIds: ['t1'], activeTabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 },
+        { tabIds: ['t2'], activeTabId: 't2', col: 1, row: 0, colSpan: 1, rowSpan: 1 },
       ],
     }
-    expect(sanitize(w).spaces[0].layout!.cells.map((c) => c.tabId)).toEqual(['t1'])
-  })
-
-  // The converse is NOT a defect (review finding 4): the tab strip is what makes
-  // a tab reachable; the grid is placement only.
-  it('leaves an adopted tab with no grid cell alone', () => {
-    const w = plain()
-    w.spaces[0].layout = {
-      cols: 1, rows: 1,
-      cells: [{ tabId: 't1', col: 0, row: 0, colSpan: 1, rowSpan: 1 }],
-    }
-    const out = sanitize(w)
-    expect(out.spaces[0].tabIds).toEqual(['t1', 't3'])
-    expect(out.spaces[0].layout!.cells.map((c) => c.tabId)).toEqual(['t1'])
+    const out = sanitize(w) // t3 is unclaimed and adopted into the active space s1
+    expect(out.spaces[0].tabIds).toEqual(['t1', 't3', 't2'])
+    expect(strips(out.spaces[0])).toEqual([['t1', 't3'], ['t2']])
   })
 
   // An empty space is legal — createSpace makes one, and you look at it before
-  // you open anything in it. Dropping it on save loses the space outright.
+  // you open anything in it.
   it('keeps a space with no tabs at all', () => {
     const w = plain()
     w.spaces[1].tabIds = []
@@ -308,8 +609,6 @@ describe('sanitize — the spaces invariants', () => {
     expect(sanitize(w).spaces.map((s) => s.id)).toEqual(['s1', 's2'])
   })
 
-  // Review finding 5: the old renderer-side normalizer threw on any of these.
-  // sanitize() is the guard that made that survivable, so it must really hold.
   it('is total on garbage inside the spaces array', () => {
     const w = { ...plain(), spaces: [null, { name: 'no id' }, { id: 7 }, { id: 's1', tabIds: null }] }
     expect(() => sanitize(w)).not.toThrow()
@@ -333,23 +632,34 @@ describe('sanitize — randomised garbage sweep', () => {
     }
   }
 
-  it('restores every spaces invariant from arbitrary garbage', () => {
+  it('restores every spaces AND layout invariant from arbitrary garbage', () => {
     const tabPool = ['t1', 't2', 't3', 't4', 'ghost1', 'ghost2']
-    for (let seed = 1; seed <= 60; seed++) {
+    for (let seed = 1; seed <= 120; seed++) {
       const rand = mulberry32(seed * 104729)
       const pick = <X>(xs: readonly X[]): X => xs[Math.floor(rand() * xs.length)]
 
       // Deliberately broken, and broken BELOW the type level too — nulls, wrong
-      // types, missing fields. That is the whole reason this sweep moved here:
-      // sanitize() takes `unknown` and is the app's only guard, so "total on
-      // arbitrary garbage" has to be true of THIS function, not merely of a
-      // renderer helper that never saw a raw file.
+      // types, missing fields. sanitize() takes `unknown` and is the app's only
+      // guard, so "total on arbitrary garbage" has to be true of THIS function.
       const tabs: unknown[] = []
       for (const id of tabPool) {
         if (id.startsWith('ghost') && rand() < 0.8) continue
         tabs.push(rand() < 0.15 ? { id, cwd: null } : { id, view: 'files', cwd: 'C:\\x', title: id })
       }
       if (rand() < 0.3) tabs.push(null)
+
+      /** A cell in the 0.7.0 shape, the 0.8.0 shape, or something broken. */
+      const someCell = (col: number) => {
+        const roll = rand()
+        const rect = { col, row: 0, colSpan: 1, rowSpan: 1 }
+        if (roll < 0.1) return null
+        if (roll < 0.45) return { tabId: pick(tabPool), ...rect }
+        if (roll < 0.85) {
+          const ids = [pick(tabPool), pick(tabPool)]
+          return { tabIds: ids, activeTabId: pick([...ids, 'nothing']), ...rect }
+        }
+        return { tabIds: pick([null, 'x', []]), ...rect }
+      }
 
       const spaces: unknown[] = []
       for (let i = 0; i < Math.floor(rand() * 5); i++) {
@@ -358,14 +668,19 @@ describe('sanitize — randomised garbage sweep', () => {
         if (roll < 0.18) { spaces.push({ name: 'no id at all' }); continue }
         const tabIds: string[] = []
         for (let k = 0; k < Math.floor(rand() * 5); k++) tabIds.push(pick(tabPool))
+        const cols = 1 + Math.floor(rand() * 3)
         spaces.push({
           id: pick(['sA', 'sB', 'sC']),
           name: `space-${i}`,
           tabIds: rand() < 0.15 ? null : tabIds,
           activeTabId: rand() < 0.7 ? pick([...tabPool, 'nothing']) : undefined,
           layout:
-            rand() < 0.4
-              ? { cols: 2, rows: 1, cells: [{ tabId: pick(tabPool), col: 0, row: 0, colSpan: 1, rowSpan: 1 }] }
+            rand() < 0.5
+              ? {
+                  cols: rand() < 0.1 ? pick([0, 'x', null]) : cols,
+                  rows: 1,
+                  cells: Array.from({ length: cols }, (_, k) => someCell(k)),
+                }
               : null,
         })
       }
@@ -381,11 +696,30 @@ describe('sanitize — randomised garbage sweep', () => {
       for (const s of out.spaces) for (const id of s.tabIds) counts.set(id, (counts.get(id) ?? 0) + 1)
       expect(counts.size).toBe(new Set(known).size)
       for (const id of known) expect(counts.get(id)).toBe(1)
-      // No space remembers an active tab it does not own.
+
       for (const s of out.spaces) {
+        // No space remembers an active tab it does not own.
         if (s.activeTabId !== undefined) expect(s.tabIds).toContain(s.activeTabId)
-        // No pane may show a tab this space does not own.
-        for (const c of s.layout?.cells ?? []) expect(s.tabIds).toContain(c.tabId)
+        if (!s.layout) continue
+        // One pane is not a split; two ways to say "no split" is a dead end.
+        expect(s.layout.cells.length).toBeGreaterThanOrEqual(2)
+        const placed: string[] = []
+        for (const c of s.layout.cells) {
+          expect(c.tabIds.length).toBeGreaterThan(0) // a pane with nothing under it
+          expect(c.tabIds).toContain(c.activeTabId) // ...or showing nothing at all
+          expect(Number.isInteger(c.col) && c.col >= 0).toBe(true)
+          expect(c.col + c.colSpan).toBeLessThanOrEqual(s.layout.cols)
+          expect(c.row + c.rowSpan).toBeLessThanOrEqual(s.layout.rows)
+          placed.push(...c.tabIds)
+        }
+        // Every member in EXACTLY one cell: none twice (one terminal, two
+        // hosts), none missing (unreachable — no strip lists it).
+        expect([...placed].sort()).toEqual([...s.tabIds].sort())
+        expect(new Set(placed).size).toBe(placed.length)
+        // ...and `tabIds` IS that concatenation, in reading order.
+        expect(s.tabIds).toEqual(
+          [...s.layout.cells].sort((a, b) => a.row - b.row || a.col - b.col).flatMap((c) => c.tabIds),
+        )
       }
       expect(out.spaces.some((s) => s.id === out.activeSpaceId)).toBe(true)
       expect(new Set(out.spaces.map((s) => s.id)).size).toBe(out.spaces.length)

@@ -13,8 +13,12 @@
 // app cannot reach, and that one can prove things about a running pty.
 //
 // splitgrid.entry.tsx reproduces App.tsx's real DOM shape — one flat container,
-// every tab mounted once forever as an absolutely positioned `.pane` sibling —
-// so what is measured here is the production structure, not a friendlier one.
+// every tab mounted once forever as an absolutely positioned `.pane` sibling,
+// plus one `.paneslot` per CELL carrying that pane's strip and its focus ring
+// (KAN-56), also flat, also never re-parented — so what is measured here is the
+// production structure, not a friendlier one. The two are DIFFERENT rectangles:
+// the cell is the window, the pane is its body (the cell minus a strip), and
+// every assertion below is deliberate about which one it means.
 //
 // Everything asserted here is measured with getBoundingClientRect() against a
 // fixed 800x600 stage. No assertion inspects React internals.
@@ -92,7 +96,15 @@ const setLayout = async (name) => {
   await win.waitForTimeout(120);
 };
 
-/** Pane + stand-in geometry, relative to the stage's own top-left. */
+/**
+ * Cell + pane + stand-in geometry, relative to the stage's own top-left.
+ *
+ * `cells` (`.paneslot`) and `panes` are DIFFERENT rectangles since KAN-56: the
+ * cell is the pane's whole window-like region and is what tiles the stage, the
+ * pane is its BODY — the cell minus its strip — and is what a terminal has to
+ * fit into. Anything about tiling is a claim about `cells`; anything about what
+ * a terminal gets is a claim about `panes`.
+ */
 const geometry = () => win.evaluate(() => {
   const el = document.getElementById('stage');
   const stage = el.getBoundingClientRect();
@@ -103,19 +115,39 @@ const geometry = () => win.evaluate(() => {
     right: r.right - stage.left, bottom: r.bottom - stage.top,
     width: r.width, height: r.height,
   });
+  const cells = [...document.querySelectorAll('.paneslot')].map((s) => ({
+    id: s.dataset.cell,
+    focused: s.classList.contains('pane-focused'),
+    // The strip's own box, so a focus ring that ever became a BORDER on the
+    // slot is caught: it would shrink the slot's content box and take 4px of
+    // strip with it. That is the box the ring can still move now that it lives
+    // on the slot rather than on the pane.
+    strip: rel(s.querySelector('.panestrip').getBoundingClientRect()),
+    ...rel(s.getBoundingClientRect()),
+  }));
   return {
     stage: { width: stage.width, height: stage.height },
     cols: tracks(cs.gridTemplateColumns), rows: tracks(cs.gridTemplateRows),
     display: cs.display,
-    panes: [...document.querySelectorAll('.pane:not([hidden])')].map((p) => ({
-      id: p.dataset.pane,
-      focused: p.classList.contains('pane-focused'),
-      ...rel(p.getBoundingClientRect()),
-      // The stand-in is height:100% of the pane — a percentage that only
-      // resolves if the pane got a DEFINITE box from the grid. This is exactly
-      // Terminal.tsx's precondition.
-      stand: rel(document.querySelector(`[data-stand="${p.dataset.pane}"]`).getBoundingClientRect()),
-    })),
+    cells,
+    panes: [...document.querySelectorAll('.pane:not([hidden])')].map((p) => {
+      const box = rel(p.getBoundingClientRect());
+      const mid = { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+      return {
+        id: p.dataset.pane,
+        ...box,
+        // Which cell this pane's body sits in, resolved by GEOMETRY rather than
+        // by an id the harness planted: the pane element carries no cell key in
+        // the real app either, and "the body is inside its own window" is
+        // exactly the relationship worth measuring.
+        cell: cells.find((c) => mid.x > c.left && mid.x < c.right
+          && mid.y > c.top && mid.y < c.bottom)?.id ?? null,
+        // The stand-in is height:100% of the pane — a percentage that only
+        // resolves if the pane got a DEFINITE box from the grid. This is exactly
+        // Terminal.tsx's precondition.
+        stand: rel(document.querySelector(`[data-stand="${p.dataset.pane}"]`).getBoundingClientRect()),
+      };
+    }),
     dividers: [...document.querySelectorAll('.split-divider')].map((d) => ({
       id: d.dataset.divider, ...rel(d.getBoundingClientRect()),
     })),
@@ -123,19 +155,29 @@ const geometry = () => win.evaluate(() => {
 });
 
 /**
+ * The rectangles that must tile the stage: the CELLS while split, the single
+ * full-bleed pane when not. Since KAN-56 a pane BODY is the cell minus its
+ * strip, so a pane list has a strip-high band missing at the top of every cell
+ * and could never tile anything — the tiling claim belongs to the cells, which
+ * are the window-like regions the user actually sees edge to edge.
+ */
+const tiles = (g) => (g.cells.length ? g.cells : g.panes);
+
+/**
  * No overlaps anywhere, and no hole wider than the 1px seam.
  *
  * Sampled rather than computed from areas, because a spanning cell reclaims the
  * gutters it crosses and no closed-form area identity survives that. Inflating
- * every pane by exactly one seam and demanding total coverage is precisely the
+ * every cell by exactly one seam and demanding total coverage is precisely the
  * claim "these rectangles tile the stage, with gaps of at most SEAM": too big a
  * gap leaves an uncovered sample, and an overlap is caught on the raw rects.
  */
 function tiling(g) {
+  const boxes = tiles(g);
   let overlap = 0;
-  for (let i = 0; i < g.panes.length; i++)
-    for (let j = i + 1; j < g.panes.length; j++) {
-      const a = g.panes[i], b = g.panes[j];
+  for (let i = 0; i < boxes.length; i++)
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
       const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
       const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
       if (w > EPS && h > EPS) overlap += w * h;
@@ -145,12 +187,12 @@ function tiling(g) {
   for (let x = 0.5; x < g.stage.width; x += 4)
     for (let y = 0.5; y < g.stage.height; y += 4) {
       samples++;
-      if (!g.panes.some((p) => x >= p.left - pad && x <= p.right + pad
+      if (!boxes.some((p) => x >= p.left - pad && x <= p.right + pad
         && y >= p.top - pad && y <= p.bottom + pad)) uncovered++;
     }
   const union = {
-    left: Math.min(...g.panes.map((p) => p.left)), top: Math.min(...g.panes.map((p) => p.top)),
-    right: Math.max(...g.panes.map((p) => p.right)), bottom: Math.max(...g.panes.map((p) => p.bottom)),
+    left: Math.min(...boxes.map((p) => p.left)), top: Math.min(...boxes.map((p) => p.top)),
+    right: Math.max(...boxes.map((p) => p.right)), bottom: Math.max(...boxes.map((p) => p.bottom)),
   };
   return {
     overlap, uncovered, samples, union,
@@ -200,12 +242,14 @@ for (const [name, expected, seams] of [
   await setLayout(name);
   const g = await geometry();
   const t = tiling(g);
-  console.log(`  ${name}: stage=${g.stage.width}x${g.stage.height} tracks=${g.cols}x${g.rows} panes=` +
+  console.log(`  ${name}: stage=${g.stage.width}x${g.stage.height} tracks=${g.cols}x${g.rows} cells=` +
+    g.cells.map((c) => `${c.id}[${c.left.toFixed(1)},${c.top.toFixed(1)} ${c.width.toFixed(1)}x${c.height.toFixed(1)}]`).join(' ') +
+    ' panes=' +
     g.panes.map((p) => `${p.id}[${p.left.toFixed(1)},${p.top.toFixed(1)} ${p.width.toFixed(1)}x${p.height.toFixed(1)}]`).join(' '));
   check(`${name}: one pane per cell, and no pane for a tab not in the layout`,
     g.panes.length === expected, `${g.panes.length} of ${expected}`);
-  check(`${name}: panes do not overlap`, t.overlap < 1, `overlap=${t.overlap.toFixed(2)}px2`);
-  check(`${name}: panes tile the stage with no hole wider than the ${SEAM}px seam`,
+  check(`${name}: the panes' cells do not overlap`, t.overlap < 1, `overlap=${t.overlap.toFixed(2)}px2`);
+  check(`${name}: the panes' cells tile the stage with no hole wider than the ${SEAM}px seam`,
     t.uncovered === 0, `${t.uncovered}/${t.samples} sample points uncovered`);
   check(`${name}: the tiling fills the stage exactly`, t.coversStage, JSON.stringify(t.union));
   check(`${name}: every pane gave its 100%-height child a real box (Terminal's precondition)`,
@@ -231,6 +275,10 @@ await setLayout('null');
 
 // ============================================================================
 // 2. Every pane is focusable, and focus survives a click on pane CONTENT.
+//    KAN-56: the ring is on the cell's `.paneslot`, which covers the strip as
+//    well as the body — the thing that has focus is the whole window-like
+//    region — and the slot is `pointer-events: none` so it cannot swallow the
+//    click that is doing the focusing. Both of those are measured here.
 // ============================================================================
 console.log('\n--- focus ---');
 await setLayout('3x3');
@@ -241,12 +289,22 @@ await setLayout('3x3');
   for (const p of geomBefore.panes) {
     // Click the stand-in, not the pane wrapper: focus must work through
     // content, which is what onPointerDownCapture is for.
-    await win.locator(`[data-stand="${p.id}"]`).click({ position: { x: 10, y: 10 } });
+    //
+    // Playwright refuses to click through an element that intercepts the
+    // pointer, which is exactly the regression to catch here (a `.paneslot` that
+    // lost `pointer-events: none` covers its whole cell and eats every click
+    // meant for the pane). CAUGHT, with a short timeout, so that lands as this
+    // assertion's FAIL instead of a 30s hang and an unhandled rejection that
+    // takes the rest of the run down with it.
+    const blocked = await win.locator(`[data-stand="${p.id}"]`)
+      .click({ position: { x: 10, y: 10 }, timeout: 3_000 })
+      .then(() => null, (e) => String(e).split('\n').find((l) => l.includes('intercepts')) ?? 'not clickable');
+    if (blocked) { allFocusable = false; console.log(`    ${p.id} -> ${blocked.trim()}`); }
     await win.waitForTimeout(60);
     const state = await win.evaluate(() => {
-      const f = [...document.querySelectorAll('.pane.pane-focused:not([hidden])')];
+      const f = [...document.querySelectorAll('.paneslot.pane-focused')];
       return {
-        ids: f.map((e) => e.dataset.pane),
+        ids: f.map((e) => e.dataset.cell),
         // An OUTLINE, not a border and not an inset box-shadow: a border would
         // shrink the content box (re-fitting every terminal on every focus
         // change) and a box-shadow paints UNDER the pane's own descendants, so
@@ -256,28 +314,37 @@ await setLayout('3x3');
         clayVar: getComputedStyle(document.documentElement).getPropertyValue('--clay').trim(),
       };
     });
-    if (state.ids.length !== 1 || state.ids[0] !== p.id) { allFocusable = false; console.log(`    ${p.id} -> ${JSON.stringify(state.ids)}`); }
+    // The ring must land on the cell holding the pane that was clicked — not on
+    // "a" cell, and not on the one whose click came before it.
+    if (state.ids.length !== 1 || state.ids[0] !== p.cell) { allFocusable = false; console.log(`    ${p.id} (cell ${p.cell}) -> ${JSON.stringify(state.ids)}`); }
     clay.push(state);
   }
-  check('clicking each of the 9 panes\' content focuses exactly that pane', allFocusable);
+  check('clicking each of the 9 panes\' content focuses exactly that pane\'s cell', allFocusable);
   const last = clay[clay.length - 1];
   // --clay is #C15F3C light / #D2795A dark; the ring must be the token, not a literal.
   const rgb = last.clayVar.startsWith('#')
     ? `rgb(${[1, 3, 5].map((i) => parseInt(last.clayVar.slice(i, i + 2), 16)).join(', ')})`
     : last.clayVar;
   check('the focus ring is painted in --clay', last.ring?.includes(rgb), `${last.ring} vs --clay=${last.clayVar} (${rgb})`);
-  check('the focus ring is drawn INSIDE the pane, not around it',
+  check('the focus ring is drawn INSIDE the cell, not around it',
     parseFloat(last.offset) < 0, last.offset);
   // The claim behind that, measured rather than inferred from the property: a
-  // border here would shrink every focused pane's content box by 4px and make
-  // every terminal in the grid re-fit on every focus change.
+  // border would shrink the box it is on. On the SLOT that box holds the strip,
+  // so both are measured — the pane's content (a terminal re-fits on every
+  // focus change if it moves) and the strip (tabs reflow if it does).
   const geomAfter = await geometry();
-  const resized = geomAfter.panes.filter((p) => {
-    const was = geomBefore.panes.find((q) => q.id === p.id);
-    return !was || Math.abs(was.stand.width - p.stand.width) > EPS
-      || Math.abs(was.stand.height - p.stand.height) > EPS;
-  });
-  check('and focusing does not resize any pane\'s content box',
+  const box = (a, b) => Math.abs(a.width - b.width) > EPS || Math.abs(a.height - b.height) > EPS;
+  const resized = [
+    ...geomAfter.panes.filter((p) => {
+      const was = geomBefore.panes.find((q) => q.id === p.id);
+      return !was || box(was.stand, p.stand);
+    }),
+    ...geomAfter.cells.filter((c) => {
+      const was = geomBefore.cells.find((q) => q.id === c.id);
+      return !was || box(was.strip, c.strip);
+    }),
+  ];
+  check('and focusing resizes nothing — not a pane\'s content box, not a strip',
     resized.length === 0, resized.map((p) => p.id).join(','));
 }
 
@@ -396,11 +463,13 @@ await setLayout('span');
     !g.dividers.some((d) => d.id === 'col0-0'), g.dividers.map((d) => d.id).join(','));
   // The handle is 9px of grab centred on the seam, so its 4px overhang lands on
   // the panes either side by design. The claim is about the SEAM itself: the
-  // line the handle represents must not pass through any pane's interior.
+  // line the handle represents must not pass through any pane's interior — and
+  // that is the whole CELL, strip included, not just the body: a handle laid
+  // across a strip eats the clicks that pick tabs in it.
   const through = g.dividers.filter((d) => {
     const vertical = d.height > d.width;
     const c = vertical ? (d.left + d.right) / 2 : (d.top + d.bottom) / 2;
-    return g.panes.some((p) => vertical
+    return tiles(g).some((p) => vertical
       ? c > p.left + SEAM && c < p.right - SEAM && d.bottom > p.top && d.top < p.bottom
       : c > p.top + SEAM && c < p.bottom - SEAM && d.right > p.left && d.left < p.right);
   });

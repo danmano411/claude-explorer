@@ -26,6 +26,38 @@ function resolveClaude(): string {
 const CLAUDE = resolveClaude()
 
 /**
+ * Every caller-influenced value that reaches ARGV is validated here, because
+ * node-pty builds the Win32 command line itself and its quoting is narrower
+ * than it looks: `argsToCommandLine` (node_modules/node-pty/lib/
+ * windowsPtyAgent.js) quotes an argument only when it is EMPTY or contains a
+ * space/tab, so `&`, `|`, `^`, `>` go out BARE. When resolveClaude() lands on
+ * a .cmd/.bat shim the line then runs through COMSPEC — and cmd.exe reads
+ * those bare characters as operators, so `--resume abc&calc` launches calc.
+ * An npm-global install of Claude Code IS a .cmd shim, so that is an ordinary
+ * machine, not an exotic one.
+ *
+ * Both ids are Claude session UUIDs (a transcript is `<uuid>.jsonl`), so demand
+ * exactly that shape — an id of any other shape names no transcript and could
+ * only ever have produced a failed launch anyway. `path` needs no guard: it is
+ * handed to node-pty's `cwd` OPTION, a separate native parameter that never
+ * joins the command line. Keep it that way, and if you add a flag below,
+ * validate its value HERE — spawn() is the one place every caller routes
+ * through (the control channel, the File menu, workspace restore, the CLI).
+ */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** A refusal, not a launch failure: nothing was spawned. Typed so a caller —
+ *  KAN-40's MCP layer, via the control channel — can tell "you sent junk" from
+ *  "claude died", and so this never takes the paint-it-in-the-pane path below,
+ *  which would create a terminal tab for a request that was never legitimate. */
+export class PtyArgError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PtyArgError'
+  }
+}
+
+/**
  * Claude Code marks its own environment so a `claude` it spawns knows it is a
  * nested session — and a nested session **does not save a transcript**. If
  * Claude Explorer is itself launched from a Claude session (running `npm run
@@ -64,6 +96,71 @@ export function launchEnv(
   return env
 }
 
+/**
+ * KAN-40. Set once by src/main/index.ts, after the MCP server has bound its
+ * port and its --mcp-config file is on disk; null until then, and forever if
+ * the server fails to bind — the app still launches Claude, just without agent
+ * control. Every Claude session spawned after that point gets the config file
+ * on its argv and the bearer token in its environment, which is the only place
+ * that token exists outside this process (the file on disk holds the literal
+ * `${CLAUDE_EXPLORER_MCP_TOKEN}` and Claude Code expands it per invocation).
+ *
+ * Shell tabs deliberately get neither: without --mcp-config the token buys them
+ * nothing, and a shell hands its whole environment to everything the user runs.
+ */
+let mcp: { configPath: string; token: string } | null = null
+
+export function setMcpInjection(v: { configPath: string; token: string } | null): void {
+  mcp = v
+}
+
+/**
+ * cmd.exe /c does NOT re-parse its tail by CreateProcess rules. `cmd /?` spells
+ * out the rule that bites: unless the tail contains EXACTLY two quote
+ * characters, wrapping the name of an executable, cmd strips the FIRST quote on
+ * the line and the LAST one and runs whatever is left. Until now the tail was
+ * `<claude.cmd> --resume <uuid>` — at most two quotes, around an executable, so
+ * it sat in the exempt case and survived. Appending `--mcp-config
+ * "<userData>\mcp-agent-control.json"` puts FOUR quotes on the line as soon as
+ * the shim path also needs quoting, the exemption stops applying, and Claude
+ * never launches.
+ *
+ * WHO THAT BREAKS: anyone whose tail carries a space or a shell metacharacter
+ * ANYWHERE in it — which is driven by the WINDOWS ACCOUNT NAME, not by the
+ * build. `C:\Users\First Last\…` puts a space in BOTH halves at once (the
+ * npm-global shim is `…\First Last\AppData\Roaming\npm\claude.cmd` and the
+ * config path is under the same profile), and an account name containing `&`
+ * made cmd truncate the line at the & and run the remainder as a second
+ * command. Both were measured against the old array form; the string form below
+ * is correct in every case tried.
+ *
+ * NOT packaged-only — do not "simplify" this back on the grounds that dev and
+ * installed userData look identical. They ARE identical: package.json has no
+ * top-level productName (only build.productName, which names the installer and
+ * the exe, not app.getName()), so userData is `…\Roaming\claude-explorer` in
+ * both and an installed build on a no-space account proves nothing about the
+ * account next door.
+ *
+ * So build the tail here and hand it to node-pty as a STRING, which
+ * `argsToCommandLine` appends verbatim rather than quoting (an array cannot
+ * express this: it backslash-escapes any quote we embed, which cmd does not
+ * understand). One extra pair of quotes around the whole tail is the documented
+ * idiom — the strip-first-and-last rule then removes exactly that pair and
+ * leaves a correctly quoted command line, whether or not the shim path has a
+ * space in it.
+ *
+ * Quote an argument iff it is not a plain path/flag token: a space is not the
+ * only character cmd reacts to, and `&`, `^`, `|`, `>` can reach us inside the
+ * userData path via the account name. Inside quotes cmd treats none of them as
+ * operators. Nothing caller-influenced reaches here un-validated — see
+ * SESSION_ID above — so this is a correctness guard, not the security one.
+ */
+const CMD_SAFE_BARE = /^[\w.:\\/=-]+$/
+function batchCommandLine(shim: string, args: string[]): string {
+  const tail = args.map((a) => (CMD_SAFE_BARE.test(a) ? a : `"${a}"`)).join(' ')
+  return `/c ""${shim}"${tail ? ` ${tail}` : ''}"`
+}
+
 export class PtyManager {
   private handles = new Map<string, Handle>()
 
@@ -72,6 +169,14 @@ export class PtyManager {
     onData: (id: string, d: string) => void,
     onExit: (id: string, code: number) => void,
   ): string {
+    // Before anything else, including the shell branch: a value that cannot
+    // reach argv today must not become reachable by a later edit down there.
+    for (const key of ['resumeId', 'sessionId'] as const) {
+      const v = opts[key]
+      if (v !== undefined && !SESSION_ID.test(v))
+        throw new PtyArgError(`pty: ${key} is not a Claude session id`)
+    }
+
     const id = randomUUID()
 
     // Plain interactive shell tab (feature 5) — no Claude.
@@ -103,10 +208,14 @@ export class PtyManager {
       : opts.sessionId
         ? ['--session-id', opts.sessionId]
         : []
+    // Deliberately one condition: KAN-41's recursion guard switches agent
+    // control off for an agent-spawned tab by adding a term to this `if`, not by
+    // rearranging anything around it.
+    if (mcp) claudeArgs.push('--mcp-config', mcp.configPath)
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)
     const file = isBatch ? process.env.COMSPEC || 'cmd.exe' : CLAUDE
-    const args = isBatch ? ['/c', CLAUDE, ...claudeArgs] : claudeArgs
+    const args = isBatch ? batchCommandLine(CLAUDE, claudeArgs) : claudeArgs
 
     let proc: pty.IPty
     try {
@@ -115,7 +224,12 @@ export class PtyManager {
         cwd: opts.path,
         cols: 80,
         rows: 24,
-        env: launchEnv(),
+        // CLAUDE_EXPLORER_PTY_ID is the id this spawn just minted, so the agent
+        // in the pane can name the tab it is running in.
+        env: {
+          ...launchEnv(),
+          ...(mcp ? { CLAUDE_EXPLORER_MCP_TOKEN: mcp.token, CLAUDE_EXPLORER_PTY_ID: id } : {}),
+        },
       })
     } catch (err) {
       // Surface the failure inside the terminal tab instead of rejecting the IPC call

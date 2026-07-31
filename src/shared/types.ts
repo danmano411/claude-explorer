@@ -133,12 +133,34 @@ export interface TabGroup {
 }
 
 /**
- * One cell of a split view. Rectangles rather than a left/right binary, so
- * `colSpan`/`rowSpan` let an m x n block sit anywhere in an N x N grid. Maps
- * straight onto CSS Grid, which is why there is no layout maths anywhere.
+ * One pane of a split view: a window-like region with its OWN ordered set of
+ * tabs and its own strip (KAN-56). Rectangles rather than a left/right binary
+ * or a split tree, so `colSpan`/`rowSpan` let an m x n block sit anywhere in an
+ * N x N grid. Maps straight onto CSS Grid, which is why there is no layout
+ * maths anywhere.
+ *
+ * INVARIANT, enforced by sanitize() (src/main/workspace.ts) and by
+ * gridPlacement() at render: with a layout present, every member of
+ * `Space.tabIds` is in EXACTLY ONE cell's `tabIds`. A tab in no cell is
+ * unreachable — it renders nowhere and no strip lists it. `layout: null` is
+ * shorthand for "one pane holding every tab of the space", which is why the
+ * classic single-strip path needs no cells at all.
+ *
+ * PERSISTED SHAPE CHANGE: 0.7.0 wrote one tab per cell as a single
+ * `{ tabId, col, row, colSpan, rowSpan }`. Those files are migrated forward in
+ * sanitize() by shape detection — `Workspace.version` stays 1, since the cell
+ * is self-describing and a downgrade degrades to `layout: null` rather than
+ * corrupting. Without that migration the membership filter reads `undefined`
+ * for every old cell and silently drops the whole layout.
  */
 export interface GridCell {
-  tabId: string
+  /** Ordered — THIS pane's strip order. Never empty: a cell that loses its
+   *  last tab is removed and its rectangle absorbed. */
+  tabIds: string[]
+  /** Which of `tabIds` this pane shows. Always a member. Per-pane memory;
+   *  `Space.activeTabId` is the global focus and names the FOCUSED pane's
+   *  active tab, so the focused pane is derived, never stored. */
+  activeTabId: string
   col: number // 0-based
   row: number
   colSpan: number
@@ -148,6 +170,8 @@ export interface GridCell {
 export interface GridLayout {
   cols: number
   rows: number
+  /** Fewer than 2 cells is not a split: every write chokepoint collapses such
+   *  a layout to `null` rather than leaving two ways to express one state. */
   cells: GridCell[]
 }
 
@@ -156,7 +180,11 @@ export interface GridLayout {
 export interface Space {
   id: string
   name: string
-  tabIds: string[] // ordered; membership of this space
+  /** Ordered; membership of this space. Authoritative for strip ORDER only
+   *  while `layout === null` — with a layout present it is kept equal to the
+   *  cells' `tabIds` concatenated in reading order, so there is exactly one
+   *  order truth and collapsing back to `layout: null` is free (KAN-56). */
+  tabIds: string[]
   // A cell naming a tab that has left this space is pruned in TWO places, both
   // of them chokepoints, so no caller carries the obligation (KAN-45
   // integration review #4): `sanitize()` (src/main/workspace.ts) drops it on
@@ -218,3 +246,78 @@ export interface Workspace {
 export type SearchDone =
   | { ok: true; count: number; truncated: boolean }
   | { ok: false; reason: string; kind: 'cancelled' | 'norg' | 'badpattern' | 'error' }
+
+// --- KAN-39 control channel ------------------------------------------------
+
+/**
+ * One tab as `listTabs` reports it. NOT `Tab` and not `PersistedTab`: `Tab`
+ * lives in the renderer, and `PersistedTab` is a disk snapshot with no `ptyId`
+ * and no live status in it — which is the whole reason this channel exists
+ * rather than reusing `workspace:get`.
+ *
+ * `ptyId` is here because it is the only INJECTABLE correlation key. A tab id
+ * is minted in the renderer after the spawn resolves, so nothing outside the
+ * renderer can be handed one in advance; a ptyId can be, so a caller that
+ * knows its own pty can join itself to a tab.
+ *
+ * Deliberately no `groupId`: tab folders are M5's model and this channel does
+ * not speak it. `status` is absent for a tab with no process (files/viewer)
+ * and for a terminal tab whose pty has not emitted an event yet.
+ */
+export interface ControlTab {
+  id: string
+  ptyId?: string
+  view: TabView
+  cwd: string
+  title: string
+  terminalKind?: 'claude' | 'shell'
+  status?: PtyStatus
+}
+
+/**
+ * The four ops, and nothing else. Every arm names its target explicitly — no
+ * op defaults to the active tab. (The renderer MAY accept the literal
+ * `'active'` as a `tabId` alias; it must never be the only way to address one.)
+ *
+ * NEVER AUTO-RETRY A MUTATING OP ON A TIMEOUT. main gives up after
+ * CONTROL_TIMEOUT_MS, and a request that was still QUEUED when that happened is
+ * guaranteed not to run — the renderer refuses to start one whose `deadline`
+ * has passed. But an op that was already EXECUTING cannot be recalled: nothing
+ * un-spawns a Claude Code that is halfway up. So a timeout on
+ * `openClaudeSession` means "it may or may not have happened", and retrying it
+ * is how you end up with two Claude processes on one folder. Ask `listTabs` —
+ * idempotent, and the only one of the four safe to retry blindly — and decide
+ * from what it says.
+ *
+ * ponytail: a deadline stamped on the request, not a cancel channel. A real
+ * cancel needs main to send a `control:cancel` AND every op to become
+ * interruptible, which for `openClaudeSession` means killing a pty it has
+ * already been handed. Ceiling: the in-flight window (one op, up to 15s). Build
+ * the cancel when an op is slow enough that that window starts costing.
+ */
+export type ControlOp =
+  | { op: 'listTabs'; args?: undefined }
+  | { op: 'closeTab'; args: { tabId: string } }
+  | { op: 'openViewerTab'; args: { filePath: string; mode?: 'file' | 'diff' } }
+  | { op: 'openClaudeSession'; args: { cwd: string; resumeId?: string } }
+
+/** An op plus the correlation id main matches the reply back on, and the wall
+ *  clock instant past which the renderer must not START it — the epoch that
+ *  keeps a request main has already timed out from running later anyway. Both
+ *  processes read the same system clock, so there is no skew to allow for.
+ *  Required, not optional: control.ts is the only producer, and an unstamped
+ *  request would silently be one that never expires. */
+export type ControlRequest = ControlOp & { id: string; deadline: number }
+
+/**
+ * ponytail: one result type for all four ops — the rows for `listTabs`, `null`
+ * for the three mutating ones. Widen to a per-op result map when a caller
+ * actually needs the id of the tab `openViewerTab`/`openClaudeSession` landed
+ * on (KAN-40 is the first candidate; nothing needs it today).
+ */
+export type ControlResult = ControlTab[] | null
+
+/** Exactly one reply per request id. */
+export type ControlReply =
+  | { id: string; ok: true; result: ControlResult }
+  | { id: string; ok: false; error: string }

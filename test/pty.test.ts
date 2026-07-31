@@ -1,10 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // node-pty ships a native binary and actually launches processes; the point here
-// is what we *ask* it for, so record the calls instead.
-const spawned: { file: string; args: string[]; opts: any }[] = []
+// is what we *ask* it for, so record the calls instead. `args` is an argv ARRAY
+// on the .exe branch and a single cmd.exe command-line STRING on the .cmd
+// branch — claudeArgv() below normalises the two.
+const spawned: { file: string; args: string[] | string; opts: any }[] = []
 vi.mock('node-pty', () => ({
-  spawn: (file: string, args: string[], opts: any) => {
+  spawn: (file: string, args: string[] | string, opts: any) => {
     spawned.push({ file, args, opts })
     return {
       onData: () => {},
@@ -16,10 +18,75 @@ vi.mock('node-pty', () => ({
   },
 }))
 
-const { PtyManager, launchEnv } = await import('../src/main/pty')
+/**
+ * WHICH BRANCH RUNS IS THE TEST'S DECISION, NOT THE MACHINE'S.
+ *
+ * resolveClaude() picks between two very different spawns by scanning PATH with
+ * existsSync: a real `claude.exe` (the installer) is spawned directly with an
+ * argv array, while a `claude.cmd` shim (an npm-global `npm i -g
+ * @anthropic-ai/claude-code` install) has to go through COMSPEC and is handed
+ * ONE command-line string that cmd.exe parses by its own rules. Before this
+ * mock, the branch was whatever the developer happened to have installed — so
+ * these tests passed on an .exe machine and failed on a .cmd one, which is
+ * precisely the machine the .cmd branch exists for.
+ *
+ * Stub existsSync instead, and load the module twice: every block below names
+ * the branch it measures, and the flag assertions run against BOTH.
+ */
+const fake = vi.hoisted(() => ({ ext: '.exe' as '.exe' | '.cmd' }))
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>()
+  const existsSync = (p: unknown) => String(p).endsWith(`claude${fake.ext}`)
+  return { ...real, existsSync, default: { ...real, existsSync } }
+})
+
+// resolveClaude() returns a bare `claude` off win32, which would collapse both
+// branches into one. This app is Windows-only; pin it so the file measures the
+// same thing wherever it is run.
+Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+
+// A space in the directory, because that is the shape that matters: an
+// npm-global shim lands under `C:\Users\First Last\AppData\Roaming\npm`.
+const BIN = 'C:\\fake bin'
+const REAL_PATH = process.env.PATH
+
+async function loadPty(ext: '.exe' | '.cmd') {
+  fake.ext = ext
+  process.env.PATH = BIN
+  vi.resetModules() // resolveClaude() runs once, at import time
+  return await import('../src/main/pty')
+}
+
+const EXE = await loadPty('.exe')
+const CMD = await loadPty('.cmd')
+process.env.PATH = REAL_PATH
+
+const BRANCHES = [
+  { kind: 'claude.exe', mod: EXE, file: /claude\.exe$/, batch: false },
+  { kind: 'claude.cmd shim', mod: CMD, file: /cmd\.exe$/i, batch: true },
+]
 
 const noop = () => {}
+// A real Claude session id — the shape of a `<uuid>.jsonl` transcript name.
+const UUID = '11111111-2222-4333-8444-555555555555'
 beforeEach(() => { spawned.length = 0 })
+
+/**
+ * The claude argv spawn() asked for, whichever branch built it: the array as
+ * given on the .exe branch, and the cmd.exe tail parsed back into argv on the
+ * .cmd branch. So one assertion measures one behaviour on both.
+ *
+ * Parsing is the cmd.exe rule batchCommandLine targets — strip the outer pair,
+ * then split on whitespace outside quotes — so a tail that would reach claude
+ * as the wrong number of arguments cannot round-trip through here intact.
+ */
+function claudeArgv(rec = spawned[0]): string[] {
+  if (Array.isArray(rec.args)) return rec.args
+  const m = /^\/c "([\s\S]+)"$/.exec(rec.args)
+  if (!m) throw new Error(`not a cmd.exe command line: ${rec.args}`)
+  const toks = m[1].match(/"[^"]*"|\S+/g) ?? []
+  return toks.slice(1).map((t) => t.replace(/^"([\s\S]*)"$/, '$1')) // [0] is the shim
+}
 
 describe('launchEnv', () => {
   it('drops the marker that makes a spawned Claude a non-persisting child session', () => {
@@ -27,7 +94,7 @@ describe('launchEnv', () => {
     // session inherits CLAUDE_CODE_CHILD_SESSION, and every session it spawns
     // then silently saves no transcript — so Open Recent and restore-on-restart
     // both find nothing, with only a one-line in-pane warning to explain it.
-    const env = launchEnv({
+    const env = EXE.launchEnv({
       PATH: 'C:\\Windows',
       CLAUDECODE: '1',
       CLAUDE_CODE_CHILD_SESSION: '1',
@@ -48,7 +115,7 @@ describe('launchEnv', () => {
   it('keeps deliberate Claude Code configuration', () => {
     // Why the strip list is named rather than a CLAUDE_CODE_* prefix sweep:
     // these are the user's settings, not the parent session's identity.
-    const env = launchEnv({
+    const env = EXE.launchEnv({
       CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192',
       ANTHROPIC_MODEL: 'claude-opus-5',
@@ -61,14 +128,14 @@ describe('launchEnv', () => {
   })
 
   it('omits unset variables rather than passing undefined through', () => {
-    expect('NOPE' in launchEnv({ NOPE: undefined, YES: 'y' })).toBe(false)
+    expect('NOPE' in EXE.launchEnv({ NOPE: undefined, YES: 'y' })).toBe(false)
   })
 })
 
 describe('PtyManager.spawn env', () => {
   it('scrubs the inherited session marker for a Claude session', () => {
     process.env.CLAUDE_CODE_CHILD_SESSION = '1'
-    new PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    new EXE.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
     expect(spawned).toHaveLength(1)
     expect(spawned[0].opts.env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined()
     delete process.env.CLAUDE_CODE_CHILD_SESSION
@@ -76,42 +143,179 @@ describe('PtyManager.spawn env', () => {
 
   it('scrubs it for a shell tab too — the user may type `claude` in there', () => {
     process.env.CLAUDE_CODE_CHILD_SESSION = '1'
-    new PtyManager().spawn({ path: 'C:\\repo', shell: true }, noop, noop)
+    new EXE.PtyManager().spawn({ path: 'C:\\repo', shell: true }, noop, noop)
     expect(spawned[0].opts.env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined()
     delete process.env.CLAUDE_CODE_CHILD_SESSION
   })
 })
 
-describe('PtyManager.spawn flags', () => {
-  const argsOf = (i = 0) => spawned[i].args
+describe.each(BRANCHES)('PtyManager.spawn flags ($kind)', ({ mod, file, batch }) => {
+  it('takes the branch this block names, whatever is installed on this machine', () => {
+    // The block below is worthless if both copies resolved to the same install:
+    // that is how the .cmd branch went untested until it broke the suite.
+    new mod.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    expect(spawned[0].file).toMatch(file)
+    expect(typeof spawned[0].args === 'string').toBe(batch)
+  })
 
   it('names a new conversation with --session-id so it can be resumed later', () => {
-    new PtyManager().spawn({ path: 'C:\\repo', sessionId: 'sess-1' }, noop, noop)
-    expect(argsOf()).toContain('--session-id')
-    expect(argsOf()[argsOf().indexOf('--session-id') + 1]).toBe('sess-1')
+    new mod.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID }, noop, noop)
+    const argv = claudeArgv()
+    expect(argv).toContain('--session-id')
+    expect(argv[argv.indexOf('--session-id') + 1]).toBe(UUID)
   })
 
   it('resumes an existing conversation with --resume', () => {
-    new PtyManager().spawn({ path: 'C:\\repo', resumeId: 'sess-1' }, noop, noop)
-    expect(argsOf()).toContain('--resume')
-    expect(argsOf()).not.toContain('--session-id')
+    new mod.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
+    const argv = claudeArgv()
+    expect(argv).toContain('--resume')
+    expect(argv[argv.indexOf('--resume') + 1]).toBe(UUID)
+    expect(argv).not.toContain('--session-id')
   })
 
   it('prefers --resume when both are given: the transcript already exists', () => {
     // claude rejects --session-id for an id that already has a transcript, so
     // these two can never be passed together.
-    new PtyManager().spawn({ path: 'C:\\repo', resumeId: 'a', sessionId: 'a' }, noop, noop)
-    expect(argsOf()).toContain('--resume')
-    expect(argsOf()).not.toContain('--session-id')
+    new mod.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID, sessionId: UUID }, noop, noop)
+    expect(claudeArgv()).toContain('--resume')
+    expect(claudeArgv()).not.toContain('--session-id')
   })
 
   it('passes no session flags at all when neither is given', () => {
-    new PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
-    expect(argsOf().filter((a) => a.startsWith('--session') || a === '--resume')).toEqual([])
+    new mod.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    expect(claudeArgv().filter((a) => a.startsWith('--session') || a === '--resume')).toEqual([])
   })
 
   it('spawns the folder as cwd', () => {
-    new PtyManager().spawn({ path: 'C:\\repo\\sub' }, noop, noop)
+    new mod.PtyManager().spawn({ path: 'C:\\repo\\sub' }, noop, noop)
     expect(spawned[0].opts.cwd).toBe('C:\\repo\\sub')
+  })
+})
+
+/**
+ * KAN-40. The .cmd branch is no longer "the array, via cmd" — it builds a
+ * command line by hand (batchCommandLine), because cmd.exe /c does NOT re-parse
+ * its tail by CreateProcess rules: unless the tail holds EXACTLY two quotes
+ * around an executable, cmd strips the FIRST and LAST quote on the line and runs
+ * what is left. `--mcp-config "<userData>\…json"` put a third and fourth quote
+ * on that line, so the quoting below is what makes the shim branch launch at
+ * all. That is real logic with real rules, so it gets its own measurements.
+ */
+describe('the claude.cmd command line', () => {
+  // Both come from the Windows account name, which is the whole trigger: it is
+  // in the userData path AND in an npm-global shim path. Deliberately separate
+  // cases — the space one is quoted by any rule (node-pty's own included), so
+  // only the metacharacter one can tell a correct rule from a lax one.
+  const SPACED = 'C:\\Users\\First Last\\AppData\\Roaming\\Claude Explorer\\mcp-agent-control.json'
+  const AMPED = 'C:\\Users\\Dan&Sam\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  afterEach(() => { EXE.setMcpInjection(null); CMD.setMcpInjection(null) })
+
+  const line = () => spawned[0].args as string
+
+  /** What cmd.exe is left reading as SYNTAX: its documented "strip the first and
+   *  last quote on the line" rule applied, then every quoted span removed. Any
+   *  operator character surviving in here is one cmd.exe will act on. */
+  const unquotedTail = (cl: string) =>
+    cl.replace(/^\/c "/, '').replace(/"$/, '').replace(/"[^"]*"/g, '')
+
+  it('wraps the whole tail in the extra quote pair cmd.exe strips', () => {
+    new CMD.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
+    // /c ""C:\fake bin\claude.cmd" --resume <uuid>"  — the outer pair is what
+    // cmd removes, leaving a correctly quoted shim path behind.
+    expect(line()).toMatch(/^\/c ""[^"]+claude\.cmd"/)
+    expect(line().endsWith('"')).toBe(true)
+  })
+
+  it('quotes a --mcp-config path containing a space, so claude sees one argument', () => {
+    CMD.setMcpInjection({ configPath: SPACED, token: 't' })
+    new CMD.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
+    expect(line()).toContain(`"${SPACED}"`)
+    expect(claudeArgv()).toEqual(['--resume', UUID, '--mcp-config', SPACED])
+  })
+
+  it('leaves cmd.exe no `&` to read as a second command', () => {
+    // node-pty's own argsToCommandLine quotes only on a space/tab, so a
+    // "let node-pty do the quoting" regression loses exactly this path: cmd
+    // truncates the line at the & and runs the remainder as a command.
+    CMD.setMcpInjection({ configPath: AMPED, token: 't' })
+    new CMD.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
+    expect(line()).toContain(`"${AMPED}"`)
+    expect(unquotedTail(line())).not.toMatch(/[&|^<>]/)
+    expect(claudeArgv()).toEqual(['--resume', UUID, '--mcp-config', AMPED])
+  })
+
+  it('asks for exactly the argv the .exe branch asks for', () => {
+    for (const m of [EXE, CMD]) m.setMcpInjection({ configPath: SPACED, token: 't' })
+    new EXE.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID }, noop, noop)
+    new CMD.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID }, noop, noop)
+    expect(claudeArgv(spawned[1])).toEqual(claudeArgv(spawned[0]))
+    expect(claudeArgv(spawned[0])).toEqual(['--session-id', UUID, '--mcp-config', SPACED])
+  })
+
+  it('runs the shim through COMSPEC and passes claude nothing extra of its own', () => {
+    new CMD.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    expect(spawned[0].file).toBe(process.env.COMSPEC || 'cmd.exe')
+    expect(line()).toMatch(/^\/c ""[^"]+claude\.cmd""$/) // no args, still wrapped
+  })
+})
+
+// KAN-39: the two ids are the only caller-influenced values that reach ARGV, and
+// a control-channel caller (KAN-40's MCP server) picks them. node-pty builds the
+// Win32 command line itself and quotes narrowly: `argsToCommandLine`
+// (node_modules/node-pty/lib/windowsPtyAgent.js) quotes an argument only when it
+// is EMPTY or contains a space/tab, so `&`, `|`, `^`, `>` go out BARE — and when
+// resolveClaude() lands on a .cmd shim (an npm-global install of Claude Code is
+// one) that line runs through COMSPEC, where cmd.exe reads them as operators.
+// `--resume abc&calc` then launches calc.
+//
+// So what is asserted is the REFUSAL: a typed throw and an empty `spawned`, i.e.
+// nothing reached node-pty and therefore nothing reached the command line.
+// Asserting that a regex answered false would prove nothing about that.
+describe.each(BRANCHES)('spawn refuses an id that is not a Claude session id ($kind)', ({ mod }) => {
+  // Two explicit literals rather than a computed key, so this stays type-checked
+  // against the real spawn signature.
+  const spawnWith = (key: 'resumeId' | 'sessionId', v: string) =>
+    new mod.PtyManager().spawn(
+      key === 'resumeId' ? { path: 'C:\\repo', resumeId: v } : { path: 'C:\\repo', sessionId: v },
+      noop,
+      noop,
+    )
+
+  const PAYLOADS: [string, string][] = [
+    ['a cmd.exe command separator', 'abc&calc'],
+    ['a pipe', 'x|whoami'],
+    ["cmd.exe's escape character", 'a^b'],
+    ['a redirect', 'a>C:\\Windows\\Temp\\pwned.txt'],
+    // node-pty DOES quote this one, so cmd would see a single argument: it is
+    // refused for naming no transcript, not for its quoting.
+    ['a space', 'sess 1'],
+    ['the empty string', ''],
+    ['a real uuid with a payload welded on', `${UUID}&calc`],
+    ['something absurdly long', 'a'.repeat(64 * 1024)],
+  ]
+
+  for (const [what, payload] of PAYLOADS) {
+    it(`refuses ${what} on both id flags, spawning nothing`, () => {
+      for (const key of ['resumeId', 'sessionId'] as const) {
+        expect(() => spawnWith(key, payload)).toThrow(mod.PtyArgError)
+        expect(spawned).toEqual([]) // never reached node-pty, so never reached argv
+      }
+    })
+  }
+
+  it('accepts a well-formed session id, in either case', () => {
+    const upper = UUID.toUpperCase()
+    new mod.PtyManager().spawn({ path: 'C:\\repo', resumeId: upper }, noop, noop)
+    expect(spawned).toHaveLength(1)
+    expect(claudeArgv()).toContain(upper)
+  })
+
+  it('refuses ahead of the shell branch, which returns before argv is built today', () => {
+    // The guard sits above that early return on purpose: a value that cannot
+    // reach argv today must not become reachable by a later edit down there.
+    expect(() => new mod.PtyManager().spawn(
+      { path: 'C:\\repo', shell: true, resumeId: 'abc&calc' }, noop, noop,
+    )).toThrow(mod.PtyArgError)
+    expect(spawned).toEqual([])
   })
 })

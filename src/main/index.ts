@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
+import { writeFileSync } from 'node:fs'
 import { registerFsHandlers } from './fs.handlers'
 import { registerRecentsHandlers } from './recents.handlers'
 import { registerSessionsHandlers } from './sessions.handlers'
@@ -16,6 +17,9 @@ import { buildMenu, buildMenuThrottled } from './menu'
 import { initUpdater } from './updater'
 import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
+import { registerControlHandlers } from './control.handlers'
+import { startMcpServer, stopMcpServer } from './mcp'
+import { setMcpInjection } from './pty'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
 import { CH } from '../shared/ipc'
@@ -51,6 +55,46 @@ function sendPendingCli(): void {
   if (!windowReady || !pendingCli) return
   mainWindow?.webContents.send(CH.menuCommand, pendingCli.cmd, pendingCli.path)
   pendingCli = null
+}
+
+/**
+ * KAN-40. Bring up the agent-control MCP server and tell PtyManager how to hand
+ * it to the Claude sessions it launches. Awaited before createWindow() so that
+ * workspace restore — which spawns terminals as soon as the renderer loads —
+ * cannot race a port that is a millisecond from existing.
+ *
+ * The config file is rewritten every run because listen(0) picks a new port
+ * every run. Its Authorization header holds the LITERAL
+ * `${CLAUDE_EXPLORER_MCP_TOKEN}`; Claude Code expands that from the environment
+ * of the invocation, so the real token never touches disk. That expansion
+ * silently passes the literal through when the variable is unset, which is why
+ * the server must (and does) 401 anything that is not the exact token rather
+ * than trust that a request arrived at all.
+ *
+ * A failure here disables agent control and nothing else: setMcpInjection is
+ * never called, so spawn() adds no flag and no token. Losing a tool is not a
+ * reason to refuse to start a file manager.
+ */
+async function startAgentControl(): Promise<void> {
+  try {
+    const { port, token } = await startMcpServer()
+    const configPath = join(app.getPath('userData'), 'mcp-agent-control.json')
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          explorer: {
+            type: 'http',
+            url: `http://127.0.0.1:${port}/mcp`,
+            headers: { Authorization: 'Bearer ${CLAUDE_EXPLORER_MCP_TOKEN}' },
+          },
+        },
+      }),
+    )
+    setMcpInjection({ configPath, token })
+  } catch (err) {
+    console.error('agent control disabled:', err)
+  }
 }
 
 const iconPath = app.isPackaged
@@ -143,7 +187,7 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Before anything can delete: flush staging buckets orphaned by an unclean
   // exit to the Recycle Bin. Running this later would trash items that are
   // still on THIS run's undo stack. D-1.
@@ -166,6 +210,8 @@ app.whenReady().then(() => {
   registerGitHandlers()
   stopSearch = registerSearchHandlers(() => mainWindow)
   registerWorkspaceHandlers()
+  // KAN-39: only the reply listener + pending map. Nothing calls control() yet.
+  registerControlHandlers(() => mainWindow)
   // Async since KAN-55 — File > Open Recent now lists each recent folder's
   // Claude sessions, and a native menu template is built ahead of the click.
   // Not awaited: the window must not wait on a session-directory scan, and
@@ -180,6 +226,7 @@ app.whenReady().then(() => {
   // land before sweep() finishes. That is harmless: opening a tab pushes
   // nothing onto the undo stack, which is the only thing D-1 cares about.
   pendingCli = resolveCliIntent(parseCliArgs(process.argv, process.cwd()))
+  await startAgentControl()
   createWindow()
   initUpdater()
   app.on('activate', () => {
@@ -194,6 +241,8 @@ app.on('window-all-closed', () => {
 // Flush any still-staged deleted items to the OS Recycle Bin before exit.
 app.on('will-quit', (e) => {
   stopSearch() // a ripgrep child must not outlive the window that asked for it
+  stopMcpServer() // ditto the loopback listener; both sit above the `flushed`
+                  // early-return because will-quit fires twice by design
   if (flushed) return
   e.preventDefault()
   flushed = true
