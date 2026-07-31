@@ -27,25 +27,55 @@ export function Terminal({ ptyId }: { ptyId: string }) {
     const offExit = window.api.onPtyExit((id) => { if (id === ptyId) term.write('\r\n[session ended]\r\n'); });
     term.onData((d) => window.api.ptyWrite(ptyId, d));
 
-    // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
-    // still sends CR (submit). Mirrors the external terminal's behavior.
+    // KAN-58. Returning false from here tells xterm to skip ITS OWN key handling
+    // and nothing more — xterm's `_keyDown` returns before the `cancel(e, true)`
+    // its normal Ctrl+letter path ends in, so the BROWSER default still runs.
+    // Every arm below therefore calls preventDefault, and a new arm that returns
+    // false without one has to say why: dropping it is what produced both bugs
+    // in this ticket, each through a different xterm DOM listener.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       // Ctrl+V / Ctrl+Shift+V paste the clipboard (xterm otherwise sends ^V to the shell).
       // term.paste respects bracketed-paste mode, matching right-click paste.
+      // preventDefault: otherwise Chromium runs its own Paste on the focused
+      // helper textarea, xterm's native "paste" listener pastes a second time
+      // (it stopPropagations but never preventDefaults), and the pty receives two
+      // complete — separately bracketed — runs.
       if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault();
         const text = window.api.clipboardReadText();
         if (text) term.paste(text);
         return false;
       }
       // Ctrl/Shift+Enter insert a newline (LF) instead of submitting; plain Enter
       // still sends CR (submit). Mirrors the external terminal's behavior.
+      // preventDefault: an un-cancelled keydown still yields a keypress, and
+      // xterm's keypress handler sends charCode 13. Measured before the fix,
+      // Shift+Enter put "\n" then "\r" on the wire — a newline AND a submit.
+      // (Ctrl+Enter escaped it only because that handler ignores ctrl-modified
+      // keypresses, which is exactly the kind of accident not to rely on.)
       if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+        e.preventDefault();
         window.api.ptyWrite(ptyId, '\n');
         return false;
       }
       return true;
     });
+
+    // Right-click pastes — the Windows console convention, and the only paste
+    // affordance a mouse has here. Only when nothing is selected: xterm's own
+    // contextmenu handler has just copied the selection into the hidden helper
+    // textarea and selected it, which is what makes Edit > Copy work at all in a
+    // terminal, and pasting would be the one action that throws it away. So a
+    // right-click on a selection is a no-op, deliberately.
+    // term.paste, not ptyWrite, so bracketing matches Ctrl+V.
+    const el = ref.current;
+    const onContextMenu = () => {
+      if (term.hasSelection()) return;
+      const text = window.api.clipboardReadText();
+      if (text) term.paste(text);
+    };
+    el.addEventListener('contextmenu', onContextMenu);
 
     // KAN-50 test seam. The invariant this component owns — xterm's grid matches
     // the size the pty was last told — is only checkable if both halves are
@@ -134,6 +164,7 @@ export function Terminal({ ptyId }: { ptyId: string }) {
 
     return () => {
       clearTimeout(fonts); clearTimeout(settle); cancelAnimationFrame(raf);
+      el.removeEventListener('contextmenu', onContextMenu);
       offData(); offExit(); ro.disconnect(); term.dispose();
     };
   }, [ptyId]);
