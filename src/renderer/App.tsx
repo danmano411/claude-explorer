@@ -885,11 +885,13 @@ export function App() {
       // modal for it. The KAN-44 "close the focused member last" ordering moved
       // into `closeNow` with the rest of the close mechanics.
       //
-      // Scoped to THIS strip's slice: `closeTab` revokes membership from the
-      // ACTIVE space, so it may only ever be handed tabs this space owns — and
-      // a group that also has members in another pane keeps those (the chip you
-      // right-clicked is the one you closed). A pinned tab can never be in this
-      // batch (`setPinned` strips `groupId`), so nothing here can be refused.
+      // Scoped to THIS strip's slice because the chip you right-clicked is the
+      // one you closed: a group that also has members in another pane keeps
+      // those. NOT because `closeTab` needs it to be — it resolves the owning
+      // space itself since the KAN-57 review, and handing it a tab from another
+      // space is space-exact rather than corrupting. A pinned tab can never be
+      // in this batch (`setPinned` strips `groupId`), so nothing here can be
+      // refused.
       requestClose(sliceFor(key).filter((t) => t.groupId === groupId).map((t) => t.id));
     },
   });
