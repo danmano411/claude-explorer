@@ -380,6 +380,25 @@ body {
 .modal-actions button.danger { background: var(--clay); border-color: var(--clay); color: #fff; }
 .modal-actions button.primary { background: var(--clay); border-color: var(--clay); color: #fff; }
 
+/* agent spawn confirmation (KAN-41). Same .modal shell, wider — this dialog's
+   whole job is showing one path legibly. */
+.spawn-modal { max-width: 520px; }
+.spawn-path {
+  display: block; margin: 12px 0; padding: 8px 10px;
+  background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink);
+  /* NEVER truncate or ellipsize: this string IS what the user is approving, and
+     the dangerous part of a path is exactly the part a middle-ellipsis eats.
+     Wrapping anywhere (break-all, not break-word) shows every character of an
+     unspaced path; a pathological one scrolls rather than pushing the buttons
+     off screen. `direction`/`unicode-bidi` force strict left-to-right so a
+     U+202E in the string cannot render a folder name reversed. */
+  overflow-wrap: anywhere; word-break: break-all; white-space: pre-wrap;
+  max-height: 8.5em; overflow-y: auto;
+  direction: ltr; unicode-bidi: bidi-override; text-align: left;
+}
+.spawn-warn { font-size: 13px; color: var(--ink-soft); }
+
 /* transient toast (busy refusal etc.) */
 .toast {
   position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);

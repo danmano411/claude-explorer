@@ -79,6 +79,7 @@ import { registerGitHandlers } from '../src/main/git.handlers'
 import { registerSearchHandlers } from '../src/main/search.handlers'
 import { registerWorkspaceHandlers } from '../src/main/workspace.handlers'
 import { registerControlHandlers } from '../src/main/control.handlers'
+import { registerSpawnConfirmHandlers } from '../src/main/spawnconfirm.handlers'
 
 // Side-effect import: runs contextBridge.exposeInMainWorld('api', api) at
 // module load, which the mock above captures into h.exposedApi.
@@ -99,6 +100,7 @@ registerGitHandlers()
 registerSearchHandlers(() => null)
 registerWorkspaceHandlers()
 registerControlHandlers(() => null)
+registerSpawnConfirmHandlers(() => null, () => {})
 
 // ---------------------------------------------------------------------------
 // CH <-> Api parity via text (Api is erased at runtime — see header comment).
@@ -128,6 +130,9 @@ const EVENT_CHANNELS = new Set<string>([
   CH.controlRequest, // main -> renderer: control-channel request (KAN-39)
   // NOT CH.controlReply: that half travels renderer -> main, so it has a real
   // ipcMain.on listener (control.handlers.ts) and must be checked like one.
+  CH.spawnConfirm, // main -> renderer: "an agent wants to start Claude here" (KAN-41)
+  // NOT CH.spawnConfirmAnswer: renderer -> main, real ipcMain.on listener in
+  // spawnconfirm.handlers.ts, checked like one.
 ])
 
 function apiNameFor(key: string, value: string): string {

@@ -14,6 +14,7 @@ import type {
   TrashWarn,
   ControlRequest,
   ControlReply,
+  SpawnConfirmRequest,
 } from './types'
 
 export const CH = {
@@ -90,6 +91,16 @@ export const CH = {
   // caller of control:request yet — KAN-40 adds the first one.
   controlRequest: 'control:request', // main -> renderer event
   controlReply: 'control:reply',
+  // --- KAN-41: the human in front of the one MCP tool that spawns. Its own
+  // channel pair rather than a fifth control op, for three reasons that are all
+  // about control:request's shape: it dies at a 15s deadline (a human takes
+  // longer than that to read a path), the renderer drains it ONE OP PER COMMIT
+  // (so a modal awaiting a click would starve every listTabs behind it), and it
+  // is request -> one reply correlated by id, where this is notify-now /
+  // answer-later correlated by TOKEN. Same "this one spawns, so it gets its own
+  // channel" split as menuSession above.
+  spawnConfirm: 'spawn:confirm', // main -> renderer event
+  spawnConfirmAnswer: 'spawn:confirm-answer',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -105,6 +116,12 @@ export interface Api {
   // picks up one that already has a transcript. Mutually exclusive.
   ptySpawn(opts: {
     path: string; resumeId?: string; shell?: boolean; sessionId?: string
+    /** KAN-41 recursion guard. True for a session the MCP spawn tool asked for:
+     *  main gives that child no --mcp-config and no token, plus
+     *  --strict-mcp-config, so it cannot spawn in turn and cannot see the target
+     *  folder's .mcp.json. Set by App.tsx's control executor and carried back by
+     *  restore of a tab that had it — provenance survives a restart. */
+    agentSpawned?: boolean
   }): Promise<string> // returns ptyId
   ptyWrite(ptyId: string, data: string): void
   ptyResize(ptyId: string, cols: number, rows: number): void
@@ -168,4 +185,14 @@ export interface Api {
    *  IS the response, so awaiting it would be a second round trip. Main drops
    *  a reply whose id it no longer has pending (timed out, or a duplicate). */
   controlReply(reply: ControlReply): void
+  // --- KAN-41 agent spawn confirmation.
+  /** An agent asked to start Claude Code in `req.path`. Show the prompt; at most
+   *  one is ever outstanding. The renderer holds no authority here — it displays
+   *  a token main minted and hands the answer back. */
+  onSpawnConfirm(cb: (req: SpawnConfirmRequest) => void): () => void
+  /** The user's answer. Fire-and-forget `send`, like controlReply: main drops an
+   *  answer for a token it no longer holds (expired, already answered, or from a
+   *  prompt an older window put up). Escape and the backdrop are a DENY, not
+   *  silence — the tool is waiting, and silence costs it the full timeout. */
+  spawnConfirmAnswer(token: string, allow: boolean): void
 }

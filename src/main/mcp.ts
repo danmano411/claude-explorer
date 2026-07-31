@@ -1,10 +1,18 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { statSync } from 'node:fs'
 import { app } from 'electron'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { z } from 'zod'
 import { control } from './control.handlers'
+import { ControlError } from './control'
 import { isAuthorized } from './mcpauth'
+import { canonicalize } from './policy'
+import { agentSessionCount } from './pty.handlers'
+import { promptSpawnConfirm } from './spawnconfirm.handlers'
+import { createSpawnGuard } from './spawnguard'
+import type { ControlOp, ControlResult } from '../shared/types'
 
 /**
  * KAN-40: the in-process MCP server, and the first caller of control().
@@ -29,10 +37,108 @@ const LIST_TABS_DESCRIPTION =
   'Tab ids exist nowhere else, so call this to obtain one. Safe to call again at any ' +
   'time: it only reads, and the list changes as the user opens and closes tabs.'
 
+const CLOSE_TAB_DESCRIPTION =
+  'Close one tab in Claude Explorer, the file manager hosting this session. `tabId` ' +
+  'is an `id` from list_tabs — no other id works, and ids do not survive a restart. ' +
+  'Closing a terminal tab ENDS the process in it: a Claude session there is ' +
+  'terminated. Returns {"ok":true}; call list_tabs to see the result. On a timeout ' +
+  'the tab may or may not have closed — call list_tabs, do not call this again ' +
+  'blindly.'
+
+const OPEN_VIEWER_TAB_DESCRIPTION =
+  'Open a read-only tab in Claude Explorer showing the GIT DIFF of one file — the ' +
+  'same output as `git diff` for that path. `path` is an ABSOLUTE Windows path to a ' +
+  'file (e.g. C:\\Users\\me\\repo\\src\\index.ts) inside a git repository; an ' +
+  'unchanged file opens an empty diff. This only shows the USER something: it ' +
+  'returns no file contents to you and changes nothing on disk. Returns {"ok":true}; ' +
+  'the new tab appears in list_tabs.'
+
+const OPEN_CLAUDE_SESSION_DESCRIPTION =
+  'Start a NEW Claude Code session in a new terminal tab of Claude Explorer, in the ' +
+  'folder `path` (an ABSOLUTE Windows path, e.g. C:\\Users\\me\\repo). It runs with ' +
+  "the user's own permissions and that folder's CLAUDE.md, hooks and settings — " +
+  'treat it as the user launching Claude Code there themselves. REQUIRES THE ' +
+  "USER'S PERMISSION EVERY TIME: call it first with `path` alone; it returns " +
+  '{"needsConfirm":true,"token":…,"path":…,"expiresAt":…} and Claude Explorer asks ' +
+  'the user to Allow or Deny. Then call it AGAIN with the same `path` and that ' +
+  '`token`. If that call returns needsConfirm again, the user has not answered yet — ' +
+  'call again with the same token. On success it returns {"started":true}. A token ' +
+  'works once, only for the path it was issued for, and expires after two minutes. ' +
+  'The new session has NO Claude Explorer tools: it cannot open tabs or start ' +
+  'further sessions. At most 8 app-started sessions may run at once. If Claude Code ' +
+  'has never run in that folder, the new tab will show Claude\'s "do you trust this ' +
+  'folder" prompt until the user answers it. Call list_tabs to find the tab that was ' +
+  'created.'
+
 const token = randomBytes(32).toString('hex')
 
 let http: Server | null = null
 let port = 0
+
+/**
+ * KAN-41. Module scope, not inside serve(): the transport is stateless and
+ * builds a FRESH McpServer per HTTP request, so anything the guard remembers —
+ * the outstanding confirmation, the in-flight count — has to outlive a request.
+ */
+const guard = createSpawnGuard({ liveCount: agentSessionCount, prompt: promptSpawnConfirm })
+
+/** The renderer's answer, wired in index.ts. Passed to the IPC glue rather than
+ *  imported by it, so spawnconfirm.handlers stays a leaf. */
+export const answerSpawnConfirm = (t: string, allow: boolean): void => guard.answer(t, allow)
+
+/**
+ * One control op, with ControlError mapped onto text a model can act on.
+ *
+ * `timeout` is the one that matters: the op may still be executing and cannot be
+ * recalled, so the answer is never "try again" — it is "go and look". A retried
+ * openClaudeSession is two Claude processes on one folder.
+ */
+async function runControl(op: ControlOp, what: string): Promise<ControlResult> {
+  try {
+    return await control(op)
+  } catch (e) {
+    if (e instanceof ControlError && e.code === 'timeout') {
+      throw new Error(
+        `Claude Explorer's window did not answer in time. ${what} may or may not have ` +
+          'happened — call list_tabs to find out. Do NOT call this again blindly.',
+      )
+    }
+    if (e instanceof ControlError && e.code === 'no-window') {
+      throw new Error('Claude Explorer has no open window, so nothing was done.')
+    }
+    // `renderer`: unknown tab id, a request that expired in the queue, or a
+    // throw the renderer caught. Its own message is the useful part.
+    throw e instanceof Error ? e : new Error(String(e))
+  }
+}
+
+/**
+ * A caller-supplied path, checked for SHAPE before canonicalize() sees it.
+ * Order is load-bearing: canonicalize() resolves a relative path against
+ * Electron's cwd and would silently launder `src` into an absolute path the
+ * model never named — and, for open_claude_session, into a folder the user is
+ * then asked to approve.
+ */
+function absolutePath(p: string): string {
+  if (!/^[a-zA-Z]:[\\/]|^\\\\[^\\]/.test(p)) {
+    throw new Error(`path must be an absolute Windows path (e.g. C:\\Users\\me\\repo), got: ${p}`)
+  }
+  return canonicalize(p)
+}
+
+function existingPath(p: string, want: 'file' | 'folder'): string {
+  const full = absolutePath(p)
+  const st = statSync(full, { throwIfNoEntry: false })
+  if (!st) throw new Error(`no such path: ${full}`)
+  if (st.isDirectory() !== (want === 'folder')) {
+    throw new Error(`${full} is a ${st.isDirectory() ? 'folder' : 'file'}; this tool needs a ${want}`)
+  }
+  return full
+}
+
+const asText = (value: unknown) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify(value) }],
+})
 
 export function startMcpServer(): Promise<{ port: number; token: string }> {
   const srv = createServer((req, res) => {
@@ -93,6 +199,9 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     allowedHosts: [`127.0.0.1:${port}`, `localhost:${port}`],
   })
   const server = new McpServer({ name: 'claude-explorer', version: app.getVersion() })
+  // Every tool below throws on bad input, and the SDK turns a throwing callback
+  // into an isError result carrying the message — which is the answer the model
+  // needs. So a typed refusal IS a throw here; nothing reaches the http layer.
   server.registerTool('list_tabs', { description: LIST_TABS_DESCRIPTION }, async () => ({
     // control() rejects with a ControlError on `no-window` | `timeout` |
     // `renderer`; the SDK turns a throwing tool callback into an isError result
@@ -100,6 +209,60 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // listTabs is the one op safe to retry on a timeout — it is read-only.
     content: [{ type: 'text' as const, text: JSON.stringify(await control({ op: 'listTabs' })) }],
   }))
+
+  server.registerTool(
+    'close_tab',
+    { description: CLOSE_TAB_DESCRIPTION, inputSchema: { tabId: z.string() } },
+    async ({ tabId }) => {
+      // No default to the active tab, here or anywhere: an op that guesses its
+      // target is one an injected instruction can aim at whatever is in front of
+      // the user. An unknown or already-closed id comes back as `renderer`.
+      await runControl({ op: 'closeTab', args: { tabId } }, 'The tab')
+      return asText({ ok: true })
+    },
+  )
+
+  server.registerTool(
+    'open_viewer_tab',
+    { description: OPEN_VIEWER_TAB_DESCRIPTION, inputSchema: { path: z.string() } },
+    async ({ path }) => {
+      // No `mode` property at all: "file" is unrepresentable rather than
+      // rejected, so there is nothing for a caller to try. Diff shows the user
+      // a change; a file viewer would be a read tool, and the agent has a shell.
+      const filePath = existingPath(path, 'file')
+      await runControl({ op: 'openViewerTab', args: { filePath, mode: 'diff' } }, 'The tab')
+      return asText({ ok: true })
+    },
+  )
+
+  server.registerTool(
+    'open_claude_session',
+    {
+      description: OPEN_CLAUDE_SESSION_DESCRIPTION,
+      inputSchema: { path: z.string(), token: z.string().optional() },
+    },
+    async ({ path, token: confirmToken }) => {
+      // Validated before the guard sees either call, so a bad path never reaches
+      // a human as a prompt and never mints a token.
+      const cwd = existingPath(path, 'folder')
+      // No `resumeId`: the tool starts a new session and nothing else. Picking up
+      // someone else's conversation is not a thing an agent gets to do.
+      const decision = await guard.request(cwd, confirmToken, async (p) => {
+        await runControl({ op: 'openClaudeSession', args: { cwd: p } }, 'The session')
+      })
+      if (decision.kind === 'refused') throw new Error(decision.reason)
+      return asText(
+        decision.kind === 'spawned'
+          ? { started: true, path: cwd }
+          : {
+              needsConfirm: true,
+              token: decision.token,
+              path: decision.path,
+              expiresAt: decision.expiresAt,
+            },
+      )
+    },
+  )
   // .catch, not `void`: close() is async and ends in Protocol._onclose(), which
   // settles every outstanding response handler — a throw in one of those rejects
   // close(), and an unhandled rejection takes main down with it (Node 22's

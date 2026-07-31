@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
-import type { SearchHit, SearchDone, TrashWarn, ControlRequest } from '../shared/types';
+import type {
+  SearchHit, SearchDone, TrashWarn, ControlRequest, SpawnConfirmRequest,
+} from '../shared/types';
 
 const api: Api = {
   fsList: (p) => ipcRenderer.invoke(CH.fsList, p),
@@ -82,6 +84,13 @@ const api: Api = {
     return () => ipcRenderer.off(CH.controlRequest, h);
   },
   controlReply: (reply) => ipcRenderer.send(CH.controlReply, reply),
+  // --- KAN-41 agent spawn confirmation ---
+  onSpawnConfirm: (cb) => {
+    const h = (_e: unknown, req: SpawnConfirmRequest) => cb(req);
+    ipcRenderer.on(CH.spawnConfirm, h);
+    return () => ipcRenderer.off(CH.spawnConfirm, h);
+  },
+  spawnConfirmAnswer: (token, allow) => ipcRenderer.send(CH.spawnConfirmAnswer, token, allow),
 };
 
 contextBridge.exposeInMainWorld('api', api);

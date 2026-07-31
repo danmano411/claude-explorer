@@ -22,7 +22,9 @@ import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, switchSpace,
 } from './spaces';
-import type { ControlRequest, ControlResult, GridCell, GridLayout, Space, TabGroup } from '../shared/types';
+import type {
+  ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
+} from '../shared/types';
 import { isTextBox, isTypingTarget } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
@@ -30,6 +32,7 @@ import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { SettingsModal } from './components/SettingsModal';
+import { SpawnConfirm } from './components/SpawnConfirm';
 import { SpaceMenu } from './components/SpaceMenu';
 import { LONE_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } from './TabBar';
 
@@ -66,6 +69,12 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  /** KAN-41: the outstanding "an agent wants to start Claude in <path>" prompt.
+   *  A single nullable, not a queue — main allows exactly one outstanding
+   *  confirmation app-wide, so a second one arriving is a bug in main, not a
+   *  state this has to render. Nothing here is authority: the token was minted
+   *  in main and only main can redeem it. */
+  const [spawnAsk, setSpawnAsk] = useState<SpawnConfirmRequest | null>(null);
   /** The Ctrl+Shift+G arrangement picker (KAN-56). Just open/closed — it stages
    *  nothing, which is what makes Escape inert. */
   const [picker, setPicker] = useState(false);
@@ -416,6 +425,10 @@ export function App() {
       path: t.cwd,
       resumeId: known ? t.sessionId : undefined,
       sessionId: known ? undefined : t.sessionId,
+      // KAN-41: provenance survives the restart. Without this, quitting and
+      // reopening launders every agent-spawned worker into a session that gets
+      // the spawn tool back.
+      agentSpawned: t.agentSpawned,
     });
   };
 
@@ -792,11 +805,15 @@ export function App() {
   // on the same repo apart, and getting that wrong would resume the wrong
   // conversation. Resuming an existing one keeps its id, since that is the
   // transcript it goes on writing to.
-  const claudeSpawn = async (cwd: string, resumeId?: string) => {
+  // KAN-41: `agentSpawned` is passed straight down to main, which reads it as
+  // "this child gets no MCP config and no token". It is set on exactly ONE call
+  // path — the control channel's openClaudeSession arm — and on the respawn of a
+  // restored tab that carried it.
+  const claudeSpawn = async (cwd: string, resumeId?: string, agentSpawned?: true) => {
     await window.api.recentsAdd(cwd);
     const sessionId = resumeId ?? crypto.randomUUID();
     const ptyId = await window.api.ptySpawn({
-      path: cwd, resumeId, sessionId: resumeId ? undefined : sessionId,
+      path: cwd, resumeId, sessionId: resumeId ? undefined : sessionId, agentSpawned,
     });
     return { ptyId, sessionId };
   };
@@ -813,9 +830,9 @@ export function App() {
   // NEW tab (never overrides current), resuming that session.
   // KAN-47: the File menu is tab-bar-global, not scoped to any tab — no source
   // to inherit from. Stays far-right, same as today.
-  const openClaudeNewTab = async (cwd: string, resumeId?: string) => {
-    const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId);
-    const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd), sessionId);
+  const openClaudeNewTab = async (cwd: string, resumeId?: string, agentSpawned?: true) => {
+    const { ptyId, sessionId } = await claudeSpawn(cwd, resumeId, agentSpawned);
+    const t = newTerminalTab(cwd, 'claude', ptyId, basename(cwd), sessionId, agentSpawned);
     setTabs((ts) => [...ts, t]); landTab(t.id); selectTab(t.id);
   };
 
@@ -932,7 +949,13 @@ export function App() {
         await openViewerTab(req.args.filePath, req.args.mode ?? 'file');
         return null;
       case 'openClaudeSession':
-        await openClaudeNewTab(req.args.cwd, req.args.resumeId);
+        // KAN-41: `true` unconditionally, and it is NOT a field on ControlOp.
+        // ARRIVING ON THIS CHANNEL is what makes a session agent-spawned, which
+        // is strictly stronger than a wire flag — there is no field for a future
+        // caller, or a forged IPC message, to set to false. Main withholds the
+        // MCP config and token from the child, so the tool cannot hand itself
+        // down a generation.
+        await openClaudeNewTab(req.args.cwd, req.args.resumeId, true);
         return null;
       default:
         // Unreachable through the type, reachable across an IPC boundary.
@@ -959,6 +982,29 @@ export function App() {
       // after a single spare render rather than spinning.
       .finally(() => { controlBusy.current = false; setControlTick((n) => n + 1); });
   }, [controlTick]);
+
+  // --- KAN-41 agent spawn confirmation -------------------------------------
+  //
+  // Deliberately NOT on the control queue above: that queue is one op per
+  // commit with a 15s deadline, and a modal waiting on a human is neither. It
+  // would also block every listTabs behind it — a UI deadlock reachable from a
+  // tool call. See the CH.spawnConfirm comment in src/shared/ipc.ts.
+  //
+  // Mount-once, like onControlRequest: this only sets state, and setSpawnAsk is
+  // stable. `restoreDone` does NOT gate it — the prompt renders nothing that
+  // depends on the tab store, and refusing to ask during restore would silently
+  // turn into a denial the user never saw.
+  useEffect(() => window.api.onSpawnConfirm(setSpawnAsk), []);
+
+  // Clearing and answering are one step, so no path can leave a dead prompt on
+  // screen: a token is answerable exactly once, and main drops an answer for a
+  // token it no longer holds. Expiry inside SpawnConfirm comes through here too
+  // — main has already forgotten the token by then and the send is a no-op.
+  const answerSpawn = (allow: boolean) => {
+    if (!spawnAsk) return;
+    window.api.spawnConfirmAnswer(spawnAsk.token, allow);
+    setSpawnAsk(null);
+  };
 
   // --- spaces --------------------------------------------------------------
   //
@@ -1734,6 +1780,9 @@ export function App() {
         />
       )}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {/* Last, so it is over every other modal: whatever else is open, this is
+          the one asking to run code. */}
+      {spawnAsk && <SpawnConfirm request={spawnAsk} onAnswer={answerSpawn} />}
     </div>
   );
 }
