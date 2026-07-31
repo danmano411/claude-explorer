@@ -8,7 +8,7 @@ import { unwrap, type ConfirmRequest } from '../opresult';
 import { gutterMarks, markKey, type GutterMark } from '../diffparse';
 import { IDLE_MS } from '../ptystatus';
 import { isTypingTarget } from '../keys';
-import { useAppState } from '../appstate';
+import { useAppState, type Clipboard } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -216,6 +216,17 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     }
   };
 
+  // KAN-62. The in-app clipboard already drives this pane's own Paste; this
+  // ALSO puts the absolute path(s) on the real OS clipboard as text, one per
+  // line, so a subsequent Ctrl+V into a Claude tab (or any other text field)
+  // carries something. Nothing else was ever written there (Copy/Cut are pure
+  // in-app state — no CF_HDROP, no OS drag), so this cannot regress a
+  // paste-into-Explorer that did not work before either.
+  const setClip = (c: NonNullable<Clipboard>) => {
+    app.setClipboard(c);
+    window.api.clipboardWriteText(c.paths.join('\n'));
+  };
+
   const paste = async (destDir: string) => {
     const cb = app.clipboard;
     if (!cb || !cb.paths.length) return;
@@ -335,8 +346,8 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       items.push({ label: 'Open in default app', onClick: () => window.api.openPath(entry.path) });
     }
     items.push({ separator: true });
-    items.push({ label: 'Cut', onClick: () => app.setClipboard({ mode: 'cut', paths }) });
-    items.push({ label: 'Copy', onClick: () => app.setClipboard({ mode: 'copy', paths }) });
+    items.push({ label: 'Cut', onClick: () => setClip({ mode: 'cut', paths }) });
+    items.push({ label: 'Copy', onClick: () => setClip({ mode: 'copy', paths }) });
     items.push({ label: 'Paste', onClick: () => paste(entry.path), disabled: !canPaste || !isDir });
     items.push({ separator: true });
     if (paths.length === 1) items.push({ label: 'Rename', onClick: () => setRenaming({ path: entry.path, value: entry.name }) });
@@ -363,8 +374,8 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
       if (e.key === 'Backspace') { e.preventDefault(); nav(winDirname(dir)); return; }
       if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
       if (e.key === 'Escape') { setSelection(emptySelection()); setMenu(null); return; }
-      if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) app.setClipboard({ mode: 'cut', paths: selectedPaths }); return; }
-      if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) app.setClipboard({ mode: 'copy', paths: selectedPaths }); return; }
+      if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) setClip({ mode: 'cut', paths: selectedPaths }); return; }
+      if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) setClip({ mode: 'copy', paths: selectedPaths }); return; }
       if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) { paste(dir); return; }
       if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); doUndo(); return; }
       if (e.ctrlKey && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
