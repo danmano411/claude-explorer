@@ -74,6 +74,29 @@ export class PtyArgError extends Error {
  * CLAUDE_CODE_MAX_OUTPUT_TOKENS, …) which must pass through untouched. Ceiling:
  * if Claude Code renames its marker, this list needs the new name. The
  * env-scrub test is what would notice.
+ *
+ * KAN-67. CLAUDE_EXPLORER_MCP_TOKEN and CLAUDE_EXPLORER_PTY_ID belong on this
+ * list for the same reason: they are THIS APP's own session identity, not
+ * something to hand down. If Claude Explorer is itself started from inside a
+ * Claude Explorer terminal — `npm run dev` in a Claude tab, the CLI invoked
+ * from a Claude session, a shell tab launching the packaged app — the parent
+ * app's bearer token is sitting in process.env, and without this line every
+ * pty this process then spawns would inherit it: a shell tab (which the
+ * comment below promises gets neither), and an agentSpawned worker (KAN-41's
+ * recursion guard withholds --mcp-config, but inheritance would hand the
+ * token back — the tool surface is still gone, so not a one-step bypass, but
+ * the token is the whole authentication and the server is on loopback). A
+ * normal Claude session re-adds its own token explicitly right after
+ * launchEnv() runs (see agentControl below), so stripping here costs the
+ * legitimate path nothing.
+ *
+ * OPINION (ticket asks, not a change): don't refuse or even warn on launch.
+ * Detecting "am I nested" reliably means matching on CLAUDECODE/session-id
+ * vars that are already being stripped for an unrelated reason (transcript
+ * persistence) and are not a security boundary — a user right-clicking a repo
+ * from within a Claude terminal is the common case, not an attack, and this
+ * fix already closes the actual leak at the one chokepoint every spawn routes
+ * through. A warning would fire on that common case for no actionable benefit.
  */
 const INHERITED_SESSION_VARS = [
   'CLAUDECODE',
@@ -82,6 +105,8 @@ const INHERITED_SESSION_VARS = [
   'CLAUDE_CODE_BRIDGE_SESSION_ID',
   'CLAUDE_CODE_ENTRYPOINT',
   'CLAUDE_PID',
+  'CLAUDE_EXPLORER_MCP_TOKEN',
+  'CLAUDE_EXPLORER_PTY_ID',
 ]
 
 export function launchEnv(
