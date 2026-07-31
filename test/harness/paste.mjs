@@ -47,7 +47,13 @@ const check = (name, pass, detail = '') => {
   results.push({ name, pass });
   console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
 };
-const skip = (name, why) => console.log(`  SKIP  ${name}${why ? `  — ${why}` : ''}`);
+// A skip is a FAILURE here, not a shrug. Both skips below fire when the harness
+// cannot establish its own precondition, and a silent one used to shrink the
+// total — `20/20 passed`, exit 0, three Claude-tab assertions quietly gone.
+const skip = (name, why) => {
+  results.push({ name, pass: false });
+  console.log(`  SKIP  ${name}  — ${why} (counted as a FAILURE: the harness could not set itself up)`);
+};
 
 // Throwaway profile, pid-suffixed: the app restores the previous workspace, and
 // the single-instance lock is keyed on userData — two concurrent harness runs
@@ -288,14 +294,39 @@ console.log('\n7. Ctrl+C still reaches the shell as a control character');
 }
 
 // ===========================================================================
-console.log('\n8. bracketed paste: exactly one ESC[200~..ESC[201~ run');
+console.log('\n8. Ctrl/Shift+Enter insert a newline; plain Enter still submits');
+// ===========================================================================
+{
+  // The OTHER arm in attachCustomKeyEventHandler, and it was shipping untested:
+  // removing its preventDefault leaves the harness at 23/23 while putting "\n"
+  // THEN "\r" on the wire — every multi-line prompt submitted half-written. The
+  // bytes are the whole claim, so assert the bytes; a screen check cannot tell a
+  // newline that submitted from one that did not.
+  for (const [combo, want, what] of [
+    ['Enter', '\r', 'submits'],
+    ['Shift+Enter', '\n', 'inserts a newline'],
+    ['Control+Enter', '\n', 'inserts a newline'],
+  ]) {
+    await clearLine();
+    const from = await mark();
+    await win.keyboard.press(combo);
+    await win.waitForTimeout(500);
+    const sent = await sentTo(shellPty, from);
+    check(`${combo} ${what} — exactly ${printable(want)} on the wire`,
+      sent.length === 1 && sent[0].data === want,
+      `${sent.length} pty:write — ${sent.map((m) => printable(m.data)).join(' + ')}`);
+  }
+}
+
+// ===========================================================================
+console.log('\n9. bracketed paste: exactly one ESC[200~..ESC[201~ run');
 // ===========================================================================
 {
   // The mode is set by driving the app's real `pty:data` broadcast — the same
   // channel and the same bytes a bracketed-paste app sends. xterm's parser cannot
   // tell the difference, and unlike typing a DECSET command at PSReadLine it
   // cannot be undone by the line editor between arming and pasting.
-  // §9 pastes into Claude Code, which enables the mode itself.
+  // §10 pastes into Claude Code, which enables the mode itself.
   const CLIP = `CE-BRACKET-${RUN}`;
   await clearLine();
   await app.evaluate(({ BrowserWindow }, id) =>
@@ -321,7 +352,7 @@ console.log('\n8. bracketed paste: exactly one ESC[200~..ESC[201~ run');
 }
 
 // ===========================================================================
-console.log('\n9. Ctrl+V in a Claude tab');
+console.log('\n10. Ctrl+V in a Claude tab');
 // ===========================================================================
 {
   // The first consumer of this app, and the one that really turns bracketed paste
