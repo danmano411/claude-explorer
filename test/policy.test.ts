@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { classify, check, gate, canonicalize, canonicalizeAsync, oneAtATime, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
+import { classify, check, gate, canonicalizeAsync, oneAtATime, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
 import type { Op } from '../src/main/policy'
 
 const ROOTS = ['C:\\FakeWindows', 'C:\\Fake Program Files']
@@ -78,24 +78,24 @@ describe('check', () => {
 })
 
 describe('gate', () => {
-  it('returns null when allowed', () => {
-    expect(gate('delete', ['C:\\Users\\dan\\a'], 'explorer', undefined, ROOTS)).toBeNull()
+  it('returns null when allowed', async () => {
+    expect(await gate('delete', ['C:\\Users\\dan\\a'], 'explorer', undefined, ROOTS)).toBeNull()
   })
-  it('returns the verdict when denied, even with a confirm value', () => {
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'explorer', CONFIRM_WORD, ROOTS)).not.toBeNull()
+  it('returns the verdict when denied, even with a confirm value', async () => {
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'explorer', CONFIRM_WORD, ROOTS)).not.toBeNull()
   })
-  it('rejects a wrong or missing typed confirmation', () => {
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', undefined, ROOTS)).not.toBeNull()
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', 'yes', ROOTS)).not.toBeNull()
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', 'confirm', ROOTS)).not.toBeNull()
+  it('rejects a wrong or missing typed confirmation', async () => {
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', undefined, ROOTS)).not.toBeNull()
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', 'yes', ROOTS)).not.toBeNull()
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', 'confirm', ROOTS)).not.toBeNull()
   })
-  it('passes with the exact confirm word', () => {
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', CONFIRM_WORD, ROOTS)).toBeNull()
+  it('passes with the exact confirm word', async () => {
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', CONFIRM_WORD, ROOTS)).toBeNull()
   })
-  it('leaves paths untouched when an identity resolver is injected', () => {
+  it('leaves paths untouched when an identity resolver is injected', async () => {
     const id = (p: string) => p
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'explorer', undefined, ROOTS, id)).not.toBeNull()
-    expect(gate('delete', ['C:\\Users\\dan\\a'], 'explorer', undefined, ROOTS, id)).toBeNull()
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'explorer', undefined, ROOTS, id)).not.toBeNull()
+    expect(await gate('delete', ['C:\\Users\\dan\\a'], 'explorer', undefined, ROOTS, id)).toBeNull()
   })
 })
 
@@ -136,48 +136,50 @@ describe('gate canonicalises before classifying', () => {
 
   const denied = (p: string) => gate('delete', [p], 'explorer')
 
-  it('catches an 8.3 short name for a system root', () => {
+  it('catches an 8.3 short name for a system root', async () => {
     expect(classify('C:\\PROGRA~1')).toBe('normal') // lexically invisible
-    expect(canonicalize('C:\\PROGRA~1')).toBe('C:\\Program Files')
-    expect(denied('C:\\PROGRA~1')).not.toBeNull()
+    expect(await canonicalizeAsync('C:\\PROGRA~1')).toBe('C:\\Program Files')
+    expect(await denied('C:\\PROGRA~1')).not.toBeNull()
   })
 
-  it('catches .. traversal into a system root', () => {
+  it('catches .. traversal into a system root', async () => {
     // NOT path.join — that would normalise the `..` away before classify sees it.
     const p = os.homedir() + '\\..\\..\\Windows\\System32'
     expect(classify(p)).toBe('normal')
-    expect(denied(p)).not.toBeNull()
+    expect(await denied(p)).not.toBeNull()
   })
 
-  it('catches the \\\\?\\ spelling of a system root', () => {
+  it('catches the \\\\?\\ spelling of a system root', async () => {
     expect(classify('\\\\?\\C:\\Windows\\System32')).toBe('normal')
-    expect(denied('\\\\?\\C:\\Windows\\System32')).not.toBeNull()
+    expect(await denied('\\\\?\\C:\\Windows\\System32')).not.toBeNull()
   })
 
-  it('catches an 8.3 short name for the trash dir, in both modes', () => {
+  it('catches an 8.3 short name for the trash dir, in both modes', async () => {
     if (!shortTrash) return // volume has 8.3 name creation disabled
     expect(classify(shortTrash)).toBe('normal')
-    expect(gate('delete', [shortTrash], 'explorer')).not.toBeNull()
+    expect(await gate('delete', [shortTrash], 'explorer')).not.toBeNull()
     // Trash is denied outright, so even a typed confirm in developer mode fails.
-    expect(gate('delete', [shortTrash], 'developer', CONFIRM_WORD)).not.toBeNull()
+    expect(await gate('delete', [shortTrash], 'developer', CONFIRM_WORD)).not.toBeNull()
   })
 
-  it('catches a junction pointing into a system root', () => {
+  it('catches a junction pointing into a system root', async () => {
     if (!junction) return
     const p = path.join(junction, 'drivers')
     expect(classify(p)).toBe('normal')
-    expect(denied(p)).not.toBeNull()
+    expect(await denied(p)).not.toBeNull()
   })
 
-  it('catches a not-yet-existing target under a junction (mkdir/newFile)', () => {
+  it('catches a not-yet-existing target under a junction (mkdir/newFile)', async () => {
     if (!junction) return
     const p = path.join(junction, 'does-not-exist-yet', 'x.txt')
-    expect(canonicalize(p)).toBe(path.join('C:\\Windows\\System32', 'does-not-exist-yet', 'x.txt'))
-    expect(denied(p)).not.toBeNull()
+    expect(await canonicalizeAsync(p)).toBe(
+      path.join('C:\\Windows\\System32', 'does-not-exist-yet', 'x.txt'),
+    )
+    expect(await denied(p)).not.toBeNull()
   })
 
-  it('leaves an ordinary temp path alone', () => {
-    expect(gate('delete', [path.join(base, 'ordinary.txt')], 'explorer')).toBeNull()
+  it('leaves an ordinary temp path alone', async () => {
+    expect(await gate('delete', [path.join(base, 'ordinary.txt')], 'explorer')).toBeNull()
   })
 })
 
@@ -229,34 +231,39 @@ describe('D5 — confirmation requires the exact word', () => {
       }
     }
   })
-  it('rejects empty and whitespace-only confirmations', () => {
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '', ROOTS)).not.toBeNull()
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '   ', ROOTS)).not.toBeNull()
-    expect(gate('delete', ['C:\\FakeWindows\\x'], 'developer', '\t\n', ROOTS)).not.toBeNull()
+  it('rejects empty and whitespace-only confirmations', async () => {
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', '', ROOTS)).not.toBeNull()
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', '   ', ROOTS)).not.toBeNull()
+    expect(await gate('delete', ['C:\\FakeWindows\\x'], 'developer', '\t\n', ROOTS)).not.toBeNull()
   })
 })
 
-describe('canonicalize', () => {
-  it('never throws on garbage', () => {
-    expect(() => canonicalize('')).not.toThrow()
-    expect(() => canonicalize('Z:\\nope\\<>|')).not.toThrow()
+// KAN-68 deleted the synchronous canonicalize(), so the old "the two spellings
+// agree" test could no longer fail: one walk cannot disagree with itself, and a
+// botched walk moves both sides together. These pin the ANSWERS instead —
+// captured by running f9a1fff's sync canonicalize() over the same inputs — so a
+// bad port of the walk changes a value rather than nothing.
+describe('canonicalizeAsync', () => {
+  it('never rejects on garbage', async () => {
+    await expect(canonicalizeAsync('')).resolves.toBe(path.resolve(''))
+    await expect(canonicalizeAsync('Z:\\nope\\<>|')).resolves.toBe('Z:\\nope\\<>|')
   })
 
-  // canonicalizeAsync is what every path from OUTSIDE the app resolves through
-  // (mcp.ts), because realpathSync.native on an unreachable SMB host pins main
-  // for ~21 seconds. It is only safe to route those through it if it answers
-  // IDENTICALLY — a botched port of the ancestor walk would silently change what
-  // a caller-supplied path resolves to, and gate() classifies the result.
-  it('canonicalizeAsync agrees with canonicalize, including the ancestor walk', async () => {
-    const cases = [
-      'C:\\PROGRA~1', // 8.3 short name -> a real system root
-      path.join(os.tmpdir(), 'ce-does-not-exist-yet', 'x.txt'), // the walk
-      os.homedir() + '\\..\\..\\Windows\\System32', // .. traversal
-      '\\\\?\\C:\\Windows\\System32',
-      'Z:\\nope\\<>|', // garbage: neither may throw
-      '',
-    ]
-    for (const p of cases) expect(await canonicalizeAsync(p)).toBe(canonicalize(p))
+  it('gives the pre-refactor answers for every shape of protected path', async () => {
+    // 8.3 short name -> the real system root it hides.
+    expect(await canonicalizeAsync('C:\\PROGRA~1')).toBe('C:\\Program Files')
+    // `..` traversal, which classify() alone cannot see through.
+    expect(await canonicalizeAsync(os.homedir() + '\\..\\..\\Windows\\System32')).toBe(
+      'C:\\Windows\\System32',
+    )
+    // The \\?\ spelling, which must lose its prefix or nothing matches a root.
+    expect(await canonicalizeAsync('\\\\?\\C:\\Windows\\System32')).toBe('C:\\Windows\\System32')
+    // The ancestor walk: the target does not exist (mkdir/newFile), so the
+    // nearest existing ancestor is resolved and the rest re-appended.
+    const missing = path.join(os.tmpdir(), 'ce-does-not-exist-yet', 'x.txt')
+    expect(await canonicalizeAsync(missing)).toBe(
+      path.join(fs.realpathSync.native(os.tmpdir()), 'ce-does-not-exist-yet', 'x.txt'),
+    )
   })
 })
 

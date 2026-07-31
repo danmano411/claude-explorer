@@ -22,7 +22,7 @@ async function guarded<T>(
   confirm: string | undefined,
   run: () => Promise<T>,
 ): Promise<OpResult<T>> {
-  const v = gate(op, paths, getSettings().mode, confirm)
+  const v = await gate(op, paths, getSettings().mode, confirm)
   if (v) return blocked(v)
   try {
     return { ok: true, value: await run() }

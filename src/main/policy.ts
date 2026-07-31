@@ -52,9 +52,7 @@ export function classify(p: string, roots: string[] = DEFAULT_SYSTEM_ROOTS): Pat
 
 /** `p` itself, then each ancestor, paired with the segments to re-append. The
  *  first one that really exists on disk is the answer; if none does, the caller
- *  falls back to the lexical path. Shared so the sync and async resolvers below
- *  cannot drift apart — the only difference between them is which realpath they
- *  await. */
+ *  falls back to the lexical path. */
 function* ancestors(p: string): Generator<[string, string[]]> {
   const rest: string[] = []
   let cur = path.resolve(p)
@@ -67,37 +65,29 @@ function* ancestors(p: string): Generator<[string, string[]]> {
   }
 }
 
+const realpathNative = promisify(fs.realpath.native)
+
 /** Resolve to the real on-disk path: expands 8.3 short names, `..`, symlinks
  *  and junctions, and strips the `\\?\` prefix. For a target that does not
  *  exist yet (mkdir/newFile) the nearest existing ancestor is resolved and the
  *  remaining segments re-appended. Never throws.
  *
- *  BLOCKS THE PROCESS. `realpathSync.native` on a path whose host is
- *  unreachable (`\\10.255.255.1\share\x`) takes ~21 SECONDS, and every one of
- *  them is spent on the calling thread. In main that is the whole app: no IPC,
- *  no pty:data, no paint. Only use this for a path the USER chose in the window
- *  that would be frozen; anything a caller outside the app named goes through
- *  canonicalizeAsync.
- *
- *  KAN-65 left this with exactly ONE caller — gate(), below — which is the
- *  point: the rule above is now checkable by grepping this name, instead of
- *  being a convention spread over three call sites. gate()'s paths are the
- *  user's own selection in the window, and nothing an unauthenticated caller
- *  reaches routes here (fsmutate.handlers and trash.handlers are its only
- *  callers, both fed by renderer IPC). Move it — and delete this spelling — the
- *  day that stops being true. */
-export function canonicalize(p: string): string {
+ *  KAN-68 deleted the `realpathSync.native` spelling of this, so there is no
+ *  longer any way to resolve a path in main that pins the whole process. This
+ *  one is UNGATED and therefore not exported: a single call still parks a libuv
+ *  worker for ~21 seconds on an unreachable host, and libuv has four. Both
+ *  exported spellings below put it behind a queue — which queue is the trust
+ *  boundary, see gateOne. */
+async function resolveReal(p: string): Promise<string> {
   for (const [cur, rest] of ancestors(p)) {
     try {
-      return path.join(fs.realpathSync.native(cur), ...rest)
+      return path.join(await realpathNative(cur), ...rest)
     } catch {
       /* keep walking up */
     }
   }
   return path.resolve(p)
 }
-
-const realpathNative = promisify(fs.realpath.native)
 
 /**
  * A gate that runs what it is handed one at a time, in call order. A rejection
@@ -111,8 +101,8 @@ const realpathNative = promisify(fs.realpath.native)
  * Ceiling: lookups now queue behind each other, which is microseconds on a local
  * path but the full 21s behind an unreachable one — so a looping agent can still
  * starve the two MCP tools that resolve a path (its OWN tools; the window's file
- * operations do not go through here, and that is the point). Give it a real
- * worker pool with per-client fairness the day that is worth caring about.
+ * operations ride gateOne, a separate instance, and that is the point). Give it
+ * a real worker pool with per-client fairness the day that is worth caring about.
  */
 export function oneAtATime(): <T>(fn: () => Promise<T>) => Promise<T> {
   let queue: Promise<unknown> = Promise.resolve()
@@ -132,13 +122,17 @@ export function oneAtATime(): <T>(fn: () => Promise<T>) => Promise<T> {
  *  app can hold at once, and two queues would make that two. The cost is that a
  *  looping agent delays a CLI launch and vice versa — but each of them can
  *  already starve its own class, so a second queue would buy isolation between
- *  two untrusted callers at the price of a second pinned thread. */
+ *  two untrusted callers at the price of a second pinned thread.
+ *
+ *  UNTRUSTED is the word doing the work: gateOne (below) is a second queue, and
+ *  it does not break this rule, because what it serialises is the window's own
+ *  operations. The invariant is "a caller outside the app pins at most one
+ *  worker", and that is still exactly one queue. */
 export const resolveOne = oneAtATime()
 
-/** canonicalize() without pinning the main thread — same answers, one awaited
- *  syscall at a time. This is the spelling every caller-supplied path must use
- *  (see mcp.ts): the 21-second stall above then costs one request instead of
- *  the whole process.
+/** Path resolution for a caller OUTSIDE the app, on the shared untrusted queue.
+ *  This is the spelling every caller-supplied path must use (see mcp.ts, cli.ts):
+ *  the 21-second stall then costs one request instead of the whole process.
  *
  *  SERIALISED, and that is half the fix, not tidiness. `await` moves the stall
  *  off the event loop but not off libuv's threadpool, which is FOUR threads —
@@ -149,17 +143,35 @@ export const resolveOne = oneAtATime()
  *  session parsing and every trash op are all `node:fs/promises`. One at a time
  *  caps an outside caller at a single worker. */
 export async function canonicalizeAsync(p: string): Promise<string> {
-  return resolveOne(async () => {
-    for (const [cur, rest] of ancestors(p)) {
-      try {
-        return path.join(await realpathNative(cur), ...rest)
-      } catch {
-        /* keep walking up */
-      }
-    }
-    return path.resolve(p)
-  })
+  return resolveOne(() => resolveReal(p))
 }
+
+/** gate()'s resolver: the SAME walk, its OWN queue — deliberately not resolveOne.
+ *
+ *  KAN-68's one real design decision, so it is written down here. gate()'s paths
+ *  are the user's own selection arriving over authenticated renderer IPC; the
+ *  MCP and CLI paths are named by callers outside the app. Those are different
+ *  trust classes, and resolveOne exists to bound a class, not a workload:
+ *
+ *  - Sharing resolveOne would mean one looping agent — which is entitled to hold
+ *    that queue for 21 s per resolve — puts the USER'S OWN delete behind serial
+ *    21-second stalls. Today's bug is self-inflicted; that would convert it into
+ *    an agent-inflicted one. Strictly worse, so no.
+ *  - No queue at all would be enough *today*, because every file operation in
+ *    the renderer awaits sequentially (paste, drop, delete, rename are all
+ *    `for..of` + `await`), so the window issues one gate() at a time. But that
+ *    is a property of FileBrowser's control flow, not of this file — one
+ *    `Promise.all` over a multi-select drop and the window is holding all four
+ *    libuv workers again. The whole point of this ticket is properties over
+ *    conventions, so: a queue.
+ *
+ *  Cost, stated plainly: worst case two of libuv's four workers are held (one
+ *  per queue) instead of one. The invariant that actually matters is unchanged —
+ *  a caller OUTSIDE the app can still pin at most one — and the second is held
+ *  only by an operation the user started and is waiting for. Merge the queues
+ *  the day a user's file operation stops being more privileged than an agent's. */
+const gateOne = oneAtATime()
+const resolveForWindow = (p: string) => gateOne(() => resolveReal(p))
 
 export function check(
   op: Op,
@@ -219,21 +231,27 @@ export function check(
  *  confirm value is never trusted to have actually earned it.
  *
  *  Canonicalisation lives HERE, not in the handlers: `classify`/`check` stay
- *  pure string matching, and no call site can forget to resolve first. */
-export function gate(
+ *  pure string matching, and no call site can forget to resolve first.
+ *
+ *  ASYNC since KAN-68. A missed `await` at a call site is a TYPE ERROR, not a
+ *  silently disabled guard: this returns a Verdict that `blocked()` consumes, so
+ *  an unawaited Promise — which would be truthy in the `if (v)` — cannot be
+ *  passed on. Keep it that way; the day someone takes the result in a boolean
+ *  position, a forgotten await opens the file-safety chokepoint.
+ *
+ *  Paths resolve one after another rather than in parallel: a twenty-item
+ *  selection is one queued resolution twenty times, not a twenty-deep fan-out. */
+export async function gate(
   op: Op,
   paths: string[],
   mode: FileMode,
   confirm?: string,
   roots: string[] = DEFAULT_SYSTEM_ROOTS,
-  resolve: (p: string) => string = canonicalize,
-): Verdict | null {
-  const v = check(
-    op,
-    paths.map((p) => resolve(p)),
-    mode,
-    roots,
-  )
+  resolve: (p: string) => string | Promise<string> = resolveForWindow,
+): Promise<Verdict | null> {
+  const resolved: string[] = []
+  for (const p of paths) resolved.push(await resolve(p))
+  const v = check(op, resolved, mode, roots)
   if (v.kind === 'allow') return null
   if (v.kind === 'deny') return v
   // Every confirm verdict check() produces is `typed`, so there is one rule:
