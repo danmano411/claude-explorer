@@ -155,6 +155,10 @@ const asText = (value: unknown) => ({
 })
 
 export function startMcpServer(): Promise<{ port: number; token: string }> {
+  // KAN-42: idempotent, because the kill switch can call this again at any
+  // moment — settings:set runs it on every save, and a second listen() would
+  // leave the first listener bound with nothing holding its handle.
+  if (http) return Promise.resolve({ port, token })
   const srv = createServer((req, res) => {
     // Outside the transport, before any SDK code: everything below this line is
     // tool surface. See mcpauth.ts for why a request that merely arrived proves

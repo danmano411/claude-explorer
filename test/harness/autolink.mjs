@@ -234,7 +234,9 @@ fs.rmSync(PROFILE, { recursive: true, force: true });
     BrowserWindow.getAllWindows()[0].webContents.send('menu:command', 'open-settings');
   });
   await win.waitForSelector('.modal');
-  const checkbox = win.locator('.settings-checkbox input[type="checkbox"]');
+  // KAN-42 put a second checkbox in this modal, so name the setting: the old
+  // `.settings-checkbox input[type=checkbox]` now matches two and throws.
+  const checkbox = win.locator('input[data-setting="groupWithSource"]');
   check('the checkbox is present and starts checked (default true)',
     await checkbox.isChecked());
 
@@ -250,7 +252,7 @@ fs.rmSync(PROFILE, { recursive: true, force: true });
   });
   await win.waitForSelector('.modal');
   check('reopening the modal shows the persisted (unchecked) state',
-    !(await win.locator('.settings-checkbox input[type="checkbox"]').isChecked()));
+    !(await win.locator('input[data-setting="groupWithSource"]').isChecked()));
 
   await close();
 }
