@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 
-type Handle = { proc: pty.IPty }
+type Handle = { proc: pty.IPty; agentSpawned?: boolean }
 
 // node-pty on Windows does NOT PATH-resolve a bare command name (unlike a shell),
 // so `pty.spawn('claude', …)` throws "File not found". Resolve to an absolute path.
@@ -165,7 +165,14 @@ export class PtyManager {
   private handles = new Map<string, Handle>()
 
   spawn(
-    opts: { path: string; resumeId?: string; shell?: boolean; sessionId?: string },
+    opts: {
+      path: string; resumeId?: string; shell?: boolean; sessionId?: string
+      /** KAN-41. This session was asked for by the MCP tool, not by the user.
+       *  See the recursion guard below. Provenance, not preference — the
+       *  renderer carries it across a restart so restoring a tab cannot launder
+       *  a worker back into a parent. */
+      agentSpawned?: boolean
+    },
     onData: (id: string, d: string) => void,
     onExit: (id: string, code: number) => void,
   ): string {
@@ -208,10 +215,23 @@ export class PtyManager {
       : opts.sessionId
         ? ['--session-id', opts.sessionId]
         : []
-    // Deliberately one condition: KAN-41's recursion guard switches agent
-    // control off for an agent-spawned tab by adding a term to this `if`, not by
-    // rearranging anything around it.
-    if (mcp) claudeArgs.push('--mcp-config', mcp.configPath)
+    // KAN-41's recursion guard, the term the comment here predicted. A session
+    // the agent asked for is a WORKER: no config file and no token, so it never
+    // receives the tool that created it and fan-out cannot compound. spawn() is
+    // the only Claude path in the tree, so this one term covers every route.
+    //
+    // --strict-mcp-config with no --mcp-config is ZERO servers, which also takes
+    // away whatever .mcp.json the TARGET folder ships (an agent names that
+    // folder, so its config is as untrusted as the request). Not added to a
+    // user-launched session — that would silently delete the user's own servers.
+    // It is a literal constant matching CMD_SAFE_BARE, so it needs no
+    // SESSION_ID-style validation and goes out bare through batchCommandLine.
+    //
+    // ONE local feeds BOTH injection sites: dropping the flag while leaving the
+    // bearer token in the child's environment is a half-fix, not a guard.
+    const agentControl = opts.agentSpawned ? null : mcp
+    if (agentControl) claudeArgs.push('--mcp-config', agentControl.configPath)
+    else if (opts.agentSpawned) claudeArgs.push('--strict-mcp-config')
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)
     const file = isBatch ? process.env.COMSPEC || 'cmd.exe' : CLAUDE
@@ -228,7 +248,9 @@ export class PtyManager {
         // in the pane can name the tab it is running in.
         env: {
           ...launchEnv(),
-          ...(mcp ? { CLAUDE_EXPLORER_MCP_TOKEN: mcp.token, CLAUDE_EXPLORER_PTY_ID: id } : {}),
+          ...(agentControl
+            ? { CLAUDE_EXPLORER_MCP_TOKEN: agentControl.token, CLAUDE_EXPLORER_PTY_ID: id }
+            : {}),
         },
       })
     } catch (err) {
@@ -247,8 +269,18 @@ export class PtyManager {
       onExit(id, exitCode)
       this.handles.delete(id)
     })
-    this.handles.set(id, { proc })
+    this.handles.set(id, { proc, agentSpawned: opts.agentSpawned })
     return id
+  }
+
+  /** KAN-41's cap: how many app-spawned Claude sessions are alive right now.
+   *  DERIVED from the handle map, never a counter — the map already loses its
+   *  entry in onExit above and in kill() below, and closing a tab IS kill(), so
+   *  there is no decrement site to forget and the cap cannot creep up until it
+   *  bricks the tool. The shell branch returns before any of this, so a shell
+   *  tab is never counted. */
+  agentSessions(): number {
+    return [...this.handles.values()].filter((h) => h.agentSpawned).length
   }
 
   write(id: string, data: string) {

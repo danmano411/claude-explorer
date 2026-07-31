@@ -5,12 +5,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 // on the .exe branch and a single cmd.exe command-line STRING on the .cmd
 // branch — claudeArgv() below normalises the two.
 const spawned: { file: string; args: string[] | string; opts: any }[] = []
+// The exit listener spawn() registers, kept rather than dropped: a process
+// ending on its own is the OTHER site that has to forget a session (kill() is
+// the tab-closing one), and a test cannot fire an exit it was never handed.
+const exitCbs: ((e: { exitCode: number }) => void)[] = []
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[] | string, opts: any) => {
     spawned.push({ file, args, opts })
     return {
       onData: () => {},
-      onExit: () => {},
+      onExit: (cb: (e: { exitCode: number }) => void) => { exitCbs.push(cb) },
       write: () => {},
       resize: () => {},
       kill: () => {},
@@ -69,7 +73,7 @@ const BRANCHES = [
 const noop = () => {}
 // A real Claude session id — the shape of a `<uuid>.jsonl` transcript name.
 const UUID = '11111111-2222-4333-8444-555555555555'
-beforeEach(() => { spawned.length = 0 })
+beforeEach(() => { spawned.length = 0; exitCbs.length = 0 })
 
 /**
  * The claude argv spawn() asked for, whichever branch built it: the array as
@@ -256,6 +260,72 @@ describe('the claude.cmd command line', () => {
     new CMD.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
     expect(spawned[0].file).toBe(process.env.COMSPEC || 'cmd.exe')
     expect(line()).toMatch(/^\/c ""[^"]+claude\.cmd""$/) // no args, still wrapped
+  })
+})
+
+/**
+ * KAN-41's recursion guard: a session the MCP tool asked for gets NO
+ * --mcp-config and NO bearer token — otherwise the child inherits the same
+ * tool and the same credential, and fan-out is unbounded. ONE local
+ * (`agentControl`) feeds both the argv site and the env site in pty.ts, so the
+ * risk this covers is gating one and leaving the other — the token surviving
+ * in `opts.env` while the flag is merely missing from argv.
+ */
+describe.each(BRANCHES)('KAN-41 recursion guard ($kind)', ({ mod }) => {
+  const CONFIG = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  const TOKEN = 'SECRET-BEARER-TOKEN-abc123'
+  afterEach(() => mod.setMcpInjection(null))
+
+  it('gives an agentSpawned session --strict-mcp-config and neither --mcp-config nor the token', () => {
+    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN })
+    new mod.PtyManager().spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
+    const argv = claudeArgv()
+    expect(argv).toContain('--strict-mcp-config')
+    expect(argv).not.toContain('--mcp-config')
+    expect(argv).not.toContain(CONFIG)
+    // Scan the WHOLE env object, not just the two known keys — a leak under a
+    // different name would otherwise pass silently.
+    expect(JSON.stringify(spawned[0].opts.env)).not.toContain(TOKEN)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBeUndefined()
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBeUndefined()
+  })
+
+  it('still gives a normal (non-agent) spawn --mcp-config and the token, and no --strict-mcp-config', () => {
+    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN })
+    new mod.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    const argv = claudeArgv()
+    expect(argv).toContain('--mcp-config')
+    expect(argv).toContain(CONFIG)
+    expect(argv).not.toContain('--strict-mcp-config')
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBe(TOKEN)
+  })
+
+  it('counts an agentSpawned session in agentSessions(), and drops it on kill()', () => {
+    const mgr = new mod.PtyManager()
+    const agentId = mgr.spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
+    mgr.spawn({ path: 'C:\\repo' }, noop, noop) // a normal session must not count
+    expect(mgr.agentSessions()).toBe(1)
+    mgr.kill(agentId)
+    expect(mgr.agentSessions()).toBe(0)
+  })
+
+  // The cap's other decrement site. kill() is what closing a tab does and is
+  // covered above; this is Claude ending BY ITSELF — /exit, a crash, the model
+  // finishing — with no kill() anywhere. Nothing else in the tree decrements,
+  // so if the handle survives its own process the cap creeps up until the tool
+  // is permanently refusing, and the user's only cure is restarting the app.
+  it('drops an agentSpawned session from the cap when its PROCESS exits, with no kill()', () => {
+    const mgr = new mod.PtyManager()
+    mgr.spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
+    expect(mgr.agentSessions()).toBe(1)
+    exitCbs.at(-1)!({ exitCode: 0 })
+    expect(mgr.agentSessions()).toBe(0)
+  })
+
+  it('never counts a shell tab toward the cap, even when asked for agentSpawned', () => {
+    const mgr = new mod.PtyManager()
+    mgr.spawn({ path: 'C:\\repo', shell: true, agentSpawned: true }, noop, noop)
+    expect(mgr.agentSessions()).toBe(0)
   })
 })
 

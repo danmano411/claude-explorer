@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import type { FileMode } from '../shared/types'
 
 export type Op = 'delete' | 'permanentDelete' | 'move' | 'copy' | 'rename' | 'mkdir' | 'newFile'
@@ -49,33 +50,99 @@ export function classify(p: string, roots: string[] = DEFAULT_SYSTEM_ROOTS): Pat
   return 'normal'
 }
 
+/** `p` itself, then each ancestor, paired with the segments to re-append. The
+ *  first one that really exists on disk is the answer; if none does, the caller
+ *  falls back to the lexical path. Shared so the sync and async resolvers below
+ *  cannot drift apart — the only difference between them is which realpath they
+ *  await. */
+function* ancestors(p: string): Generator<[string, string[]]> {
+  const rest: string[] = []
+  let cur = path.resolve(p)
+  for (;;) {
+    yield [cur, rest.slice()]
+    const parent = path.dirname(cur)
+    if (parent === cur) return
+    rest.unshift(path.basename(cur))
+    cur = parent
+  }
+}
+
 /** Resolve to the real on-disk path: expands 8.3 short names, `..`, symlinks
  *  and junctions, and strips the `\\?\` prefix. For a target that does not
  *  exist yet (mkdir/newFile) the nearest existing ancestor is resolved and the
- *  remaining segments re-appended. Never throws. */
+ *  remaining segments re-appended. Never throws.
+ *
+ *  BLOCKS THE PROCESS. `realpathSync.native` on a path whose host is
+ *  unreachable (`\\10.255.255.1\share\x`) takes ~21 SECONDS, and every one of
+ *  them is spent on the calling thread. In main that is the whole app: no IPC,
+ *  no pty:data, no paint. Only use this for a path the USER chose in the window
+ *  that would be frozen; anything a caller outside the app named goes through
+ *  canonicalizeAsync. */
 export function canonicalize(p: string): string {
-  try {
-    return fs.realpathSync.native(p)
-  } catch {
-    /* falls through to the ancestor walk */
+  for (const [cur, rest] of ancestors(p)) {
+    try {
+      return path.join(fs.realpathSync.native(cur), ...rest)
+    } catch {
+      /* keep walking up */
+    }
   }
-  try {
-    const rest: string[] = []
-    let cur = path.resolve(p)
-    for (;;) {
-      const parent = path.dirname(cur)
-      if (parent === cur) return path.resolve(p)
-      rest.unshift(path.basename(cur))
-      cur = parent
+  return path.resolve(p)
+}
+
+const realpathNative = promisify(fs.realpath.native)
+
+/**
+ * A gate that runs what it is handed one at a time, in call order. A rejection
+ * settles the queue exactly like a return, so a thrower cannot wedge it.
+ *
+ * ponytail: a queue of ONE, not a pool with a size. What is being bounded is how
+ * many libuv worker threads an untrusted caller may hold at once, and libuv has
+ * four — one is the only number that still leaves the app a majority however the
+ * pool is sized.
+ *
+ * Ceiling: lookups now queue behind each other, which is microseconds on a local
+ * path but the full 21s behind an unreachable one — so a looping agent can still
+ * starve the two MCP tools that resolve a path (its OWN tools; the window's file
+ * operations do not go through here, and that is the point). Give it a real
+ * worker pool with per-client fairness the day that is worth caring about.
+ */
+export function oneAtATime(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let queue: Promise<unknown> = Promise.resolve()
+  return (fn) => {
+    const run = queue.then(fn)
+    queue = run.then(
+      () => {},
+      () => {},
+    )
+    return run
+  }
+}
+const resolveOne = oneAtATime()
+
+/** canonicalize() without pinning the main thread — same answers, one awaited
+ *  syscall at a time. This is the spelling every caller-supplied path must use
+ *  (see mcp.ts): the 21-second stall above then costs one request instead of
+ *  the whole process.
+ *
+ *  SERIALISED, and that is half the fix, not tidiness. `await` moves the stall
+ *  off the event loop but not off libuv's threadpool, which is FOUR threads —
+ *  so four concurrent `\\10.255.255.n\s\x` resolutions (one agent can emit
+ *  parallel tool calls) park every other async fs operation in main behind
+ *  them: measured, a `readdir("C:\Windows\System32")` issued during four of
+ *  them took 20,636 ms, versus 4 ms during one. The file browser, the viewer,
+ *  session parsing and every trash op are all `node:fs/promises`. One at a time
+ *  caps an outside caller at a single worker. */
+export async function canonicalizeAsync(p: string): Promise<string> {
+  return resolveOne(async () => {
+    for (const [cur, rest] of ancestors(p)) {
       try {
-        return path.join(fs.realpathSync.native(cur), ...rest)
+        return path.join(await realpathNative(cur), ...rest)
       } catch {
         /* keep walking up */
       }
     }
-  } catch {
-    return p
-  }
+    return path.resolve(p)
+  })
 }
 
 export function check(
