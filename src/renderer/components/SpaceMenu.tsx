@@ -3,6 +3,7 @@ import type { Space } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
 import { deleteSpaceReason, type CloseRisk } from '../closeguard'
 import { ConfirmDialog } from './ConfirmDialog'
+import { GROUP_MIME, TAB_MIME } from '../TabBar'
 // Styles live in index.css (the .spacemenu block, next to .recentmenu), matching
 // every other component here — the separate stylesheet only existed because
 // index.css was owned by a parallel M5 ticket during the fan-out.
@@ -58,10 +59,21 @@ export interface SpaceMenuProps {
    *  `status` is keyed by ptyId, not by tab id; this component only renders the
    *  answer. */
   tabsOf: (spaceId: string) => { risks: CloseRisk[]; pinnedCount: number }
+  /** Drop a dragged tab / group onto a space row (KAN-66) — the gesture people
+   *  reach for before they find the context menu. The SAME App handlers the
+   *  strip's "Move Tab to ▸" calls, so the confirm rule, the source-pane
+   *  cleanup and the focus re-pick cannot drift between the two routes. */
+  onMoveTab: (tabId: string, spaceId: string) => void
+  onMoveGroup: (groupId: string, spaceId: string) => void
 }
+
+/** Is this drag something a space row can accept? `getData` is blocked during
+ *  `dragover`, but `types` is readable — which is all the decision needs. */
+const movable = (t: DataTransfer) => t.types.includes(TAB_MIME) || t.types.includes(GROUP_MIME)
 
 export function SpaceMenu({
   spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, tabsOf,
+  onMoveTab, onMoveGroup,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -84,6 +96,43 @@ export function SpaceMenu({
     setRenaming(false)
     setAdding(false)
   }
+
+  /**
+   * SPRING-LOAD (KAN-66): hovering the switcher with a tab in hand opens it.
+   *
+   * Without this the drag gesture is unreachable, not merely awkward — the
+   * dropdown closes on any outside `mousedown`, and the mousedown that starts a
+   * tab drag is one, so a menu opened first is already shut before the drag
+   * begins.
+   *
+   * A WINDOW listener testing GEOMETRY, not a React `onDragOver` on this
+   * element, and that is the whole subtlety: TabBar TRANSLATES the dragged tab
+   * to follow the pointer, so the thing under the cursor for the entire drag is
+   * the tab itself. Every `dragover` therefore targets that tab and never
+   * enters this subtree at all — measured, not assumed: `elementFromPoint` over
+   * the trigger mid-drag returns `.tab-icon`. Events still BUBBLE to the
+   * window, so a rect compare here sees what hit-testing cannot.
+   *
+   * (`pointer-events: none` on the dragged tab was the obvious alternative and
+   * is a trap: it hangs Chromium's drag loop on Windows outright — the first
+   * `mouse.move` after `mousedown` never returns.)
+   *
+   * The rect is the TRIGGER only: the open dropdown is absolutely positioned,
+   * so it contributes nothing to this element's border box — and it hangs below
+   * the strip, where the dragged tab (which is only ever translated on X) can
+   * never cover a row. So the rows keep working by ordinary hit-testing.
+   */
+  useEffect(() => {
+    const over = (e: DragEvent) => {
+      const el = ref.current
+      if (!el || open || !e.dataTransfer || !movable(e.dataTransfer)) return
+      const r = el.getBoundingClientRect()
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom)
+        setOpen(true)
+    }
+    window.addEventListener('dragover', over)
+    return () => window.removeEventListener('dragover', over)
+  }, [open])
 
   // Close on outside click — same approach as RecentMenu.
   useEffect(() => {
@@ -143,7 +192,34 @@ export function SpaceMenu({
   }
 
   return (
-    <div className="spacemenu" ref={ref} onKeyDown={onMenuKeyDown}>
+    <div
+      className="spacemenu"
+      ref={ref}
+      onKeyDown={onMenuKeyDown}
+      // What actually LICENSES a drop: a drop only fires where the preceding
+      // dragover was defaultPrevented. This is the bubbling path from an open
+      // dropdown's rows, which nothing covers (see the spring-load effect above
+      // for why the TRIGGER needs a window listener instead).
+      //
+      // stopPropagation as well: this element is INSIDE `.tabbar`, whose own
+      // dragover would otherwise read the pointer as a reorder and slide the
+      // strip around under a menu the user is aiming at.
+      onDragOver={(e) => {
+        if (!movable(e.dataTransfer)) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = 'move'
+      }}
+      // A drop that MISSES a row (the trigger button, the separator, the
+      // New/Rename/Delete rows) is swallowed here rather than left to bubble:
+      // `.tabbar`'s drop handler would otherwise commit a reorder using the
+      // last insert index it computed before the pointer arrived over this menu.
+      onDrop={(e) => {
+        if (!movable(e.dataTransfer)) return
+        e.preventDefault()
+        e.stopPropagation()
+      }}
+    >
       <button
         className="spacemenu-btn"
         onClick={() => setOpen((o) => !o)}
@@ -175,6 +251,23 @@ export function SpaceMenu({
                     ref={(el) => registerItem(el)}
                     className={s.id === activeSpaceId ? 'spacemenu-item active' : 'spacemenu-item'}
                     onClick={() => { onSwitch(s.id); close() }}
+                    // KAN-66: the row is the drop target. Only the drop is
+                    // handled here — the container above already accepts the
+                    // dragover for the whole menu, so a row inherits it and the
+                    // highlight it gives is the button's own `:hover`.
+                    //
+                    // Note what does NOT happen: `onSwitch`. Dropping a tab into
+                    // another space is not a request to go and look at it.
+                    onDrop={(e) => {
+                      const tabId = e.dataTransfer.getData(TAB_MIME)
+                      const groupId = e.dataTransfer.getData(GROUP_MIME)
+                      if (!tabId && !groupId) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      if (tabId) onMoveTab(tabId, s.id)
+                      else onMoveGroup(groupId, s.id)
+                      close()
+                    }}
                   >
                     <span className="spacemenu-check">{s.id === activeSpaceId ? '✓' : ''}</span>
                     <span className="spacemenu-item-name" title={s.name}>{s.name}</span>
