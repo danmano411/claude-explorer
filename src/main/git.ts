@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import type { GitFileStatus, GitStatusResult, ReadResult } from '../shared/types'
@@ -9,6 +9,22 @@ import { humanizeFsError } from './fs'
 import { MAX_BYTES, MAX_CHARS, MAX_LINES } from './fileread'
 
 const exec = promisify(execFile)
+
+/**
+ * KAN-68: this was `existsSync`, reached with a renderer-supplied directory on
+ * EVERY navigation — FileBrowser fires gitStatus from a `[dir]` effect. On an
+ * unreachable UNC path that pinned the whole main process for ~21 seconds (no
+ * IPC, no pty:data, no paint): the same freeze KAN-41/65/68 took out of the
+ * three path resolvers, arriving through a different door. Async parks one of
+ * libuv's four workers instead of the process. Measured in test/harness/gate.mjs
+ * — a folder listing issued during this call took 21,048 ms before, 54 ms after.
+ *
+ * Ungated on purpose. This is the user's own navigation over authenticated
+ * renderer IPC, one call per navigation, and the argument written down at
+ * policy.ts's `gateOne` applies unchanged: a queue here would bound nothing a
+ * caller outside the app can reach, and would put the user behind themselves.
+ */
+const exists = (dir: string) => access(dir).then(() => true, () => false)
 
 /**
  * execFile with an argv array — NEVER exec/shell:true. Every path below is
@@ -66,7 +82,7 @@ export function parseStatusZ(out: string, root: string): GitFileStatus[] {
 export async function gitStatus(dir: string): Promise<GitStatusResult> {
   // A missing cwd also makes spawn fail with ENOENT, which would cry "git is not
   // installed" at a folder that was merely deleted.
-  if (!existsSync(dir))
+  if (!(await exists(dir)))
     return { ok: false, kind: 'error', reason: humanizeFsError({ code: 'ENOENT' }) }
   try {
     const top = await git(dir, ['rev-parse', '--show-toplevel'])
@@ -92,7 +108,7 @@ export async function gitStatus(dir: string): Promise<GitStatusResult> {
 export async function gitDiff(path: string): Promise<ReadResult> {
   try {
     const dir = dirname(path)
-    if (!existsSync(dir))
+    if (!(await exists(dir)))
       return { ok: false, kind: 'error', reason: humanizeFsError({ code: 'ENOENT' }) }
     // --literal-pathspecs because `--` stops option parsing but NOT pathspec
     // wildmatch: `[` and `]` are legal Windows filename characters, so a file

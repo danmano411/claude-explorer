@@ -72,10 +72,18 @@ const realpathNative = promisify(fs.realpath.native)
  *  exist yet (mkdir/newFile) the nearest existing ancestor is resolved and the
  *  remaining segments re-appended. Never throws.
  *
- *  KAN-68 deleted the `realpathSync.native` spelling of this, so there is no
- *  longer any way to resolve a path in main that pins the whole process. This
- *  one is UNGATED and therefore not exported: a single call still parks a libuv
- *  worker for ~21 seconds on an unreachable host, and libuv has four. Both
+ *  KAN-68 deleted the `realpathSync.native` spelling of this, so no path
+ *  RESOLUTION in main pins the whole process any more. That is a claim about
+ *  realpath and nothing else: main still calls sync `fs` elsewhere, and the line
+ *  that matters is whose path it is. settings/workspace/recents read their own
+ *  files under userData; ide/pty/search probe their own install locations. None
+ *  of those is renderer- or caller-supplied. git.ts's `existsSync` WAS — it ran
+ *  on the directory FileBrowser navigates to, on every navigation — so KAN-68
+ *  moved it too. Add a sync `fs` call on a path that came from outside main and
+ *  this sentence stops being true.
+ *
+ *  This one is UNGATED and therefore not exported: a single call still parks a
+ *  libuv worker for ~21 seconds on an unreachable host, and libuv has four. Both
  *  exported spellings below put it behind a queue — which queue is the trust
  *  boundary, see gateOne. */
 async function resolveReal(p: string): Promise<string> {

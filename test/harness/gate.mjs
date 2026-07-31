@@ -46,6 +46,10 @@ const check = (name, pass, detail = '') => {
 // host so resolving it here cannot warm the one the app is handed.
 const octet = 30 + Math.floor(Math.random() * 100);
 const dead = (n) => `\\\\10.255.255.${n}\\s`;
+// git.ts gets its own /24 as well as its own octet: gate() resolves 10.255.255.x
+// with realpath, and Windows negative-caches per HOST, so a host this file has
+// already made the app resolve would answer from cache and prove nothing.
+const deadGit = `\\\\10.255.254.${30 + Math.floor(Math.random() * 100)}\\s`;
 
 console.log(`\ngate() on ${dead(octet)} — a drive root the SMB stack never answers`);
 
@@ -67,6 +71,23 @@ const probe = async () => {
 const [idleMs, idleOk] = await probe();
 check('baseline: the window serves a folder listing while idle', idleOk && idleMs < 3_000,
   `${idleMs}ms`);
+
+// A gated file operation whose path resolves instantly — `C:\` is a drive root,
+// so gate() DENIES it after one local realpath and the handler never touches
+// disk. This is the BEFORE number for the queue check at the bottom: the same
+// call, issued while nothing else holds gateOne.
+const gatedIdle = async (tag) => {
+  const t = Date.now();
+  const p = win.evaluate((d) => window.api.fsDelete([d]).then((r) => r, (e) => ({ err: String(e) })),
+    'C:\\');
+  p.catch(() => {});
+  const r = await Promise.race([p, new Promise((res) => setTimeout(() => res(null), 40_000))]);
+  return [Date.now() - t, r, tag];
+};
+const [gatedIdleMs, gatedIdleR] = await gatedIdle();
+check('baseline: a gated operation on a local drive root is denied immediately',
+  gatedIdleR?.code === 'DENIED' && gatedIdleMs < 3_000,
+  `fs:delete C:\\ answered in ${gatedIdleMs}ms with ${gatedIdleR?.code ?? gatedIdleR?.err}`);
 
 // Independent of the app entirely, in this process, started before the app is
 // asked to do anything: if an unreachable UNC host stops costing ~21 s on this
@@ -102,6 +123,34 @@ const kicked = win.evaluate((p) => {
 }, dead(octet));
 kicked.catch(() => {});
 
+// The SECOND gated operation, and the only thing in this file that can see
+// gateOne. Everything above passes just as well with no queue at all — one
+// in-flight resolution cannot tell a queue of one from no queue — so deleting
+// gateOne and letting gate() call resolveReal directly left the whole suite
+// green, which made "the window's file operations ride their own queue" a
+// convention again rather than a property. This is the assertion that hurts.
+//
+// `C:\` resolves in ~1 ms (measured above, gatedIdleMs) and is denied for the
+// same reason the dead host is, so the ONLY thing that can make it slow is
+// waiting its turn behind a resolution that is still in flight. Serialised, it
+// answers when the dead host finally does; unserialised, it answers instantly
+// while holding a second libuv worker — which is the state this queue exists to
+// prevent, and the state the window would be in on a `Promise.all` over a
+// multi-select drop.
+//
+// 300 ms so the ordering is not a race: main takes the two invokes in the order
+// the renderer sent them, and this only has to be inside the ~21 s stall.
+await win.waitForTimeout(300);
+const second = win.evaluate(() => {
+  window.__gate2 = { done: false };
+  const t0 = performance.now();
+  window.api.fsDelete(['C:\\']).then(
+    (r) => { window.__gate2 = { done: true, ms: performance.now() - t0, r }; },
+    (e) => { window.__gate2 = { done: true, ms: performance.now() - t0, err: String(e) }; },
+  );
+});
+second.catch(() => {});
+
 // Sampled across the whole resolution window rather than once: the worst sample
 // is the one that counts. A single probe would race the invoke — CDP delivers
 // the kick-off first, but main may still answer a readdir before it picks the
@@ -118,6 +167,7 @@ while (Date.now() - startedAt < 30_000) {
   await win.waitForTimeout(200);
 }
 const gate = await win.evaluate(() => window.__gate ?? { done: false });
+const gate2 = await win.evaluate(() => window.__gate2 ?? { done: false });
 const witnessMs = await witness;
 
 // The witness that the app really did the slow work, rather than the check above
@@ -140,6 +190,56 @@ check('the window still serves a real filesystem request while a gated file oper
   served && worstMs < 3_000,
   `folder listing: ${idleMs}ms idle -> worst ${worstMs}ms during the gate`
     + (served ? '' : ' (never completed)'));
+
+// gateOne. Only meaningful because the two facts above hold — the first
+// operation really did stall, and `C:\` really is instant when the queue is
+// free — so this cannot pass by nothing having happened.
+check('a second gated file operation waits its turn rather than taking a second libuv worker',
+  gate2.done && gate2.r?.code === 'DENIED' && gate2.ms > 5_000,
+  gate2.done
+    ? `fs:delete C:\\ answered in ${Math.round(gate2.ms)}ms with ${gate2.r?.code ?? gate2.err}`
+      + ` (${gatedIdleMs}ms when the queue was free)`
+    : 'fs:delete C:\\ never answered');
+
+// ---------------------------------------------------------------------------
+// git.ts, the same freeze through a different door. gitStatus() opened with a
+// SYNCHRONOUS existsSync on a renderer-supplied directory, and FileBrowser fires
+// it from a `[dir]` effect — so merely NAVIGATING to an unreachable UNC path
+// pinned main for ~21 s, with no file operation involved at all. Its own cold
+// host, on a subnet nothing above has touched.
+console.log(`\ngitStatus(${deadGit}) — the call FileBrowser makes on every navigation`);
+
+const gitAt = Date.now();
+const gitKicked = win.evaluate((d) => {
+  window.__git = { done: false };
+  const t0 = performance.now();
+  window.api.gitStatus(d).then(
+    (r) => { window.__git = { done: true, ms: performance.now() - t0, ok: r?.ok }; },
+    (e) => { window.__git = { done: true, ms: performance.now() - t0, err: String(e) }; },
+  );
+}, deadGit);
+gitKicked.catch(() => {});
+
+let gitWorstMs = 0;
+let gitServed = true;
+while (Date.now() - gitAt < 30_000) {
+  const [ms, ok] = await probe();
+  gitWorstMs = Math.max(gitWorstMs, ms);
+  if (!ok) { gitServed = false; break; }
+  await win.waitForTimeout(200);
+}
+const git = await win.evaluate(() => window.__git ?? { done: false });
+
+// Same shape as the delete's: the app really did the slow work, so the check
+// below is not passing because this host happened to answer.
+check('gitStatus really resolved the dead host',
+  git.done && git.ms > 5_000,
+  git.done ? `gitStatus answered in ${Math.round(git.ms)}ms` : 'gitStatus never answered');
+
+check('the window still serves a real filesystem request while gitStatus resolves a dead host',
+  gitServed && gitWorstMs < 3_000,
+  `folder listing: ${idleMs}ms idle -> worst ${gitWorstMs}ms during gitStatus`
+    + (gitServed ? '' : ' (never completed)'));
 
 await close();
 
