@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto'
+import { DEFAULT_AGENT_FREE_SESSIONS } from '../shared/types'
 
 /**
- * KAN-41. The human gate in front of `open_claude_session`, and the cap on how
- * many sessions an agent may have running.
+ * KAN-41. The human gate in front of `open_claude_session`, and (KAN-64) the
+ * free allowance that decides when that gate is shown.
  *
  * Pure, in the same sense control.ts is: no electron, no fs, no HTTP. The clock,
  * the timer, the token source, the prompt and the live-session count are all
@@ -22,10 +23,21 @@ export const CONFIRM_TTL_MS = 120_000
  *  transport abort; correctness does not depend on it (the claim below is what
  *  makes a repeat wait safe). */
 export const CONFIRM_WAIT_MS = 55_000
-/** Concurrent app-spawned Claude sessions. The worst case this bounds is not
- *  data loss, it is unbounded process creation and API spend from one
- *  prompt-injected agent. */
-export const MAX_AGENT_SESSIONS = 8
+/**
+ * KAN-64. How many app-spawned Claude sessions may be open before the tool
+ * starts asking, when the caller supplies no `allowance`. The real app always
+ * supplies one (the user's setting); this is the fallback for a guard built
+ * without it.
+ *
+ * A THROTTLE, NOT A CAP. It used to be `MAX_AGENT_SESSIONS`, a hard refusal at
+ * 8 — which made the user hand-close a tab whose Claude had already exited just
+ * to reclaim a slot the app knew was free. Now crossing it costs one human
+ * click, every time, for as long as the user keeps clicking. What bounds
+ * unbounded process creation from a prompt-injected agent is therefore the
+ * human on the other side of `prompt` (plus DENY_COOLDOWN_MS below), not a
+ * number; the number only decides how soon that human is involved.
+ */
+export const DEFAULT_FREE_AGENT_SESSIONS = DEFAULT_AGENT_FREE_SESSIONS
 /**
  * How long a Deny silences the next ask.
  *
@@ -60,23 +72,39 @@ export type SpawnDecision =
 export type Cancel = () => void
 
 export interface SpawnGuardOpts {
-  /** How many app-spawned Claude sessions currently count against the cap.
-   *  DERIVED, never a counter — no site anywhere decrements this, because
-   *  nothing ever needs to remember to. As of KAN-64 this is not only "live":
-   *  a session still counts while its tab is open even with no process behind
-   *  it yet (a tab restored from before a restart) or no process behind it any
-   *  more (its Claude exited but the tab was not closed) — see
+  /** How many app-spawned Claude sessions currently count against the
+   *  allowance. DERIVED, never a counter — no site anywhere decrements this,
+   *  because nothing ever needs to remember to. As of KAN-64 this is not only
+   *  "live": a session still counts while its tab is open even with no process
+   *  behind it yet (a tab restored from before a restart) or no process behind
+   *  it any more (its Claude exited but the tab was not closed) — see
    *  pty.handlers.ts's agentSessionCount, the sole caller in the real app. */
   liveCount: () => number
   /** Show the prompt. `false` = no window to show it in, so no token is minted —
    *  a token nobody can ever answer is a permission that only expires. */
   prompt: (p: { token: string; path: string; expiresAt: number }) => boolean
+  /** KAN-64. How many sessions may open WITHOUT asking. Read fresh on every
+   *  request, not captured: it is a user setting and can change mid-run. `0`
+   *  means ask every time, which is exactly the behaviour KAN-41 shipped. */
+  allowance?: () => number
+  /**
+   * KAN-64. The last thing tried before a human is asked: close the tabs this
+   * tool opened whose Claude process has ALREADY EXITED, and report how many
+   * agent sessions the snapshot it worked from has left — or `null` if it could
+   * not tell (no window, a timeout), which is treated as "no room freed".
+   *
+   * Called ONLY when a spawn would otherwise cross the allowance, which is the
+   * whole design: nothing disappears while the user is merely using the app, so
+   * a dead agent tab stays on screen as the record of what happened until its
+   * slot is genuinely wanted. Deciding WHICH tabs are dead is the caller's job
+   * and is the risky half — see mcp.ts.
+   */
+  reap?: () => Promise<number | null>
   now?: () => number
   newToken?: () => string
   schedule?: (fn: () => void, ms: number) => Cancel
   ttlMs?: number
   waitMs?: number
-  max?: number
   cooldownMs?: number
 }
 
@@ -84,7 +112,9 @@ export interface SpawnGuard {
   /**
    * ONE MCP tool invocation.
    *
-   * `token` undefined -> cap pre-check, mint, prompt, resolve `needsConfirm`
+   * `token` undefined -> under the allowance, SPAWN with no prompt and no token
+   *                      (KAN-64). Otherwise reap, and if that did not make
+   *                      room, mint + prompt and resolve `needsConfirm`
    *                      WITHOUT calling `spawn`.
    * `token` given     -> match token AND path against the single outstanding
    *                      confirmation, wait for the answer, and on allow CONSUME
@@ -137,7 +167,7 @@ const defaultSchedule = (fn: () => void, ms: number): Cancel => {
 export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
   const ttlMs = opts.ttlMs ?? CONFIRM_TTL_MS
   const waitMs = opts.waitMs ?? CONFIRM_WAIT_MS
-  const max = opts.max ?? MAX_AGENT_SESSIONS
+  const allowance = opts.allowance ?? (() => DEFAULT_FREE_AGENT_SESSIONS)
   const cooldownMs = opts.cooldownMs ?? DENY_COOLDOWN_MS
   const now = opts.now ?? Date.now
   const newToken = opts.newToken ?? (() => randomBytes(32).toString('hex'))
@@ -150,18 +180,27 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
    *  no way for one refusal to disable the tool for the rest of the run. */
   let deniedUntil = 0
 
-  /** In-flight spawns count. Without that, N concurrent redemptions all read the
-   *  same pre-spawn total. During the overlap a session is briefly counted twice
-   *  (the pty exists AND control() has not returned); a safety valve should err
-   *  that way. */
-  const atCap = (): boolean => opts.liveCount() + inFlight >= max
+  /**
+   * How many sessions may still open silently. The in-flight term is why
+   * `inFlight` exists: without it, N concurrent requests all read the same
+   * pre-spawn total and all decide they are under the allowance. During the
+   * overlap a session is briefly counted twice (the pty exists AND control()
+   * has not returned); a throttle should err that way.
+   *
+   * `Math.trunc`/`Math.max` on the allowance because it comes from a
+   * user-editable file through settings.ts — normalized there, defended here,
+   * since a NaN would make every comparison false and silently turn the
+   * allowance into "ask every time"... which is the safe direction, but only by
+   * luck, and `-1` is not.
+   */
+  const room = (count: number): boolean =>
+    count + inFlight < Math.max(0, Math.trunc(allowance()) || 0)
 
-  // "open at once", not "run at once" — KAN-64: a tab this tool started still
-  // counts while it is open even if its Claude process is not (or is not yet)
-  // running. See `liveCount`'s doc and pty.handlers.ts's agentSessionCount.
-  const capReason = `at most ${max} Claude sessions started by this tool may be open at once; close one first`
-
-  const mint = (path: string): SpawnDecision => {
+  /** The two refusals that outrank everything, including a FREE spawn: a fresh
+   *  Deny must not be walked around by a slot opening up, and one outstanding
+   *  confirmation app-wide is what bounds this file's state at one record.
+   *  Re-checked after the reap's await, because both can arm during it. */
+  const blocked = (): SpawnDecision | null => {
     // Before the pending check, because a Deny clears `pending` — this is the
     // only thing standing between a refusal and the next modal. A typed reason
     // carrying the wait, so a model that is not attacking knows to pause rather
@@ -181,7 +220,49 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
         reason: `Claude Explorer is already asking the user about ${pending.path}; wait for that to be answered`,
       }
     }
-    if (atCap()) return { kind: 'refused', reason: capReason }
+    return null
+  }
+
+  /** A spawn nobody was asked about (KAN-64), counted while it is in flight for
+   *  the same reason a redeemed one is. */
+  const freeSpawn = async (
+    path: string,
+    spawn: (path: string) => Promise<void>,
+  ): Promise<SpawnDecision> => {
+    inFlight++
+    try {
+      await spawn(path)
+    } finally {
+      inFlight--
+    }
+    return { kind: 'spawned' }
+  }
+
+  const mint = async (
+    path: string,
+    spawn: (path: string) => Promise<void>,
+  ): Promise<SpawnDecision> => {
+    const stop = blocked()
+    if (stop) return stop
+    // KAN-64: under the allowance, no human is involved at all.
+    if (room(opts.liveCount())) return freeSpawn(path, spawn)
+    // At it — so before spending a human's attention, take back the slots held
+    // by tabs this tool opened whose Claude has already exited. Skipped
+    // entirely at an allowance of 0, where no count can ever produce room and
+    // reaping could only close tabs for nothing.
+    if (allowance() > 0) {
+      const left = await opts.reap?.()
+      // Re-checked, not assumed: `await` means a Deny or another ask can have
+      // landed while the reap was closing tabs, and minting past either would
+      // clobber an outstanding confirmation.
+      const stopAgain = blocked()
+      if (stopAgain) return stopAgain
+      // From the reap's OWN snapshot, never a re-poll of liveCount(): that is
+      // Math.max(live, persisted) and the persisted half reads stale-high until
+      // the renderer's immediate-persist lands, so a re-poll would prompt for a
+      // slot the reap had just freed.
+      if (left !== null && left !== undefined && room(left)) return freeSpawn(path, spawn)
+    }
     const token = newToken()
     const expiresAt = now() + ttlMs
     // Prompt BEFORE recording anything: a mint whose prompt never reached a
@@ -258,22 +339,16 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
     pending = null
     p.cancel()
 
-    // The world moves while a human thinks, so the cap is checked again here and
-    // not only at mint.
-    if (atCap()) return { kind: 'refused', reason: capReason }
-
-    inFlight++
-    try {
-      await spawn(path)
-    } finally {
-      inFlight--
-    }
-    return { kind: 'spawned' }
+    // KAN-64: NO count re-check here any more. The allowance is a throttle, and
+    // this is the user having answered the throttle's question with "yes" —
+    // refusing them their own approval because the number moved while they read
+    // the dialog is the hard refusal this ticket removed.
+    return freeSpawn(path, spawn)
   }
 
   return {
     request: (path, token, spawn) =>
-      token === undefined ? Promise.resolve(mint(path)) : redeem(path, token, spawn),
+      token === undefined ? mint(path, spawn) : redeem(path, token, spawn),
 
     answer: (token, allow) => {
       const p = pending

@@ -10,9 +10,10 @@ import { ControlError } from './control'
 import { isAuthorized } from './mcpauth'
 import { canonicalizeAsync } from './policy'
 import { agentSessionCount } from './pty.handlers'
+import { getSettings } from './settings'
 import { promptSpawnConfirm } from './spawnconfirm.handlers'
 import { createSpawnGuard } from './spawnguard'
-import type { ControlOp, ControlResult } from '../shared/types'
+import type { ControlOp, ControlResult, ControlTab } from '../shared/types'
 
 /**
  * KAN-40: the in-process MCP server, and the first caller of control().
@@ -33,9 +34,12 @@ const LIST_TABS_DESCRIPTION =
   'List the tabs currently open in Claude Explorer, the file manager hosting this ' +
   'session. Returns a JSON array of tab objects: id, view ("files" | "terminal" | ' +
   '"viewer"), cwd (absolute Windows path), title, and — for a terminal tab — ptyId, ' +
-  'terminalKind ("claude" | "shell") and status ("running" | "waiting" | "stopped"). ' +
-  'Tab ids exist nowhere else, so call this to obtain one. Safe to call again at any ' +
-  'time: it only reads, and the list changes as the user opens and closes tabs.'
+  'terminalKind ("claude" | "shell"), status ("running" | "waiting" | "stopped") and ' +
+  'agentSpawned (true only for a tab open_claude_session opened). A terminal tab has ' +
+  'no status until its process emits something, so a missing status does NOT mean it ' +
+  'has stopped. Tab ids exist nowhere else, so call this to obtain one. Safe to call ' +
+  'again at any time: it only reads, and the list changes as the user opens and ' +
+  'closes tabs.'
 
 const CLOSE_TAB_DESCRIPTION =
   'Close one tab in Claude Explorer, the file manager hosting this session. `tabId` ' +
@@ -55,27 +59,53 @@ const OPEN_VIEWER_TAB_DESCRIPTION =
   'This only shows the USER something: it returns no file contents to you and changes ' +
   'nothing on disk. The new tab appears in list_tabs.'
 
-const OPEN_CLAUDE_SESSION_DESCRIPTION =
+/**
+ * KAN-64. Built per request from the LIVE setting, because "the description and
+ * the enforced behaviour must say the same thing in both directions" is the
+ * acceptance bar and a hardcoded 8 stops being true the moment the user picks 4.
+ * serve() already builds a fresh McpServer per HTTP request, so this costs one
+ * settings read.
+ *
+ * ponytail: a client that fetched tools/list before the user changed the number
+ * keeps the old text until it reconnects. Push tools/list_changed if that ever
+ * matters — it needs the stateful transport serve() deliberately does not have.
+ */
+const openClaudeSessionDescription = (free: number): string =>
   'Start a NEW Claude Code session in a new terminal tab of Claude Explorer, in the ' +
   'folder `path` (an ABSOLUTE Windows path, e.g. C:\\Users\\me\\repo). It runs with ' +
   "the user's own permissions and that folder's CLAUDE.md, hooks and settings — " +
-  'treat it as the user launching Claude Code there themselves. REQUIRES THE ' +
-  "USER'S PERMISSION EVERY TIME: call it first with `path` alone; it returns " +
-  '{"needsConfirm":true,"token":…,"path":…,"expiresAt":…} and Claude Explorer asks ' +
-  'the user to Allow or Deny. Then call it AGAIN with the same `path` and that ' +
-  '`token`. If that call returns needsConfirm again, the user has not answered yet — ' +
-  'call again with the same token. On success it returns {"started":true}. A token ' +
-  'works once, only for the path it was issued for, and expires after two minutes. ' +
+  'treat it as the user launching Claude Code there themselves. ' +
+  'WHETHER IT ASKS THE USER FIRST DEPENDS ON HOW MANY SESSIONS THIS TOOL ALREADY HAS ' +
+  'OPEN, against a number the user sets in Claude Explorer under Settings > ' +
+  `Preferences…, currently ${free}. ` +
+  (free === 0
+    ? 'It is 0, so this tool asks EVERY TIME. '
+    : `While fewer than ${free} are open, this call starts the session immediately and ` +
+      'returns {"started":true} — no token, no prompt, nothing for the user to answer. ' +
+      `Once ${free} are open, it asks: `) +
+  'call it with `path` alone and it returns ' +
+  '{"needsConfirm":true,"token":…,"path":…,"expiresAt":…} while Claude Explorer asks ' +
+  'the user to Allow or Deny that exact folder. Then call it AGAIN with the same ' +
+  '`path` and that `token`. If that call returns needsConfirm again, the user has not ' +
+  'answered yet — call again with the same token. On success it returns ' +
+  '{"started":true}. A token works once, only for the path it was issued for, and ' +
+  'expires after two minutes. THE NUMBER IS A THROTTLE, NOT A LIMIT: there is no ' +
+  'count at which this tool stops working, and an approval always starts the session, ' +
+  'however many are already open. ' +
   'IF THE USER DENIES, STOP: this tool then refuses for a short cooldown and the ' +
   'refusal tells you how many seconds. Do not retry to wait it out — only ask again ' +
   'if the user themselves asks you to. ' +
   'The new session has NO Claude Explorer tools: it cannot open tabs or start ' +
-  'further sessions. At most 8 Claude sessions started by this tool may be open at ' +
-  'once. A session counts for as long as its tab stays open in Claude Explorer — ' +
-  'including one restored from before Claude Explorer last restarted that has not ' +
-  'been reactivated yet, and one whose Claude process already exited but whose tab ' +
-  'is still open. Closing the tab is what frees the slot; the process ending on its ' +
-  'own does not. If Claude Code has never run in that folder, the new tab will show ' +
+  'further sessions. A session counts for as long as its TAB stays open in Claude ' +
+  'Explorer — including one restored from before Claude Explorer last restarted that ' +
+  'has not been reactivated yet. The process ending does not free the slot by itself, ' +
+  'but you do not have to close those tabs: when a new session would otherwise need ' +
+  'the user to be asked, Claude Explorer first closes the tabs THIS TOOL opened whose ' +
+  'Claude process has already exited, and if that brings the count back under the ' +
+  'number your session starts with no prompt after all. Tabs whose session is still ' +
+  'running, and every tab the user opened themselves, are never closed for you — ' +
+  'close_tab is the only way those go. ' +
+  'If Claude Code has never run in that folder, the new tab will show ' +
   'Claude\'s "do you trust this folder" prompt until the user answers it. Call ' +
   'list_tabs to find the tab that was created.'
 
@@ -85,11 +115,64 @@ let http: Server | null = null
 let port = 0
 
 /**
+ * KAN-64. Close the tabs THIS TOOL opened whose Claude has already exited, and
+ * report how many agent sessions the snapshot it worked from has left. Called
+ * only when a spawn is about to cross the allowance — never on a timer, never
+ * at boot.
+ *
+ * DEAD vs DORMANT IS THE WHOLE RISK, and both have no live process:
+ *  - DEAD, reapable: `agentSpawned` AND `status === 'stopped'`. That status
+ *    comes from a pty:exit the renderer actually saw (ptystatus.ts, where
+ *    'stopped' is terminal and never evicted), so it is positive evidence that
+ *    a process ran here and ended.
+ *  - DORMANT, NEVER reapable: `agentSpawned` with no ptyId — a tab restored
+ *    from before a restart that the user has not activated. It is the only
+ *    surviving trace of what the agent was doing, and closing it destroys that
+ *    silently. It reports NO status, which is exactly why the test is
+ *    `=== 'stopped'` and not `!== 'running'`: "no status entry" is also what a
+ *    freshly spawned session looks like before its first byte, so the loose
+ *    test would reap live spawns and dormant tabs alike.
+ * A tab the USER opened is not `agentSpawned` and so is never a candidate,
+ * however dead it is.
+ *
+ * Closed through the ordinary control op, so trash/undo/persist behave exactly
+ * as they do for any other close and the renderer's pinned refusal still
+ * stands. A close that refuses is simply not counted as room freed.
+ */
+async function reapDeadAgentTabs(): Promise<number | null> {
+  const rows = await control({ op: 'listTabs' }).catch(() => null)
+  if (!Array.isArray(rows)) return null // no window, or the renderer never answered
+  const mine = (rows as ControlTab[]).filter((t) => t.agentSpawned)
+  let closed = 0
+  for (const t of mine) {
+    if (t.status !== 'stopped') continue
+    // Per tab, because one refusal (a pinned tab, an id that just went away)
+    // must not cost the others — and a failed close is not a freed slot.
+    const ok = await control({ op: 'closeTab', args: { tabId: t.id } }).then(
+      () => true,
+      () => false,
+    )
+    if (ok) closed++
+  }
+  // From THIS snapshot, not a re-poll: agentSessionCount() is
+  // Math.max(live, persisted) and the persisted half stays stale-high until the
+  // renderer's immediate-persist lands, which would undo the room just freed.
+  return mine.length - closed
+}
+
+/**
  * KAN-41. Module scope, not inside serve(): the transport is stateless and
  * builds a FRESH McpServer per HTTP request, so anything the guard remembers —
  * the outstanding confirmation, the in-flight count — has to outlive a request.
  */
-const guard = createSpawnGuard({ liveCount: agentSessionCount, prompt: promptSpawnConfirm })
+const guard = createSpawnGuard({
+  liveCount: agentSessionCount,
+  prompt: promptSpawnConfirm,
+  // Read per request, not captured: the user can change it while sessions are
+  // open, and the next call must honour the new number (KAN-64).
+  allowance: () => getSettings().agentFreeSessions,
+  reap: reapDeadAgentTabs,
+})
 
 /** The renderer's answer, wired in index.ts. Passed to the IPC glue rather than
  *  imported by it, so spawnconfirm.handlers stays a leaf. */
@@ -260,7 +343,7 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
   server.registerTool(
     'open_claude_session',
     {
-      description: OPEN_CLAUDE_SESSION_DESCRIPTION,
+      description: openClaudeSessionDescription(getSettings().agentFreeSessions),
       inputSchema: { path: z.string(), token: z.string().optional() },
     },
     async ({ path, token: confirmToken }) => {
