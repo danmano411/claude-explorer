@@ -1,14 +1,30 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import { CH } from '../shared/ipc';
 import { PtyManager } from './pty';
+import { agentSpawnedTabCount } from './workspace';
 
 // Module scope since KAN-41: the MCP layer needs the live agent-session count
 // for its cap, and a manager created inside register…() is unreachable from
 // there. One app, one window, one PtyManager — the local was never doing more.
 const mgr = new PtyManager();
 
-/** Live Claude sessions the MCP tool started. Read by mcp.ts's spawn guard. */
-export const agentSessionCount = (): number => mgr.agentSessions();
+/**
+ * Agent sessions the cap has to count. `mgr.agentSessions()` alone (KAN-41)
+ * only sees a LIVE pty, so right after a restart a restored agent tab — which
+ * spawns on first activation, not at launch — is invisible to it until the
+ * user clicks it (KAN-64). `agentSpawnedTabCount()` reads the persisted
+ * workspace instead, which counts a restored tab whether or not it has ever
+ * been given a process.
+ *
+ * `Math.max`, not a sum: once a restored tab IS activated it is BOTH a live
+ * handle in `mgr` AND (once the debounced persist catches up) still an
+ * agent-spawned tab on disk — the same session, not a second one — so adding
+ * the two would double-count it. Taking the max means the cap is never looser
+ * than `mgr.agentSessions()` alone used to be (closing the gap can only make
+ * it stricter), and it stays exact once every restored tab has settled either
+ * to "activated" (mgr counts it) or "closed" (neither does).
+ */
+export const agentSessionCount = (): number => Math.max(mgr.agentSessions(), agentSpawnedTabCount());
 
 export function registerPtyHandlers(getWindow: () => BrowserWindow | null) {
   const send = (ch: string, ...args: unknown[]) => getWindow()?.webContents.send(ch, ...args);

@@ -60,9 +60,13 @@ export type SpawnDecision =
 export type Cancel = () => void
 
 export interface SpawnGuardOpts {
-  /** Live app-spawned Claude sessions. DERIVED from the pty handle map, never a
-   *  counter: the map loses its entry on pty exit AND on kill(), which is what
-   *  closing a tab does, so there is no decrement site to forget. */
+  /** How many app-spawned Claude sessions currently count against the cap.
+   *  DERIVED, never a counter — no site anywhere decrements this, because
+   *  nothing ever needs to remember to. As of KAN-64 this is not only "live":
+   *  a session still counts while its tab is open even with no process behind
+   *  it yet (a tab restored from before a restart) or no process behind it any
+   *  more (its Claude exited but the tab was not closed) — see
+   *  pty.handlers.ts's agentSessionCount, the sole caller in the real app. */
   liveCount: () => number
   /** Show the prompt. `false` = no window to show it in, so no token is minted —
    *  a token nobody can ever answer is a permission that only expires. */
@@ -152,7 +156,10 @@ export function createSpawnGuard(opts: SpawnGuardOpts): SpawnGuard {
    *  that way. */
   const atCap = (): boolean => opts.liveCount() + inFlight >= max
 
-  const capReason = `at most ${max} Claude sessions started by this tool may run at once; close one first`
+  // "open at once", not "run at once" — KAN-64: a tab this tool started still
+  // counts while it is open even if its Claude process is not (or is not yet)
+  // running. See `liveCount`'s doc and pty.handlers.ts's agentSessionCount.
+  const capReason = `at most ${max} Claude sessions started by this tool may be open at once; close one first`
 
   const mint = (path: string): SpawnDecision => {
     // Before the pending check, because a Deny clears `pending` — this is the

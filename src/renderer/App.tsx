@@ -517,8 +517,23 @@ export function App() {
   // navigating a folder retitles its tab, and writing the whole document on
   // every keystroke-fast state change is pointless churn. `active` is NOT a
   // dependency here — it has its own immediate effect above.
+  //
+  // EXCEPT a tab count that DROPPED, persisted immediately like `active` is —
+  // KAN-64: main's agent-session cap counts an agent-spawned tab off THIS
+  // document (a restored tab has no live pty to count instead), so a close
+  // that only debounced left main reading a stale, too-high count for up to
+  // 400ms. Closing five tabs and immediately asking for a sixth (a real MCP
+  // sequence — its own close_tab tool is exactly this) measured the cap still
+  // refusing on tabs that had already been closed. A tab being ADDED does not
+  // get the same treatment: every path that adds one (`openClaudeNewTab`,
+  // `openShellTab`, restore) already calls `selectTab`, which the immediate
+  // effect above covers.
+  const prevTabCount = useRef(tabs.length);
   useEffect(() => {
     if (!restoreDone.current) return;
+    const droppedBelow = tabs.length < prevTabCount.current;
+    prevTabCount.current = tabs.length;
+    if (droppedBelow) { persist(); return; }
     const timer = setTimeout(persist, 400);
     return () => clearTimeout(timer);
   }, [tabs, groups, spaces, activeSpaceId]);

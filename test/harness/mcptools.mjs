@@ -894,6 +894,146 @@ if (!FAST) {
   await close2();
 }
 
+// === 11. KAN-64 — restored agent tabs count toward the cap ==================
+//
+// Its OWN app run and its own throwaway profile, still under TMP (so the pid
+// suffix that guards the single-instance lock covers it too) rather than
+// reusing PROFILE — §9/§10's profile already carries three real Claude
+// sessions and this section's claim is sharper with a workspace containing
+// exactly eight agent-spawned tabs and nothing else. Every session below is a
+// stand-in (no `.ce-real` anywhere under WORK/k64-*), so this needs no real
+// Claude Code and costs seconds, not minutes — it runs whether or not --fast
+// was passed.
+//
+// THE GAP THIS PROVES CLOSED: `PtyManager.agentSessions()` (KAN-41) is DERIVED
+// from the live pty handle map, and a brand-new process starts that map empty
+// — a restored terminal tab spawns on first activation, not at launch (App.tsx,
+// `needsSpawn`). So a fresh process that has never had any of its restored
+// agent tabs clicked reports zero live agent sessions no matter how many the
+// last run left open, and (pre-KAN-64) the ninth `open_claude_session` below
+// would have been allowed to ask.
+//
+// RED-FIRST: reverting pty.handlers.ts's `agentSessionCount` to
+// `mgr.agentSessions()` alone (workspace.ts's `agentSpawnedTabCount` un-called)
+// turns the first two checks in this section red — the ninth is answered
+// needsConfirm instead of refused, and the app never prompts the cap error at
+// all. Captured verbatim in the report.
+console.log('\n11 — restored agent tabs count toward the cap');
+{
+  const PROFILE2 = mkdir(path.join(TMP, 'profile-kan64'));
+  // [0] is the user-launched harvest folder (does not count against the cap,
+  // exactly like HARVEST in §0/§7); [1..8] are the eight app-spawned ones.
+  const K64 = Array.from({ length: 9 }, (_, i) => mkdir(path.join(WORK, `k64-${i}`)));
+
+  const harvestToken = async (win, dir, name) => {
+    await win.locator('.tab.add').click();
+    await win.waitForTimeout(600);
+    await win.locator('.address').click();
+    await win.waitForTimeout(200);
+    await win.locator('.address-input').fill(WORK);
+    await win.keyboard.press('Enter');
+    await win.waitForTimeout(1_200);
+    await win.locator('.entry', { hasText: name }).first().locator('.entry-open').click();
+    const f = await waitFor(() => dumpsFor(dir)[0] ?? null, 20_000);
+    return f ? (/^CLAUDE_EXPLORER_MCP_TOKEN=(.*)$/m.exec(dumpBody(f))?.[1] ?? '') : '';
+  };
+
+  // --- run 1: fill the cap, then quit with all eight tabs still open --------
+  const run1 = await launchApp({ userDataDir: PROFILE2 });
+  const cfg1 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'mcp-agent-control.json'), 'utf8'));
+  PORT = Number(/:(\d+)\//.exec(cfg1.mcpServers.explorer.url)[1]);
+  TOKEN = await harvestToken(run1.win, K64[0], 'k64-0');
+  check('run 1: a user-launched session yields this run\'s own token',
+    /^[0-9a-f]{64}$/.test(TOKEN), TOKEN ? 'ok' : 'no dump');
+
+  const answer1 = async (allow) => {
+    await run1.win.waitForSelector('.spawn-modal', { timeout: 15_000 });
+    await run1.win.locator(`.spawn-modal .modal-actions button${allow ? '.primary' : ':not(.primary)'}`).click();
+    await run1.win.waitForSelector('.spawn-modal', { state: 'detached', timeout: 5_000 });
+  };
+  const confirm1 = async (dir) => {
+    const ask = await tool('open_claude_session', { path: dir });
+    const token = json(ask)?.token;
+    if (!token) return { isError: true, text: 'no token minted' };
+    await answer1(true);
+    return tool('open_claude_session', { path: dir, token });
+  };
+
+  let started1 = 0;
+  for (let i = 1; i <= 8; i++) {
+    const r = await confirm1(K64[i]);
+    if (!r.isError && json(r)?.started === true) started1++;
+  }
+  check('run 1: eight app-spawned sessions started', started1 === 8, `${started1} started`);
+
+  await run1.win.waitForTimeout(1_500); // debounced persist, same margin §9 gives it
+  const ws1 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'workspace.json'), 'utf8'));
+  const onDisk1 = ws1.tabs.filter((t) => t.agentSpawned === true).length;
+  check('run 1: workspace.json remembers all eight as agent-spawned tabs before any restart',
+    onDisk1 === 8, `${onDisk1} persisted`);
+
+  await run1.close(); // all eight left open on purpose — nothing closed them
+
+  // --- run 2: a fresh process, nothing live, nothing activated ---------------
+  const run2 = await launchApp({ userDataDir: PROFILE2 });
+  await run2.win.waitForSelector('.tab:not(.add)');
+  await run2.win.waitForTimeout(1_500);
+
+  // The tab active when run 1 quit is restored active too, and KAN-46 spawns
+  // a restored tab that is ON SCREEN immediately — not "clicked", but not the
+  // KAN-64 gap either: that is one process for the one tab the window shows
+  // by default (K64[8], the last one confirm1 selected), not all eight. So
+  // the live/dormant SPLIT is the real assertion, and it doubles as proof
+  // that the cap below is reading a genuine mix, not eight identical dormant
+  // rows — Math.max(mgr, disk) has to combine one live session with seven
+  // that are not for the ninth-ask refusal after this to mean anything.
+  const before64 = K64.slice(1, 9).map((d) => dumpsFor(d).length);
+  const respawnedOnOpen = before64.filter((n) => n > 1).length;
+  check('run 2: opening the window respawns at most the one on-screen tab — the other seven stay dormant',
+    respawnedOnOpen <= 1 && before64.every((n) => n === 1 || n === 2), before64.join(','));
+
+  const cfg2 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'mcp-agent-control.json'), 'utf8'));
+  PORT = Number(/:(\d+)\//.exec(cfg2.mcpServers.explorer.url)[1]);
+  const HARVEST2 = mkdir(path.join(WORK, 'k64-harvest2'));
+  TOKEN = await harvestToken(run2.win, HARVEST2, 'k64-harvest2');
+  check('run 2: a fresh token was harvested after the restart',
+    /^[0-9a-f]{64}$/.test(TOKEN), TOKEN ? 'ok' : 'no dump');
+
+  const rows2 = await tabs();
+  const restored = rows2.filter((t) => K64.slice(1, 9).some((d) => d.toLowerCase() === t.cwd.toLowerCase()));
+  check('run 2: list_tabs sees all eight restored agent tabs',
+    restored.length === 8, restored.map((t) => t.title).join(', '));
+
+  // THE HEADLINE: no live pty anywhere for any of them (mgr.agentSessions()
+  // reads 0 on this brand-new process) and the cap still refuses.
+  const NINTH = mkdir(path.join(WORK, 'k64-ninth'));
+  const ninthAsk = await tool('open_claude_session', { path: NINTH });
+  check('run 2: a NINTH ask is refused by the cap although nothing has ever been live in this run',
+    ninthAsk.isError && /at most 8 Claude sessions started by this tool/i.test(ninthAsk.text),
+    ninthAsk.text);
+  const promptAfterNinth = await run2.win.evaluate(() => {
+    const el = document.querySelector('.spawn-modal .spawn-path');
+    return el ? el.textContent : null;
+  });
+  check('run 2: and the user was never prompted for it — refused at mint, not after asking',
+    promptAfterNinth === null, String(promptAfterNinth));
+
+  // NOT a monotonic restart-lockout: close one restored-but-still-dormant tab
+  // (no ptyId anywhere — it was never activated) and a fresh ask succeeds.
+  // agentSpawnedTabCount() reads workspace.json, not renderer state directly,
+  // and the persist that removal triggers is debounced 400ms UNLESS closing
+  // also moves focus — so give it a beat before asking again, same margin §9
+  // gives its own debounced persist.
+  await tool('close_tab', { tabId: restored[0].id });
+  await run2.win.waitForTimeout(700);
+  const TENTH = mkdir(path.join(WORK, 'k64-tenth'));
+  const afterClose = await tool('open_claude_session', { path: TENTH });
+  check('run 2: closing one restored-but-dormant tab frees a slot for a new ask',
+    !afterClose.isError && json(afterClose)?.needsConfirm === true, afterClose.text.slice(0, 160));
+
+  await run2.close();
+}
+
 // The stand-in sessions block on stdin; killing their tabs above took the ones
 // this file created, and the app's exit takes the rest with the console. Sweep
 // anyway — a harness that leaks eight cmd.exe per run is one nobody runs twice.

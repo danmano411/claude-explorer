@@ -70,10 +70,14 @@ const OPEN_CLAUDE_SESSION_DESCRIPTION =
   'refusal tells you how many seconds. Do not retry to wait it out — only ask again ' +
   'if the user themselves asks you to. ' +
   'The new session has NO Claude Explorer tools: it cannot open tabs or start ' +
-  'further sessions. At most 8 app-started sessions may run at once. If Claude Code ' +
-  'has never run in that folder, the new tab will show Claude\'s "do you trust this ' +
-  'folder" prompt until the user answers it. Call list_tabs to find the tab that was ' +
-  'created.'
+  'further sessions. At most 8 Claude sessions started by this tool may be open at ' +
+  'once. A session counts for as long as its tab stays open in Claude Explorer — ' +
+  'including one restored from before Claude Explorer last restarted that has not ' +
+  'been reactivated yet, and one whose Claude process already exited but whose tab ' +
+  'is still open. Closing the tab is what frees the slot; the process ending on its ' +
+  'own does not. If Claude Code has never run in that folder, the new tab will show ' +
+  'Claude\'s "do you trust this folder" prompt until the user answers it. Call ' +
+  'list_tabs to find the tab that was created.'
 
 const token = randomBytes(32).toString('hex')
 
