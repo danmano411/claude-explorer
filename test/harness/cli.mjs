@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { launchApp } from './app.mjs';
 
 const require = createRequire(import.meta.url);
@@ -76,12 +77,20 @@ const activeTitle = (win) =>
   win.locator('.tab.active').first().textContent().then(clean);
 
 let beforeRestart; // instance 1's tab titles, for the restore-race check
+let baselineMs;    // instance 1's launch→tab-strip time, the BEFORE number for check 7
 
 // --- instance 1: cold start straight onto a path ---------------------------
 console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
 {
+  const launchedAt = Date.now();
   const { win, close } = await launchApp({ userDataDir: PROFILE, extraArgs: ['--open', ROOT] });
   await win.waitForSelector('.tab:not(.add)');
+  // The same measurement check 7 makes, on the same code path, with a --open
+  // the OS can answer instantly — i.e. what a launch costs on this machine
+  // right now. Taken here rather than hardcoded because these harnesses run
+  // alongside builds in other worktrees and a fixed millisecond budget would
+  // either flake under load or be too loose to catch anything.
+  baselineMs = Date.now() - launchedAt;
   await win.waitForTimeout(2_000); // restore + the gated argv tab behind it
 
   // 1. cold start lands on the path. Fresh profile, so: the home tab plus ours.
@@ -273,6 +282,69 @@ console.log('\ninstance 2 — relaunch with --open, expect restore + one appende
     `last "${ts[ts.length - 1]}", active index ${activeIndex} of ${ts.length}`);
 
   await close();
+}
+
+// --- instance 3: the COLD-START half of the DoS ----------------------------
+// KAN-65 has two halves and check 6 only covers one of them: it fires --opens
+// at an app that is already up. This is the launch itself, which is where the
+// old code did its damage first — whenReady resolved argv BEFORE createWindow(),
+// so `"Claude Explorer.exe" --open \\10.255.255.n\s` bought ~21 s of no window
+// at all, from an unauthenticated caller. Putting one `await` back in front of
+// createWindow() restores exactly that (measured: 23.3 s to first window) and
+// leaves every other check in this file green, which is why this one exists.
+console.log('\ninstance 3 — cold start with --open on an unreachable UNC host');
+{
+  const dead = (n) => `\\\\10.255.255.${n}\\s`;
+  // Random octets, and two DIFFERENT ones. Windows negative-caches an SMB host
+  // that never answers, so a hardcoded number would be answered from cache on a
+  // re-run minutes later: the launch would be fast for the wrong reason and this
+  // check would pass against a frozen build without anything ever stalling —
+  // vacuous, which is worse than absent. The witness gets its own host for the
+  // same reason: resolving one here must not warm the one the app is given.
+  const host = 30 + Math.floor(Math.random() * 100);
+  const witnessHost = host + 100;
+  // Started BEFORE the launch, in THIS process: an independent measurement of
+  // what the app is being asked to do. If an unreachable UNC host stops costing
+  // ~21 s on this machine (different network, a DNS/SMB stack that fails fast),
+  // the number below proves nothing — so say so and fail, rather than pass for
+  // free. It runs concurrently, so it costs no wall clock the app was not going
+  // to spend anyway; it is a separate process from the app, so it competes for
+  // none of main's four libuv workers.
+  const witnessAt = Date.now();
+  const witness = promisify(fs.realpath.native)(dead(witnessHost))
+    .then(() => Date.now() - witnessAt, () => Date.now() - witnessAt);
+
+  // Its own throwaway profile: a genuine cold start with nothing to restore, so
+  // this is comparable with the baseline, and not the primary for PROFILE.
+  const coldProfile = `${PROFILE}-cold`;
+  fs.rmSync(coldProfile, { recursive: true, force: true });
+  const at = Date.now();
+  let coldMs;
+  let tabs = 0;
+  try {
+    // 60 s, well past the ~30 s two of these syscalls cost back to back: a
+    // launch that never produces a window must be reported as a FAILURE with a
+    // number, not as an exception that takes the whole harness down.
+    const { win, close } = await launchApp({
+      userDataDir: coldProfile, extraArgs: ['--open', dead(host)], timeout: 60_000,
+    });
+    await win.waitForSelector('.tab:not(.add)', { timeout: 60_000 });
+    coldMs = Date.now() - at;
+    tabs = (await titles(win)).length;
+    await close();
+  } catch (e) {
+    coldMs = Date.now() - at;
+    console.log(`  (launch never gave a usable window: ${e.message.split('\n')[0]})`);
+  }
+  const witnessMs = await witness;
+  // Only the home tab: the dead path is unreachable, so it opens nothing (check
+  // 5's rule) — and a painted tab strip is the proof the window is really up and
+  // running its renderer, not merely a handle Playwright got hold of.
+  check('a cold start whose argv names an unreachable UNC host still paints its window immediately',
+    witnessMs > 5_000 && coldMs < baselineMs + 8_000 && tabs === 1,
+    `window + tab strip in ${coldMs}ms (baseline ${baselineMs}ms for a local --open), ${tabs} tab; `
+      + `${dead(witnessHost)} took ${witnessMs}ms to resolve here`
+      + (witnessMs > 5_000 ? '' : ' — NOT SLOW, so this check proved nothing'));
 }
 
 const failed = results.filter((r) => !r.pass);
