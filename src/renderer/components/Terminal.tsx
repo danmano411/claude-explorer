@@ -67,11 +67,22 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
         // Falling through to the text path instead makes a shell's Ctrl+V with
         // an image on the clipboard do nothing at all, which is the honest
         // answer — nothing in a shell can consume a bitmap.
-        if (kind !== 'shell' && window.api.clipboardHasImage()) {
+        //
+        // AND GATED ON THERE BEING NO TEXT, which bites more often than the tab
+        // kind does. "There is an image on the clipboard" is not "the user
+        // wanted to paste an image": Excel, Word and PowerPoint all put a bitmap
+        // of the selection there ALONGSIDE its text, so asking `hasImage` first
+        // turns an ordinary text paste into an image paste and drops the text
+        // with nothing on screen to say so. Text first means this branch fires
+        // only where the image is the ONLY thing on offer — a screenshot, a
+        // "Copy image" — so KAN-60 adds a path and regresses none. The mixed
+        // case is not lost either: Alt+V already reaches Claude Code as ESC v
+        // through xterm's own alt handling, with no code of ours involved.
+        const text = window.api.clipboardReadText();
+        if (!text && kind !== 'shell' && window.api.clipboardHasImage()) {
           window.api.ptyWrite(ptyId, '\u001bv');
           return false;
         }
-        const text = window.api.clipboardReadText();
         if (text) term.paste(text);
         return false;
       }
@@ -96,12 +107,19 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
       // separators are effectively never typed, and DEL has both Delete and
       // Backspace. Uniform beats a shortcut that works on six digits out of nine.
       //
-      // This arm ONLY suppresses the byte. The switch itself is App.tsx's window
-      // listener, and has to be — this handler has no idea how many spaces exist.
-      // Both halves are load-bearing: xterm's keydown listener is on the helper
-      // textarea, so it runs at the TARGET phase, before App's bubble-phase
-      // window listener. Without this arm the pty gets its ESC and *then* the
-      // space switches.
+      // The switch itself is App.tsx's window listener, and has to be — this
+      // handler has no idea how many spaces exist. Both halves are load-bearing,
+      // and this one does MORE than suppress a byte, which is the part that is
+      // easy to get wrong: xterm's `_keyDown` ends the six digits that produce a
+      // key in `this.cancel(event, true)`, and `cancel` is preventDefault AND
+      // stopPropagation. Its listener is on the helper textarea, i.e. the TARGET
+      // phase, strictly before App's bubble-phase window listener — so without
+      // this arm Ctrl+3..8 never REACH App at all: the pty gets its ESC and the
+      // space does not switch. Measured, by deleting this line and re-running
+      // test/harness/paste.mjs §11: "Ctrl+3 ... switches to the third space"
+      // goes red along with the byte checks. (Ctrl+1/2/9 produce no key, so
+      // xterm does not cancel them and they would still switch — which is what
+      // makes a half-fix here look like it works.)
       //
       // `spaceIndex` is the SAME predicate App.tsx switches on, not a second
       // hand-written copy, so the two cannot drift apart. It reads e.key while
@@ -112,10 +130,12 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
       // there is no browser default to cancel. A ctrl-modified digit produces no
       // character, and xterm's own _keyPress bails on ctrlKey regardless — the
       // KAN-58 double-paste came from Chromium's Paste EDITING COMMAND on the
-      // focused textarea, which has no Ctrl+digit analogue. Cancelling would not
-      // break the window listener either (preventDefault does not stop
-      // propagation); the point is that the handler which DECIDES to act is the
-      // one that cancels, and with fewer than n spaces App deliberately declines.
+      // focused textarea, which has no Ctrl+digit analogue. Cancelling here
+      // would not break App's listener (preventDefault does not stop
+      // propagation — stopPropagation does, and this arm exists precisely so
+      // xterm's `cancel` never runs); the point is that the handler which
+      // DECIDES to act is the one that cancels, and with fewer than n spaces App
+      // deliberately declines. paste.mjs §11 asserts both sides of that.
       if (spaceIndex(e) !== null) return false;
       return true;
     });

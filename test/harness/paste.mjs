@@ -43,11 +43,20 @@
 // screen cannot tell them apart (ESC in PSReadLine reverts the line invisibly;
 // ESC+"v" in Claude Code produces "[Image #1]" only once Claude is far enough up
 // to have a prompt). Same red-first discipline: `git checkout <fix>~1 -- src/`,
-// rebuild, run — 14 of the 29 new assertions went red on the unfixed build
-// (41/55). The other 15 are labelled REGRESSION GUARD where they stand, and none
-// of them is the only thing holding a claim up: the shell/image no-op is paired
-// with §14's Claude/image, "text sends no ESC v" with "an image does", and
-// "Ctrl+1/2/9 send nothing" with the six digits that used to.
+// rebuild, run — 14 of the 29 assertions added with the fix went red on the
+// unfixed build (41/55). The other 15 are labelled REGRESSION GUARD where they
+// stand, and none of them is the only thing holding a claim up: the shell/image
+// no-op is paired with §14's Claude/image, "text sends no ESC v" with "an image
+// does", and "Ctrl+1/2/9 send nothing" with the six digits that used to.
+//
+// The 30th, "an image AND text pastes the TEXT", is red against the FIX's first
+// pass rather than against main: pre-KAN-60 there was no image branch, so it was
+// green there by construction. It is in §14 because that first pass asked
+// `hasImage` before reading the text, and every Excel/Word/PowerPoint copy puts
+// a bitmap on the clipboard next to the text — an ordinary text paste silently
+// became an image paste. Each of the five src edits this file covers has since
+// been broken on its own and the assertion that caught it recorded where it
+// stands.
 //
 // The KAN-59 sections also carry the one measurement the whole ticket rests on:
 // Ctrl+[ must STILL send ESC, because "Ctrl+3 no longer sends ESC" was only an
@@ -123,18 +132,30 @@ const setClipImage = () => app.evaluate(({ clipboard, nativeImage }, d) => {
   return !clipboard.readImage().isEmpty();
 }, PNG);
 const clipHasImage = () => app.evaluate(({ clipboard }) => !clipboard.readImage().isEmpty());
+/** An image AND text at once — what Excel/Word/PowerPoint actually put there. */
+const setClipBoth = (t) => app.evaluate(({ clipboard, nativeImage }, d) => {
+  clipboard.clear();
+  clipboard.write({ text: d.t, image: nativeImage.createFromDataURL(d.p) });
+  return clipboard.readText() === d.t && !clipboard.readImage().isEmpty();
+}, { t, p: PNG });
+const clipIsBoth = (t) => app.evaluate(({ clipboard }, t) =>
+  clipboard.readText() === t && !clipboard.readImage().isEmpty(), t);
 /**
  * Run `act` with an image on the clipboard, and prove the clipboard held that
  * image on BOTH sides of it. Other processes on this machine write the clipboard
  * whenever they feel like it — two runs of the original KAN-60 experiment were
  * invalidated exactly this way — and a measurement taken across a clipboard that
  * moved is not a measurement of anything. Retries, then gives up loudly.
+ *
+ * `set` / `still` are overridable for the image-AND-text case, which has to
+ * prove BOTH flavours were still there — a text paste that measures green
+ * because the bitmap fell off the clipboard proves nothing.
  */
-async function withImageClipboard(label, act, tries = 3) {
+async function withImageClipboard(label, act, tries = 3, set = setClipImage, still = clipHasImage) {
   for (let i = 0; i < tries; i++) {
-    if (!(await setClipImage())) { await win.waitForTimeout(500); continue; }
+    if (!(await set())) { await win.waitForTimeout(500); continue; }
     const out = await act();
-    if (await clipHasImage()) return { ok: true, out };
+    if (await still()) return { ok: true, out };
     console.log(`  (clipboard moved under "${label}" — another process won the race; retry ${i + 1}/${tries})`);
     await win.waitForTimeout(600);
   }
@@ -522,10 +543,16 @@ console.log('\n10. KAN-59: what a Ctrl+digit puts on the wire (still ONE space)'
 console.log('\n11. KAN-59: over a terminal, the space switches AND no byte escapes');
 // ===========================================================================
 {
-  // The half-right implementations this section exists to reject:
-  //   - App.tsx's guard relaxed, Terminal.tsx untouched: the space switches and
-  //     the shell ALSO gets Ctrl+3's ESC, because xterm's keydown listener is on
-  //     the helper textarea (target phase) and App's is on window (bubble).
+  // The half-right implementations this section exists to reject, each one
+  // MEASURED by making that edit alone and re-running:
+  //   - App.tsx's guard relaxed, Terminal.tsx untouched: the shell gets Ctrl+3's
+  //     ESC and the space does NOT switch. xterm's keydown listener is on the
+  //     helper textarea (target phase), App's is on window (bubble), and xterm
+  //     finishes the six digits that produce a control code in
+  //     `cancel(event, true)` — preventDefault AND stopPropagation — so the
+  //     press never reaches App. (Ctrl+1/2/9 produce no key, so xterm does not
+  //     cancel and they DO switch; that asymmetry is what makes a half-fix look
+  //     like it works if you only try one digit.)
   //   - Terminal.tsx's arm added, App.tsx untouched: nothing reaches the pty and
   //     nothing switches — the shortcut is still dead.
   // One press, both claims, so neither can be satisfied alone.
@@ -702,6 +729,34 @@ console.log('\n14. KAN-60: an image on the clipboard sends Claude Code its own p
     else check('KAN-60: with an image on the clipboard, Ctrl+V sends exactly ESC v and nothing else',
       r.out.length === 1 && r.out[0].data === `${ESC}v`,
       `${r.out.length} pty:write — ${r.out.map((m) => printable(m.data)).join(' + ')}`);
+
+    // ...and the other order, which is the common one on Windows. "There is an
+    // image on the clipboard" is NOT "the user wanted to paste an image": Excel,
+    // Word and PowerPoint all put a bitmap of the selection on the clipboard
+    // ALONGSIDE its text, so a bare `hasImage` branch turns an ordinary text
+    // paste into an image paste and drops the text on the floor with no way to
+    // tell. Text therefore wins when both are present — which is also exactly
+    // the pre-KAN-60 behaviour, so KAN-60 adds a path and regresses none.
+    // Nothing is lost for the mixed case either: Alt+V reaches Claude Code as
+    // ESC v through xterm's own alt handling, with no help from this file.
+    //
+    // Measured red on the build that shipped this ticket's first pass: it sent
+    // "ESCv" and the text never arrived.
+    const MIX = `CE-MIXED-${RUN}`;
+    const m = await withImageClipboard('Claude image+text Ctrl+V', async () => {
+      await focusTerm();
+      const from = await mark();
+      await win.keyboard.press('Control+v');
+      await win.waitForTimeout(1200);
+      return sentTo(claudePty, from);
+    }, 3, () => setClipBoth(MIX), () => clipIsBoth(MIX));
+    if (!m.ok) skip('KAN-60: an image AND text pastes the text', 'the clipboard was taken by another process on every attempt');
+    else {
+      const joined = m.out.map((x) => x.data).join('');
+      check('KAN-60: an image AND text on the clipboard pastes the TEXT — the image branch does not eat it',
+        joined.includes(MIX) && !joined.includes(`${ESC}v`),
+        `${m.out.length} pty:write — ${printable(joined)}`);
+    }
   }
 }
 

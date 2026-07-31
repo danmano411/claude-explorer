@@ -1035,8 +1035,7 @@ export function App() {
   //
   // KAN-59: this used to be gated by `isTypingTarget`, which made it dead
   // whenever a terminal had focus — xterm's focus sink is a hidden
-  // `.xterm-helper-textarea`, so the guard declined every press. Nothing was
-  // swallowing the event; we were.
+  // `.xterm-helper-textarea`, so the guard declined every press.
   //
   // The fix is `isTextBox` — the predicate that already means "one of the app's
   // OWN text boxes, and not a terminal" (see keys.ts; the grid picker below has
@@ -1048,12 +1047,16 @@ export function App() {
   // — while a terminal, which is a <textarea> and not one of ours, no longer
   // does.
   //
-  // The other half of the fix is in Terminal.tsx, and BOTH are needed. xterm
-  // registers its keydown listener on that textarea, i.e. at the TARGET phase,
-  // which is strictly before this bubble-phase window listener — so this handler
-  // alone would switch the space *after* xterm had already sent the shell
-  // Ctrl+3's ESC (or Ctrl+4..8's FS/GS/RS/US/DEL). Terminal.tsx's arm is what
-  // stops the byte; this is what performs the switch, because only App knows how
+  // The other half of the fix is in Terminal.tsx, and BOTH are needed — measured
+  // by breaking each one on its own (test/harness/paste.mjs §11 catches either).
+  // xterm registers its keydown listener on that textarea, i.e. at the TARGET
+  // phase, strictly before this bubble-phase window listener, and for the six
+  // digits that produce a control code it finishes in `cancel(event, true)` —
+  // preventDefault AND stopPropagation. So relaxing this guard alone does NOT
+  // give "the space switches and the pty also gets ESC": for Ctrl+3..8 the event
+  // never arrives here and nothing switches at all. Terminal.tsx's arm returns
+  // false before that cancel, which both withholds the byte and lets the press
+  // through to us; this half performs the switch, because only App knows how
   // many spaces there are.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
