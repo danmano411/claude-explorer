@@ -159,32 +159,73 @@ try {
       `value now ${JSON.stringify(sel?.value)}`);
 
     await cancelRename();
-    check('§1 filesTabId sanity: still the same tab as before this section', filesTabId === beforeActive);
+    // Referee KAN-69 finding: the original version of this check compared
+    // `filesTabId` (read once, before §1 even starts) against `beforeActive`
+    // (also read BEFORE the double-click) — both operands frozen pre-dblclick,
+    // so it was tab 0's id equalling tab 0's id and could never fail no matter
+    // what the double-click actually did. Re-read the active tab now, AFTER
+    // cancelRename(), so an unguarded dblclick (which switches the active tab
+    // to a new one and leaves this pane's tab hidden, so cancelRename() can't
+    // reach its rename box at all) shows up here too.
+    const afterSectionActive = await activeTabId();
+    check('§1 sanity: back on the original Files tab afterward',
+      afterSectionActive === filesTabId, `${filesTabId} vs ${afterSectionActive}`);
   }
 
   // ===========================================================================
-  console.log('\n2. right-click in the rename box opens no context menu');
+  console.log('\n2. right-click in the rename box opens no context menu (and cannot mutate selection)');
   // ===========================================================================
+  // Referee KAN-69 finding: F2 (the original version's entry point) always
+  // starts from a row that's already selected, so the ctx-menu handler's
+  // `if (!inSel) setSelection(...)` branch is unreachable there — inSel is
+  // always true, so "selection unchanged" passed even with the guard deleted
+  // outright. The ticket's own reachable repro is New Folder: createThenRename
+  // starts a rename on the freshly-created row WITHOUT ever touching
+  // `selection`, so that row is real and un-selected at the same time — the
+  // one shape where the vulnerable branch actually runs. Select an unrelated
+  // anchor file, Ctrl+Shift+N, then right-click the (unselected) new row.
   {
-    await startRename(NAMES.ctxmenu);
-    // NOT entryRow(name): Playwright's `hasText` filters on textContent, and
-    // while renaming the label span is swapped for the input — its VALUE
-    // carries the name, not its textContent, so entryRow() would just spin
-    // until its own 30s timeout. Reach the row through the input itself.
-    const rowClass = () => renameInput().evaluate((el) => el.closest('li').className);
-    const rowSelectedBefore = await rowClass();
+    await resetPane();
+    // NOT the alphabetically-first fixture: "New folder" sorts ahead of every
+    // file here (dirs-first), so selecting the file that WAS at index 0 would
+    // have its index land right back on the new dir after the shift, which is
+    // a different (and misleading) coincidence, not the gap this is proving.
+    // kan69-dragselect.txt sits at index 1 before creation, which the shift
+    // moves off onto a THIRD file — matching the referee's own repro shape.
+    await entryRow(NAMES.drag).click();
+    await win.waitForTimeout(150);
+
+    await win.keyboard.press('Control+Shift+N');
+    await win.waitForSelector(`${VIS}.rename-input`, { timeout: 5_000 });
+    const newFolderName = await renameInput().evaluate((el) => el.value);
+    const rowClassBefore = await renameInput().evaluate((el) => el.closest('li').className);
+    check('§2 setup: the new row being renamed is NOT selected (the reachable repro)',
+      !rowClassBefore.includes('selected'), rowClassBefore);
+
+    // Whatever IS selected right now, by DOM identity — not by filename, since
+    // inserting "New folder" can itself shift which index the (index-based)
+    // selection resolves to. Querying live DOM sidesteps that entirely: this
+    // is "the selected row(s), whatever they are" both before and after.
+    const selectionSnapshot = () => win.evaluate(() =>
+      Array.from(document.querySelectorAll('.pane:not([hidden]) .entry.selected'))
+        .map((el) => el.textContent.trim()));
+    const selBefore = await selectionSnapshot();
+    check('§2 setup: something is selected before the right-click', selBefore.length > 0, JSON.stringify(selBefore));
 
     const box = await renameInput().boundingBox();
     await renameInput().click({ button: 'right', position: { x: 14, y: Math.round(box.height / 2) } });
     await win.waitForTimeout(300);
 
     check('no context menu (.ctx-backdrop) appeared', (await win.locator('.ctx-backdrop').count()) === 0);
-    check('the rename box is still open', (await renameInput().count()) === 1);
-    const rowSelectedAfter = await rowClass();
-    check('the row selection is unchanged', rowSelectedBefore === rowSelectedAfter,
-      `${rowSelectedBefore} → ${rowSelectedAfter}`);
+    // NOT "the rename box is still open": opening a context menu never blurs
+    // the input either way, so that check passed even with the guard deleted
+    // and a real menu open — structurally guaranteed, not a signal.
+    const selAfter = await selectionSnapshot();
+    check('the row selection is unchanged by the right-click',
+      JSON.stringify(selBefore) === JSON.stringify(selAfter), `${JSON.stringify(selBefore)} → ${JSON.stringify(selAfter)}`);
 
     await cancelRename();
+    fs.rmSync(path.join(FIXTURE_DIR, newFolderName), { recursive: true, force: true });
   }
 
   // ===========================================================================
@@ -255,6 +296,20 @@ try {
     check('Alt+Left did not navigate to the back step', afterLeft === atB, `${atB} → ${afterLeft}`);
     check('the rename box is still open after Alt+Left', (await renameInput().count()) === 1);
     await cancelRename();
+
+    // Referee KAN-69 finding: every §4 assertion up to here proves only the
+    // negative half of a gate this diff ADDS — an over-broad `if (false)`
+    // (the three shortcuts dead everywhere, not just while renaming) leaves
+    // all of them green. Same session, same back-step: fire the identical
+    // shortcut once the rename box is gone and nothing is being typed into,
+    // and require it to actually navigate this time.
+    await win.locator(`${VIS}.entries`).click({ position: { x: 5, y: 5 } });
+    await win.waitForTimeout(150);
+    await win.keyboard.press('Alt+ArrowLeft');
+    await win.waitForTimeout(300);
+    const controlLeft = await breadcrumb();
+    check('control: Alt+Left DOES navigate when nothing is being typed into',
+      controlLeft.includes(path.basename(NAV_A)), `${atB} → ${controlLeft}`);
   }
   {
     console.log('  4b. Alt+Right, alone — a fresh forward-step, unrelated to §4a');
@@ -276,6 +331,15 @@ try {
     check('Alt+Right did not navigate to the forward step', afterRight === atB, `${atB} → ${afterRight}`);
     check('the rename box is still open after Alt+Right', (await renameInput().count()) === 1);
     await cancelRename();
+
+    // Positive control — see §4a's comment for why this half matters.
+    await win.locator(`${VIS}.entries`).click({ position: { x: 5, y: 5 } });
+    await win.waitForTimeout(150);
+    await win.keyboard.press('Alt+ArrowRight');
+    await win.waitForTimeout(300);
+    const controlRight = await breadcrumb();
+    check('control: Alt+Right DOES navigate when nothing is being typed into',
+      controlRight.includes(path.basename(NAV_C)), `${atB} → ${controlRight}`);
   }
   {
     console.log('  4c. F5, alone — no back/forward step involved at all');
@@ -303,11 +367,24 @@ try {
 
     await win.keyboard.press('F5');
     await win.waitForTimeout(500);
-    check('the rename box is still open after F5', (await renameInput().count()) === 1);
+    // NOT "the rename box is still open after F5": refresh() only ever calls
+    // load(), which never touches `renaming` state — the box stays open
+    // whether F5 actually fired or not, so that check is structurally
+    // guaranteed true and was never a signal. The marker-visibility check
+    // below is the real (and only available) probe for "did a refresh happen".
     check('F5 did not refresh the listing (the marker file dropped mid-rename is still invisible)',
       (await win.locator(`${VIS}.entry`, { hasText: marker }).count()) === 0);
 
     await cancelRename();
+
+    // Positive control — see §4a's comment for why this half matters.
+    await win.locator(`${VIS}.entries`).click({ position: { x: 5, y: 5 } });
+    await win.waitForTimeout(150);
+    await win.keyboard.press('F5');
+    await win.waitForTimeout(500);
+    check('control: F5 DOES refresh when nothing is being typed into',
+      (await win.locator(`${VIS}.entry`, { hasText: marker }).count()) > 0);
+
     fs.rmSync(path.join(NAV_B, marker), { force: true });
   }
 
