@@ -1078,6 +1078,16 @@ console.log('\n11 — restored agent tabs count, and are never reaped');
   check('run 2: and the user really is being shown that exact folder',
     promptAfterNinth === NINTH, String(promptAfterNinth));
 
+  // KAN-64: the number is the user's, so the dialog that exists BECAUSE of it
+  // has to say where it lives. Someone meeting this for the ninth time should
+  // not have to go looking. Asserted on the dialog's own text, and on the menu
+  // path a person would actually follow.
+  const modalText = await run2.win.evaluate(() =>
+    document.querySelector('.spawn-modal')?.textContent ?? '');
+  check('run 2: and the dialog says where to change the number',
+    /Settings/i.test(modalText) && /Preferences/i.test(modalText) && /Ctrl\+,/.test(modalText),
+    modalText.replace(/\s+/g, ' ').slice(-190));
+
   // THE CRITERION THAT PROTECTS THE USER'S DATA. Asking crossed the allowance,
   // so the reap ran — against eight tabs that are agent-spawned and have no
   // live process. Seven were never activated (no ptyId, so no status at all)
