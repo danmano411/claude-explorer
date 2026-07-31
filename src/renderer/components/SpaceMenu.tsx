@@ -36,10 +36,11 @@ import { ConfirmDialog } from './ConfirmDialog'
  *
  * Does NOT implement the Ctrl+1..9 global shortcut; it renders the accelerator
  * LABELS only ("Ctrl+1" etc, via `acceleratorLabel`). The keydown listener is a
- * window-level concern and lives in App.tsx (KAN-45), guarded by
- * `isTypingTarget` (renderer/keys.ts) so it never fires while a terminal /
- * address bar / search overlay / rename input has focus — a terminal needs to
- * receive Ctrl+1 itself.
+ * window-level concern and lives in App.tsx (KAN-45), matching on `spaceIndex`
+ * and declining only for `isTextBox` (renderer/keys.ts). KAN-59: it fires while
+ * a TERMINAL has focus, which it did not use to — the terminal's own job is just
+ * to stop xterm sending the corresponding control byte (Terminal.tsx). The app's
+ * address bar / search box / rename inputs still decline.
  */
 export interface SpaceMenuProps {
   spaces: Space[]
