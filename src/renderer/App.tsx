@@ -1848,6 +1848,10 @@ export function App() {
               <FileBrowser
                 cwd={t.cwd}
                 tabId={t.id}
+                // KAN-62 finding #1: which pane's keyboard shortcuts fire —
+                // `active` is the one focus truth (see "THE FOCUSED PANE IS
+                // DERIVED" above), not a second copy of it.
+                focused={t.id === active}
                 onNavigate={(p) =>
                   update(t.id, { cwd: p, ...(t.renamed ? {} : { title: basename(p) }) })
                 }

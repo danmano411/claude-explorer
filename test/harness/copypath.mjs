@@ -121,6 +121,26 @@ async function menuAction(name, label) {
   await win.waitForTimeout(200);
 }
 
+// --- split-view helpers, lifted from splitview.mjs's own (real-mouse, real
+// HTML5 DnD) drag machinery — not reinvented. ---------------------------
+function edgePoint(b, side) {
+  const ix = Math.max(24, b.width * 0.12);
+  const iy = Math.max(24, b.height * 0.12);
+  if (side === 'right') return { x: b.x + b.width - ix, y: b.y + b.height / 2 };
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+}
+async function dragTabTo(tabId, pt) {
+  const t = await win.locator(`.tab[data-slide="${tabId}"]`).boundingBox();
+  await win.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+  await win.mouse.down();
+  await win.mouse.move(t.x + t.width / 2 + 24, t.y + t.height / 2 + 10); // clear the press threshold
+  await win.waitForTimeout(150);
+  await win.mouse.move(pt.x, pt.y, { steps: 8 });
+  await win.waitForTimeout(250);
+  await win.mouse.up();
+  await win.waitForTimeout(900);
+}
+
 try {
   // ===========================================================================
   console.log('\n0. a Files tab pointed at ~/claudetest, with three fresh fixtures');
@@ -214,6 +234,83 @@ try {
   await navigateTab(0, CLAUDE_DIR);
 
   // ===========================================================================
+  console.log('\n10. [REGRESSION GUARD] split view: Ctrl+C copies the FOCUSED pane\'s file');
+  // ===========================================================================
+  // Referee finding #1: every visible pane's FileBrowser registers its own
+  // window-level keydown listener, so without a focus guard EVERY pane's
+  // Ctrl+C fires on one keystroke — last-mounted wins, deterministically the
+  // WRONG file, in both focus directions (reproduced here exactly as the
+  // referee's own probe did: two panes, two differently-named fixtures, click
+  // into one pane then the other, check which file's path lands on the OS
+  // clipboard).
+  await win.click('.tab.add');
+  await win.waitForTimeout(500);
+  await navigateTab(1, CLAUDE_DIR);
+  await win.waitForSelector(`${VIS}.entry`, { timeout: 10_000 });
+  const tabIds = await win.$$eval('.tab:not(.add)', (els) => els.map((e) => e.dataset.slide));
+  const [splitTab0, splitTab1] = [tabIds[0], tabIds[tabIds.length - 1]];
+  // Un-split mode only mounts the ACTIVE tab's pane, so tab0's pane does not
+  // exist as a drop target until it is brought back to front.
+  await win.locator('.tab:not(.add)').nth(0).click();
+  await win.waitForTimeout(200);
+  const splitBox = await win.locator(`.pane[data-pane="${splitTab0}"]`).boundingBox();
+  await dragTabTo(splitTab1, edgePoint(splitBox, 'right'));
+  const paneCount = (await win.$$('.pane')).length;
+  if (paneCount !== 2) {
+    skip('§10: split-view focus guard', `split drag did not produce two panes (got ${paneCount})`);
+  } else {
+    const rowIn = (tabId, name) => win.locator(`.pane[data-pane="${tabId}"] .entry`, { hasText: name }).first();
+    // focus pane(splitTab1) last, with CYAN selected there
+    await rowIn(splitTab0, MAGENTA).click(); await win.waitForTimeout(150);
+    await rowIn(splitTab1, CYAN).click(); await win.waitForTimeout(150);
+    await clipClear();
+    await win.keyboard.press('Control+c');
+    await win.waitForTimeout(200);
+    const s1 = await clipText();
+    check('§10a: focus in the RIGHT pane (CYAN selected) — Ctrl+C copies CYAN, not MAGENTA',
+      norm(s1) === norm(cyanPath), `got ${JSON.stringify(s1)}, want ${JSON.stringify(cyanPath)}`);
+    // reverse: focus pane(splitTab0) last, with MAGENTA selected there
+    await rowIn(splitTab1, CYAN).click(); await win.waitForTimeout(150);
+    await rowIn(splitTab0, MAGENTA).click(); await win.waitForTimeout(150);
+    await clipClear();
+    await win.keyboard.press('Control+c');
+    await win.waitForTimeout(200);
+    const s2 = await clipText();
+    check('§10b: focus in the LEFT pane (MAGENTA selected) — Ctrl+C copies MAGENTA, not CYAN',
+      norm(s2) === norm(magentaPath), `got ${JSON.stringify(s2)}, want ${JSON.stringify(magentaPath)}`);
+  }
+  // Closing a pane's LAST tab closes the pane (splitview.mjs's own proof of
+  // this), which collapses the layout back to the single-pane non-split
+  // default §7-9 below assume — no picker, no merge gesture needed.
+  await win.locator(`.tab[data-slide="${splitTab1}"] .close`).click();
+  await win.waitForTimeout(900);
+  await navigateTab(0, CLAUDE_DIR);
+
+  // ===========================================================================
+  console.log('\n11. [REGRESSION GUARD] a real Explorer file-drop clipboard survives Ctrl+C');
+  // ===========================================================================
+  // Referee finding #2: clipboard.writeText() REPLACES the whole OS
+  // clipboard. clipboard.writeBuffer('FileNameW', …) is the one format string
+  // that actually registers on Windows (measured: 'HDROP'/'CF_HDROP' are
+  // silent no-ops) and surfaces as 'text/uri-list' in availableFormats() —
+  // exactly what a real `Set-Clipboard -Path` produces, which is how this was
+  // cross-checked before trusting the simulation.
+  await app.evaluate(({ clipboard }) => {
+    clipboard.clear();
+    clipboard.writeBuffer('FileNameW', Buffer.from('C:\\some\\other\\file.txt\0', 'ucs2'));
+  });
+  const hdropBefore = await clipFormats();
+  await selectEntry(NOTE);
+  await win.keyboard.press('Control+c');
+  await win.waitForTimeout(200);
+  const hdropAfter = await clipFormats();
+  const looksLikeDrop = (fmts) => fmts.some((f) => /uri-list|hdrop|filename/i.test(f));
+  check('§11: a pre-existing real Explorer file-drop clipboard is NOT clobbered by Copy in the pane',
+    looksLikeDrop(hdropBefore) && looksLikeDrop(hdropAfter),
+    `before: ${JSON.stringify(hdropBefore)}  after: ${JSON.stringify(hdropAfter)}`);
+  await clipClear();
+
+  // ===========================================================================
   console.log('\n7-9. a real Claude session — content-level per KAN-60\'s own precedent');
   // ===========================================================================
   await win.click('.tab.add');
@@ -279,10 +376,21 @@ try {
     // still sitting in the scrollback `.xterm-rows` returns in full, so that
     // check is true on both sides and passes whether or not THIS paste added
     // one. Count instead: a new attach would raise the tally, this paste must not.
+    //
+    // FAKE-ASSERTION FIX: `afterImgTags === beforeImgTags` alone is 0-versus-0
+    // with nothing on the clipboard at all — it cannot fail whether the
+    // feature works OR is entirely deleted (measured: sabotaging setClip() to
+    // a no-op still printed 'before had 0 tag(s), after has 0'). ANDing in
+    // `afterText.includes(NOTE)` ties it to the SAME arrival fact the check
+    // above already proves red-under-sabotage, so this one can no longer pass
+    // vacuously — it is "arrived as text, and that text was not ALSO promoted
+    // to an image", not just "no image appeared" (which is trivially true of
+    // an empty paste too).
     const beforeImgTags = (beforeText.match(/\[Image #\d+\]/g) || []).length;
     const afterImgTags = (afterText.match(/\[Image #\d+\]/g) || []).length;
     check('§8: ...and NOT as an image attach — genuinely useful, not a failure',
-      afterImgTags === beforeImgTags, `before had ${beforeImgTags} tag(s), after has ${afterImgTags}`);
+      afterImgTags === beforeImgTags && afterText.includes(NOTE),
+      `before had ${beforeImgTags} tag(s), after has ${afterImgTags}; NOTE text present after paste: ${afterText.includes(NOTE)}`);
     await win.keyboard.press('Escape'); // clears the composer without submitting
     await win.waitForTimeout(500);
 

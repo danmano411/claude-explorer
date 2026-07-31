@@ -40,9 +40,17 @@ const MARK: Record<GutterMark, [glyph: string, title: string]> = {
   contains: ['·', 'Contains changes'],
 };
 
-export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExternal, onOpenFile }: {
+export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onOpenExternal, onOpenFile }: {
   cwd: string;
   tabId: string;
+  // KAN-62 finding #1. Split view mounts one FileBrowser per visible pane, and
+  // each registers its OWN window-level keydown listener — without this guard
+  // EVERY pane's listener fires on a single Ctrl+C, and the last one mounted
+  // wins, deterministically overwriting the real OS clipboard (and the in-app
+  // one) with whichever pane ISN'T the one the user is looking at. `focused`
+  // is `App.tsx`'s single derived focus truth (`t.id === active`) passed down,
+  // not a second copy of it — see App.tsx's "THE FOCUSED PANE IS DERIVED".
+  focused: boolean;
   onNavigate: (p: string) => void;
   onOpenClaude: (p: string) => void;
   onOpenExternal: (p: string) => void;
@@ -219,12 +227,21 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   // KAN-62. The in-app clipboard already drives this pane's own Paste; this
   // ALSO puts the absolute path(s) on the real OS clipboard as text, one per
   // line, so a subsequent Ctrl+V into a Claude tab (or any other text field)
-  // carries something. Nothing else was ever written there (Copy/Cut are pure
-  // in-app state — no CF_HDROP, no OS drag), so this cannot regress a
-  // paste-into-Explorer that did not work before either.
+  // carries something.
+  //
+  // Finding #2: clipboard.writeText() REPLACES the whole OS clipboard, every
+  // format on it, not just adds text/plain. Our own Copy/Cut never put
+  // anything else there, but a REAL Windows Explorer copy might already be
+  // sitting on the clipboard (CF_HDROP, surfaced to us as a 'text/uri-list'-ish
+  // format) — measured: writeText silently destroys it, and Electron cannot
+  // read the raw CF_HDROP bytes back out to restore them (writeBuffer of what
+  // readBuffer('text/uri-list') returns writes 0 bytes and wipes everything).
+  // So when one is already there we leave the OS clipboard alone rather than
+  // clobber a pending real Explorer paste; this pane's own Paste still works
+  // either way because it drives off the in-app clipboard, not the OS one.
   const setClip = (c: NonNullable<Clipboard>) => {
     app.setClipboard(c);
-    window.api.clipboardWriteText(c.paths.join('\n'));
+    if (!window.api.clipboardHasFileDrop()) window.api.clipboardWriteText(c.paths.join('\n'));
   };
 
   const paste = async (destDir: string) => {
@@ -363,6 +380,12 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
   // keyboard shortcuts
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
+      // KAN-62 finding #1: this listener is window-level and every visible
+      // pane in a split mounts one, so without this every keystroke would
+      // otherwise reach ALL of them — Ctrl+C in the pane you're looking at
+      // would also fire in the other pane, last-mounted wins, and the wrong
+      // file's path lands on the OS clipboard (and gets pasted into Claude).
+      if (!focused) return;
       const typing = isTypingTarget(e.target);
       if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
       if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
@@ -406,7 +429,7 @@ export function FileBrowser({ cwd, tabId, onNavigate, onOpenClaude, onOpenExtern
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [dir, shown, selectedPaths, app.clipboard]);
+  }, [dir, shown, selectedPaths, app.clipboard, focused]);
 
   return (
     <div className="filebrowser">
