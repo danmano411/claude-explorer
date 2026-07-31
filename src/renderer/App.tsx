@@ -1234,11 +1234,22 @@ export function App() {
   // leave the tab owned by nobody: unreachable, with a live pty nothing can
   // close.
   //
-  // The DESTINATION needs no placement step. A member with no `GridCell` is a
-  // legal (not broken) state, and the `layout` memo above adopts one into the
+  // The DESTINATION needs no GRID placement step. A member with no `GridCell` is
+  // a legal (not broken) state, and the `layout` memo above adopts one into the
   // focused pane the moment that space is rendered — its comment names "moved to
   // another space" as the case it exists for, and `migrateLayout` does the same
   // repair on the persisted copy.
+  //
+  // It does need an ORDER step, for a PINNED tab only. `addTabToSpace` appends,
+  // which is right for the ordinary tab it was written for and wrong for a
+  // pinned one: the strip holds every pinned tab left of every unpinned one
+  // (`normalize`, shared/groups.ts), so appending draws it at the far RIGHT —
+  // and then `sanitize()`, which normalizes on write as well as on read, hoists
+  // it to the front on disk, so the tab silently jumps to the other end of the
+  // strip on the next launch. Slid to the seam here with the same
+  // `reorderInSpace` the drag uses. Not a second normalizer (spaces.ts is
+  // explicit that repair lives in `sanitize()` and nowhere else): this is the
+  // caller placing its own insert, exactly as `setPinned` does for a pin.
   //
   // The SOURCE does. `addTabToSpace` only touches `tabIds`, so a split source
   // space is left with a `GridCell` naming a tab it no longer owns. `closeTab`
@@ -1246,11 +1257,17 @@ export function App() {
   // hides the hole while you are looking at that space, but the layout WRITTEN
   // to disk still has the dead cell, and a hole whose track a neighbour still
   // occupies never compacts away — so it comes back on restart (KAN-46 #2).
-  const spacesAfterMove = (ss: Space[], spaceId: string, ids: readonly string[]): Space[] =>
-    ids.reduce((acc, id) => {
+  const spacesAfterMove = (ss: Space[], spaceId: string, ids: readonly string[]): Space[] => {
+    const isPinned = new Set(committed.current.tabs.filter((t) => t.pinned).map((t) => t.id));
+    return ids.reduce((acc, id) => {
       const ownerId = acc.find((s) => s.tabIds.includes(id))?.id;
-      const next = addTabToSpace(acc, spaceId, id);
-      if (next === acc) return acc; // unknown space, or already a member
+      const added = addTabToSpace(acc, spaceId, id);
+      if (added === acc) return acc; // unknown space, or already a member
+      const dest = added.find((s) => s.id === spaceId)!;
+      const next = isPinned.has(id)
+        ? reorderInSpace(added, spaceId, dest.tabIds.length - 1,
+            dest.tabIds.filter((x) => x !== id && isPinned.has(x)).length)
+        : added;
       return next.map((s) => {
         if (s.id !== ownerId || !s.layout) return s;
         const vacated = removeTab(s.layout, id);
@@ -1259,6 +1276,7 @@ export function App() {
         return vacated === s.layout ? s : withLayout(s, s.layout, vacated);
       });
     }, ss);
+  };
 
   /**
    * Move `ids`, in order, into `spaceId`. The one place either route lands.
@@ -1296,8 +1314,16 @@ export function App() {
   };
 
   const moveTabToSpace = (tabId: string, spaceId: string) => {
-    const t = committed.current.tabs.find((x) => x.id === tabId);
-    if (!t) return;
+    const { tabs: nowTabs, spaces: nowSpaces } = committed.current;
+    const t = nowTabs.find((x) => x.id === tabId);
+    // A tab already in that space is not a move, so there is nothing to ask
+    // about. `moveToSpace` declines the same case, but it does so BELOW the
+    // confirm — so without this guard a grouped tab raises a dialog naming a
+    // consequence, the user accepts it, and nothing whatsoever happens. The menu
+    // route cannot reach it (the submenu filters the owning space out); the DROP
+    // route can, and the owning space's own row is the one nearest the pointer
+    // when the switcher springs open under the drag.
+    if (!t || nowSpaces.find((s) => s.tabIds.includes(tabId))?.id === spaceId) return;
     const reason = moveTabReason(t.groupId !== undefined);
     // null means do not prompt AT ALL — the ungrouped tab, the pinned tab and
     // the whole-group move all move on one click, with no modal.

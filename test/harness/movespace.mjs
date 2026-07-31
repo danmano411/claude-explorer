@@ -55,6 +55,28 @@ const grouped = (win) => win.evaluate(() =>
     tabs: [...g.querySelectorAll('.tab')].map((t) => t.textContent.replace(/[\u{1F4C1}▶×]/gu, '').trim()),
   })));
 
+/**
+ * The strip as the ORDERING assertions need it. A pinned tab has no
+ * `.tab-title` (it is icon-only), so its identity is only in the `title`
+ * ATTRIBUTE — same idiom as pinned.mjs, and the only reason a pinned tab can be
+ * named in an order check at all.
+ */
+const strip = (win) => win.evaluate(() =>
+  [...document.querySelectorAll('.tab:not(.add)')].map((t) => ({
+    t: (t.querySelector('.tab-title')?.textContent ?? t.getAttribute('title') ?? '')
+      .replace(/[\u{1F4C1}▶×]/gu, '').trim(),
+    pinned: t.classList.contains('pinned'),
+  })));
+
+/** Every pinned tab left of every unpinned one — the invariant `normalize()`
+ *  exists to enforce, read off the DOM rather than off the model. */
+const pinnedFirst = (s) => {
+  const flags = s.map((t) => t.pinned);
+  const last = flags.lastIndexOf(true);
+  const first = flags.indexOf(false);
+  return last === -1 || first === -1 || last < first;
+};
+
 const openSpaceMenu = async (win) => {
   await win.click('.spacemenu-btn');
   await win.waitForSelector('.spacemenu-dropdown');
@@ -136,12 +158,37 @@ async function moveGroupViaMenu(win, groupName, space) {
  */
 async function dragTabToSpaceRow(win, i, space) {
   const t = await win.locator('.tab:not(.add)').nth(i).boundingBox();
-  await win.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+  const y = t.y + t.height / 2;
+  await win.mouse.move(t.x + t.width / 2, y);
   await win.mouse.down();
-  await win.mouse.move(t.x + t.width / 2 + 26, t.y + t.height / 2 + 10); // clear the press threshold
-  await win.waitForTimeout(200);
+  await win.mouse.move(t.x + t.width / 2 + 26, y + 10); // clear the press threshold
+  // PRE-ROLL, and it is load-bearing. Chromium's drag loop does not emit its
+  // first `dragover` until a few hundred ms after `mousedown`, and until one
+  // reaches the STRIP nothing translates the dragged tab. Leaving immediately
+  // means the pointer is already over the switcher before the tab has moved a
+  // pixel — measured on a short strip: two dragovers for the whole gesture,
+  // both of them already on `.spacemenu-btn`, transform still "". Two paced
+  // hops inside the strip first, so the tab is demonstrably following before
+  // the traverse begins.
+  await win.waitForTimeout(400);
+  await win.mouse.move(t.x + t.width / 2 + 14, y);
+  await win.waitForTimeout(250);
   const btn = await win.locator('.spacemenu-btn').boundingBox();
-  await win.mouse.move(btn.x + btn.width / 2, btn.y + btn.height / 2, { steps: 8 });
+  const target = btn.x + btn.width / 2;
+  // HUMAN-PACED, and this is load-bearing rather than cosmetic. The spring-load
+  // fires from a WINDOW dragover, and the only reason one ever reaches the
+  // window is that the dragged tab is translated under the pointer — an event
+  // whose target is inside `.spacemenu` is stopPropagation'd by the menu's own
+  // handler and never bubbles that far. `mouse.move(..., { steps: 8 })` emits
+  // too few dragovers for the tab to keep up, so the pointer arrives over bare
+  // menu chrome and NOTHING springs — measured: target `.spacemenu-name`, zero
+  // dropdowns. Small hops with a beat between them are what a hand does, and
+  // the last dragover then reads `.tab-icon`, as the design intends.
+  for (let x = t.x + t.width / 2 + 14; x > target; x -= 12) {
+    await win.mouse.move(x, y);
+    await win.waitForTimeout(60);
+  }
+  await win.mouse.move(target, btn.y + btn.height / 2);
   await win.waitForTimeout(500);
   const sprung = await win.locator('.spacemenu-dropdown').count();
   let row = null;
@@ -171,6 +218,9 @@ const tiling = (win) => win.evaluate(() => {
     tracks: getComputedStyle(document.querySelector('.content')).gridTemplateColumns,
   };
 });
+
+/** Run 1's final view of the destination strip; Run 2 asserts it survived. */
+let betaAsLeft = [];
 
 const PROFILE = path.join(os.tmpdir(), `claude-explorer-movespace-${process.pid}`);
 fs.rmSync(PROFILE, { recursive: true, force: true });
@@ -291,6 +341,46 @@ async function runInTerminal(win, line) {
     JSON.stringify(await grouped(win)) === JSON.stringify([{ name: 'Group', tabs: ['A1', 'A3'] }]),
     JSON.stringify(await grouped(win)));
 
+  // --- §3a dropping onto the space the tab is ALREADY in -------------------
+  // Reachable only by DRAG — the submenu filters the owning space out — and it
+  // is the row the pointer is nearest when the switcher springs open: the one
+  // with the ✓. A tab already here is not moving, so the group-leaving confirm
+  // must not be raised. A dialog that names a consequence, is accepted by the
+  // user, and then no-ops is exactly the click-through the selectivity rule
+  // exists to prevent.
+  const wasStrip = (await titles(win)).join('|');
+  const wasGroups = JSON.stringify(await grouped(win));
+  const ownSprung = await dragTabToSpaceRow(win, 0, 'Space'); // A1, GROUPED, onto its OWN space
+  check('set-up: the drag reached the switcher, which sprang open over its own-space row',
+    ownSprung, String(ownSprung));
+  check('dropping a grouped tab on the space it is ALREADY in raises NO dialog',
+    (await modals(win)) === 0,
+    `${await modals(win)} modal(s): ${await win.locator('.modal p').textContent().catch(() => '')}`);
+  if (await modals(win)) {
+    await win.locator('.modal button', { hasText: 'Cancel' }).click();
+    await win.waitForTimeout(400);
+  }
+  check('and it changed nothing — same strip, same group',
+    (await titles(win)).join('|') === wasStrip && JSON.stringify(await grouped(win)) === wasGroups,
+    `${(await titles(win)).join(' | ')} / ${JSON.stringify(await grouped(win))}`);
+
+  // The control, and the reason the two checks above are not vacuous: the SAME
+  // tab and the SAME gesture, one row further down — a row that IS a move —
+  // must raise it. So "no dialog" above is the own-space row being declined,
+  // not a drop that quietly failed to land anywhere.
+  await dragTabToSpaceRow(win, 0, 'Beta');
+  const dragSaid = await win.locator('.modal p').textContent().catch(() => '(no dialog)');
+  check('the same drag onto a DIFFERENT space DOES raise it — so the drop really lands on rows',
+    dragSaid === 'This tab will be removed from the current group and will be moved to that space.',
+    dragSaid);
+  if (await modals(win)) {
+    await win.locator('.modal button', { hasText: 'Cancel' }).click();
+    await win.waitForTimeout(400);
+  }
+  check('and cancelling that leaves everything exactly as it was',
+    (await titles(win)).join('|') === wasStrip && JSON.stringify(await grouped(win)) === wasGroups,
+    `${(await titles(win)).join(' | ')} / ${JSON.stringify(await grouped(win))}`);
+
   await moveTabViaMenu(win, 1, 'Beta');
   const said = await win.locator('.modal p').textContent().catch(() => '(no dialog)');
   check('moving a GROUPED tab on its own asks first, naming what it changes',
@@ -334,6 +424,7 @@ async function runInTerminal(win, line) {
   check('all three arrived, in order, still one group and contiguous',
     JSON.stringify(await grouped(win)) === JSON.stringify([{ name: 'Group', tabs: ['A1', 'G2', 'G3'] }]),
     JSON.stringify(await grouped(win)));
+
   await switchSpaceViaMenu(win, 'Space');
 
   // --- §5 the DRAG, onto a space row in the switcher -----------------------
@@ -348,6 +439,31 @@ async function runInTerminal(win, line) {
   await switchSpaceViaMenu(win, 'Beta');
   check('the drag landed the same operation the menu does — the tab is here',
     (await titles(win)).includes('D1'), (await titles(win)).join(' | '));
+  await switchSpaceViaMenu(win, 'Space');
+
+  // --- §5b a PINNED tab: moves silently, and arrives WHERE A PINNED TAB GOES -
+  // `addTabToSpace` appends. That is right for an ordinary tab and wrong for a
+  // pinned one: the strip holds every pinned tab left of every unpinned one, so
+  // an appended pin draws at the far RIGHT — and then jumps to the left end on
+  // the next launch, because sanitize() normalizes on write while the live
+  // renderer state never is. Beta already holds seven unpinned tabs, so this
+  // only passes if the insert is placed rather than appended.
+  await addTab(win, 'P1');
+  await tabMenu(win, 0, 'Pin tab');
+  check('set-up: P1 is pinned in the source space',
+    (await strip(win))[0]?.pinned === true, JSON.stringify(await strip(win)));
+
+  await moveTabViaMenu(win, 0, 'Beta');
+  check('moving a PINNED tab raises no dialog — a pin governs closing, not which space it lives in',
+    (await modals(win)) === 0, `${await modals(win)} modal(s)`);
+  check('the pinned tab left the source space',
+    (await titles(win)).length === 0, (await titles(win)).join(' | '));
+
+  await switchSpaceViaMenu(win, 'Beta');
+  const withPin = await strip(win);
+  check('it arrived still pinned, and LEFT of every unpinned tab there',
+    pinnedFirst(withPin) && withPin[0]?.t === 'P1' && withPin[0]?.pinned === true,
+    JSON.stringify(withPin));
   await switchSpaceViaMenu(win, 'Space');
 
   // --- §6 out of a SPLIT pane: the cell has to be vacated ------------------
@@ -372,6 +488,12 @@ async function runInTerminal(win, line) {
   check('moving the lone tab of a middle pane leaves two panes still tiling everything',
     (await tiling(win)).panes === 2 && (await tiling(win)).cover > 0.95,
     JSON.stringify(await tiling(win)));
+
+  // The destination strip exactly as the user last saw it, to be compared with
+  // what comes back off disk in Run 2.
+  await switchSpaceViaMenu(win, 'Beta');
+  betaAsLeft = await strip(win);
+  await switchSpaceViaMenu(win, 'Space');
 
   await win.waitForTimeout(1600); // 400ms debounce + margin
   await close();
@@ -418,6 +540,18 @@ async function runInTerminal(win, line) {
   check('the group that moved whole is still one group there',
     JSON.stringify(await grouped(win)) === JSON.stringify([{ name: 'Group', tabs: ['A1', 'G2', 'G3'] }]),
     JSON.stringify(await grouped(win)));
+
+  // The renderer wrote it CLEAN, not "sanitize cleaned it up on the way in":
+  // if a move leaves the live order in a state normalize() has to repair, the
+  // repair happens on write and the strip silently rearranges itself while the
+  // user is away. So the order that comes back must be the order that was left.
+  const backStrip = await strip(win);
+  check('the destination strip comes back exactly as it was left — nothing was silently reordered',
+    JSON.stringify(backStrip) === JSON.stringify(betaAsLeft),
+    `left ${JSON.stringify(betaAsLeft)} / back ${JSON.stringify(backStrip)}`);
+  check('and the pinned tab that moved here is still pinned, still left of every unpinned one',
+    pinnedFirst(backStrip) && backStrip.some((t) => t.t === 'P1' && t.pinned),
+    JSON.stringify(backStrip));
 
   await close();
 }
