@@ -9,6 +9,7 @@ vi.mock('../src/main/settings', () => ({
 }))
 
 const { openInIde } = await import('../src/main/ide')
+const { stripInheritedAppSecrets } = await import('../src/main/pty')
 
 // '&' is a legal Windows filename character, so this is an honest-user folder name,
 // not just an attack. Under shell:true everything after '&' ran as a command.
@@ -32,6 +33,22 @@ function writeShim(dir: string): string {
   mkdirSync(dir, { recursive: true })
   const shim = join(dir, 'myide.cmd')
   writeFileSync(shim, `@echo off\r\n>"${log}" echo args=[%*]\r\n>>"${log}" cd\r\n`)
+  return shim
+}
+
+// KAN-67: a shim that echoes this app's own env vars back, to prove — with a
+// REAL child process, not a mock — whether the IDE actually received them.
+// Inside a .cmd script cmd.exe expands an unset %VAR% to nothing (empirically
+// verified here, unlike the interactive-prompt case where it stays literal),
+// so the baseline test's non-empty value is what distinguishes "received the
+// token" from "did not."
+function writeEnvProbeShim(dir: string): string {
+  mkdirSync(dir, { recursive: true })
+  const shim = join(dir, 'envprobe.cmd')
+  writeFileSync(
+    shim,
+    `@echo off\r\n>"${log}" echo TOKEN=%CLAUDE_EXPLORER_MCP_TOKEN%\r\n>>"${log}" echo PTYID=%CLAUDE_EXPLORER_PTY_ID%\r\n`,
+  )
   return shim
 }
 
@@ -73,5 +90,54 @@ describe.skipIf(process.platform !== 'win32')('openInIde', () => {
 
     openInIde(folder)
     expect(await waitForLog()).toContain(folder)
+  }, 20000)
+})
+
+/**
+ * KAN-67 referee finding: openInIde() never routed through pty.ts's
+ * launchEnv(), so a nested launch (Claude Explorer started from inside one of
+ * its own Claude terminals) handed this app's own MCP bearer token to
+ * whatever IDE the user configured — VS Code's integrated terminal then holds
+ * it for every terminal the user opens inside it. The fix is at the root
+ * (stripInheritedAppSecrets(), called once from src/main/index.ts at
+ * startup), not in ide.ts, so this proves the root fix actually closes this
+ * call site: a REAL child process (not a mock) either does or does not
+ * receive the token.
+ */
+describe.skipIf(process.platform !== 'win32')('KAN-67: openInIde and the root-cause scrub', () => {
+  const STALE_TOKEN = 'STALE-TOKEN-kan67-ide-probe'
+  const STALE_PTY = 'stale-pty-kan67-ide-probe'
+
+  afterEach(() => {
+    delete process.env.CLAUDE_EXPLORER_MCP_TOKEN
+    delete process.env.CLAUDE_EXPLORER_PTY_ID
+  })
+
+  it('BASELINE: without the root-cause scrub, the IDE process really does receive this app\'s token', async () => {
+    settings.ideCommand = writeEnvProbeShim(work)
+    process.env.CLAUDE_EXPLORER_MCP_TOKEN = STALE_TOKEN
+    process.env.CLAUDE_EXPLORER_PTY_ID = STALE_PTY
+
+    openInIde(work)
+    const text = await waitForLog()
+
+    expect(text).toContain(`TOKEN=${STALE_TOKEN}`)
+    expect(text).toContain(`PTYID=${STALE_PTY}`)
+  }, 20000)
+
+  it('after stripInheritedAppSecrets() runs (as index.ts does at startup), the IDE process no longer receives the token', async () => {
+    settings.ideCommand = writeEnvProbeShim(work)
+    process.env.CLAUDE_EXPLORER_MCP_TOKEN = STALE_TOKEN
+    process.env.CLAUDE_EXPLORER_PTY_ID = STALE_PTY
+
+    stripInheritedAppSecrets()
+    openInIde(work)
+    const text = await waitForLog()
+
+    expect(text).not.toContain(STALE_TOKEN)
+    expect(text).not.toContain(STALE_PTY)
+    // Unset expands to nothing inside a .cmd script — see writeEnvProbeShim.
+    expect(text).toContain('TOKEN=\r\n')
+    expect(text).toContain('PTYID=\r\n')
   }, 20000)
 })

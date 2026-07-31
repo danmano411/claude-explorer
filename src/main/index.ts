@@ -20,11 +20,23 @@ import { registerWorkspaceHandlers } from './workspace.handlers'
 import { registerControlHandlers } from './control.handlers'
 import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
 import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
-import { setMcpInjection } from './pty'
+import { setMcpInjection, stripInheritedAppSecrets } from './pty'
 import { getSettings } from './settings'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
 import { CH } from '../shared/ipc'
+
+// KAN-67. launchEnv() (pty.ts) only guards pty.ts's own spawns. external.ts's
+// "Open in Terminal", ide.ts's "Open in IDE", search.ts's ripgrep and git.ts's
+// git all spawn with no `env` option at all, i.e. inherit process.env
+// verbatim — under the exact nested-launch precondition this ticket
+// describes, that hands every one of them this app's own MCP bearer token.
+// Scrub at the root instead of teaching each of those five call sites its own
+// list: nothing in this app ever reads its own token back out of
+// process.env (mcp.ts mints a fresh one with randomBytes() every run), so
+// deleting it here, before any handler can spawn anything, costs the
+// legitimate path nothing.
+stripInheritedAppSecrets()
 
 let mainWindow: BrowserWindow | null = null
 let flushed = false

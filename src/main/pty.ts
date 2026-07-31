@@ -109,6 +109,27 @@ const INHERITED_SESSION_VARS = [
   'CLAUDE_EXPLORER_PTY_ID',
 ]
 
+/**
+ * KAN-67. launchEnv() above is the chokepoint for spawns THIS FILE makes, but
+ * it is not the only spawn site in the tree: external.ts's "Open in
+ * Terminal", ide.ts's "Open in IDE", search.ts's ripgrep and git.ts's git all
+ * spawn with no `env` option, i.e. inherit process.env verbatim, so a
+ * launchEnv()-only fix leaves every one of them holding this app's token
+ * under the same nested-launch precondition. Call this once, at process
+ * startup (src/main/index.ts), before any handler can spawn anything — that
+ * scrubs process.env itself, so every spawn site downstream inherits a clean
+ * environment for free instead of each needing launchEnv()'s list taught to
+ * it individually. Safe because nothing in this app ever reads its own token
+ * back out of process.env: mcp.ts mints a fresh one with randomBytes() every
+ * run, and the only writes of these two names are the per-spawn `env`
+ * objects built explicitly below (launchEnv() itself, and the agentControl
+ * re-add), neither of which touches process.env.
+ */
+export function stripInheritedAppSecrets(env: NodeJS.ProcessEnv = process.env): void {
+  delete env.CLAUDE_EXPLORER_MCP_TOKEN
+  delete env.CLAUDE_EXPLORER_PTY_ID
+}
+
 export function launchEnv(
   base: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
