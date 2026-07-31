@@ -16,9 +16,12 @@
 //   2. create / rename / delete work, and delete DOES kill the tabs' PTYs —
 //      the mirror of (1), proved by a loop whose file writes stop.
 //   3. each space remembers its own active tab, across a switch and a restart.
-//   4. Ctrl+1..9 selects the nth space, and is IGNORED while a terminal or the
-//      address bar has focus (one predicate covers the search overlay and the
-//      rename inputs too — renderer/keys.ts).
+//   4. Ctrl+1..9 selects the nth space — from the tab strip, from a focused file
+//      row, and (KAN-59) from a focused terminal — and is IGNORED only while one
+//      of the app's OWN inputs has focus, the address bar standing in for the
+//      search overlay and the rename boxes (`isTextBox`, renderer/keys.ts).
+//      What the terminal does with the keystroke is measured in paste.mjs, which
+//      has the pty write log: the byte must not go out as well as the switch.
 //   5. spaces, their membership and their active tab survive a restart.
 //
 // A plain PowerShell tab is used rather than Claude: the claim is about pty
@@ -262,6 +265,20 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   check('Ctrl+2 is IGNORED while the address bar has focus',
     (await spaceName(win)) === 'Space', await spaceName(win));
   await win.keyboard.press('Escape');
+
+  // ...and the same files tab with the FILE LIST focused instead does switch.
+  // Not redundant with the `.tabbar` control below: this rejects the other
+  // half-fix for KAN-59 — moving the switch INTO Terminal.tsx's key handler,
+  // which makes the terminal case pass while quietly killing the shortcut
+  // everywhere a terminal is not what has focus.
+  await win.locator('.pane:not([hidden]) .entry').first().click();
+  await win.waitForTimeout(250);
+  await win.keyboard.press('Control+2');
+  await win.waitForTimeout(600);
+  check('Ctrl+2 switches space from a files tab with a file row focused',
+    (await spaceName(win)) === 'Beta', await spaceName(win));
+  await switchSpaceViaMenu(win, 'Space');
+  await win.waitForTimeout(400);
 
   // Positive control: the same key, nothing typable focused, DOES switch —
   // otherwise the address-bar check above would pass on a shortcut that never
