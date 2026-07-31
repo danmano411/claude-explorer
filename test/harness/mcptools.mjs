@@ -541,6 +541,17 @@ let AGENT_DIR = '';
   check('and no new prompt was put in front of the user', (await promptPath()) === null,
     String(await promptPath()));
 
+  // The original measurement, replayed: 12 asks back to back is what produced
+  // 12 modals in 428 ms. Every path is a different one, so a per-path cooldown
+  // would score 11 modals here and a global one scores none.
+  const loopT0 = Date.now();
+  const spam = [];
+  for (let i = 0; i < 12; i++) spam.push(await tool('open_claude_session', { path: CAP_DIRS[i % 8] }));
+  const loopMs = Date.now() - loopT0;
+  check('twelve asks over eight different folders raise no modal at all',
+    (await promptPath()) === null && spam.every((r) => r.isError && /denied the last request/i.test(r.text)),
+    `${loopMs}ms, prompt=${await promptPath()}, ${spam.filter((r) => r.isError).length}/12 refused`);
+
   // ...and it wears off. A cooldown with no expiry would brick the tool for the
   // rest of the app run.
   const t0 = Date.now();
@@ -678,6 +689,50 @@ console.log('\n8b — an unreachable UNC path');
     stallMs > 5_000, `${stallMs}ms for ${dead}`);
   check('and a list_tabs issued 400ms into that stall was answered without waiting for it',
     !during.isError && listMs < 3_000, `${listMs}ms (stall was ${stallMs}ms)`);
+}
+
+// === 8c. ...and FOUR of them still stall only one worker ====================
+//
+// list_tabs above proves the event loop is free. It does not prove the app is,
+// because `await` moves the stall off the event loop and onto libuv's
+// THREADPOOL, which is four threads. Every fs operation main does for the
+// window — the file browser's readdir, the viewer's readFile, session parsing,
+// the trash — is node:fs/promises and queues on those same four. One agent turn
+// can emit four tool calls, so the threadpool is the second lever on the same
+// DoS, and the oracle has to be a request that actually touches the disk.
+//
+// Measured standalone: readdir("C:\Windows\System32") took 4ms alongside ONE
+// unreachable-UNC realpath and 20,438ms alongside four.
+//
+// ONE host, asked for four times over. Windows negative-caches per host, so
+// four resolutions ONE AT A TIME cost 21s + 0 + 0 + 0, while four at once all
+// miss the cache together and cost four workers for the full 21s — the whole
+// difference between the two shows up in the listing below, and the section
+// takes ~21s whichever way it goes.
+console.log('\n8c — four at once');
+{
+  const dead = Array(4).fill(`\\\\10.255.254.${(process.pid % 200) + 40}\\s\\x.txt`);
+  const t0 = Date.now();
+  const stalled = dead.map((p) => tool('open_viewer_tab', { path: p }));
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Straight down fs.handlers -> listDir -> fs/promises readdir + stat, i.e.
+  // exactly what the file browser does every time the user opens a folder.
+  const lsMs = await win.evaluate(async (dir) => {
+    const t = performance.now();
+    await window.api.fsList(dir);
+    return Math.round(performance.now() - t);
+  }, WORK);
+  const replies = await Promise.all(stalled);
+  const stallMs = Date.now() - t0;
+
+  check('four concurrent calls at the unreachable host really did stall (otherwise the next check measures nothing)',
+    stallMs > 5_000, `${stallMs}ms for ${dead.length} calls at ${dead[0]}`);
+  check('and a folder listing issued during all four came back without waiting for them',
+    lsMs < 3_000, `${lsMs}ms (stall was ${stallMs}ms)`);
+  check('every one of the four still answered with its own typed error, none hung',
+    replies.every((r) => r.isError && /no such path/i.test(r.text)),
+    replies.map((r) => r.text.slice(0, 40)).join(' | '));
 }
 
 // === 9. the fan-out criterion ===============================================

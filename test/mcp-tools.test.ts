@@ -175,6 +175,33 @@ describe('spawnguard token lifecycle', () => {
     expect(guard.inFlight).toBe(0) // and the slot was released on the way out
   })
 
+  // The claim's OTHER half, and the one the test above cannot see. Its comment
+  // promises the block is "synchronous from here to `pending = null`, so two
+  // redemptions that woke on the same answer cannot both win" — nothing asserted
+  // that. It matters because the realistic way finding 1 gets re-broken is not
+  // moving the claim past the spawn, it is TIDYING IT INTO THE `finally` next to
+  // `inFlight--`: that still consumes the token on a rejecting spawn, so the
+  // test above stays green, while `pending` now survives across `await
+  // spawn(path)` and a second redemption of the same token walks straight
+  // through the claim. Two Claude Code processes on one folder, one approval.
+  it('two redemptions woken by the SAME answer spawn exactly once', async () => {
+    const { guard, spawnCalls } = harness()
+    const spawn = async (p: string) => { spawnCalls.push(p) }
+    const token = needsToken(await guard.request('C:\\repo', undefined, spawn))
+
+    // Both in flight BEFORE the answer, so one settle wakes both — two MCP
+    // requests are two HTTP requests and nothing serialises them.
+    const a = guard.request('C:\\repo', token, spawn)
+    const b = guard.request('C:\\repo', token, spawn)
+    guard.answer(token, true)
+    const [ra, rb] = await Promise.all([a, b])
+
+    expect(spawnCalls).toEqual(['C:\\repo']) // ONE session, not two
+    expect([ra.kind, rb.kind].sort()).toEqual(['refused', 'spawned'])
+    expect(refusal(ra.kind === 'refused' ? ra : rb)).toMatch(/already used/i)
+    expect(guard.inFlight).toBe(0)
+  })
+
   it('mints nothing when there is no window to prompt in', async () => {
     // prompt() returning false means the send never reached a renderer. A token
     // minted anyway is a live permission nobody can answer and only expiry can

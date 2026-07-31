@@ -91,19 +91,58 @@ export function canonicalize(p: string): string {
 
 const realpathNative = promisify(fs.realpath.native)
 
+/**
+ * A gate that runs what it is handed one at a time, in call order. A rejection
+ * settles the queue exactly like a return, so a thrower cannot wedge it.
+ *
+ * ponytail: a queue of ONE, not a pool with a size. What is being bounded is how
+ * many libuv worker threads an untrusted caller may hold at once, and libuv has
+ * four — one is the only number that still leaves the app a majority however the
+ * pool is sized.
+ *
+ * Ceiling: lookups now queue behind each other, which is microseconds on a local
+ * path but the full 21s behind an unreachable one — so a looping agent can still
+ * starve the two MCP tools that resolve a path (its OWN tools; the window's file
+ * operations do not go through here, and that is the point). Give it a real
+ * worker pool with per-client fairness the day that is worth caring about.
+ */
+export function oneAtATime(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let queue: Promise<unknown> = Promise.resolve()
+  return (fn) => {
+    const run = queue.then(fn)
+    queue = run.then(
+      () => {},
+      () => {},
+    )
+    return run
+  }
+}
+const resolveOne = oneAtATime()
+
 /** canonicalize() without pinning the main thread — same answers, one awaited
  *  syscall at a time. This is the spelling every caller-supplied path must use
  *  (see mcp.ts): the 21-second stall above then costs one request instead of
- *  the whole process. */
+ *  the whole process.
+ *
+ *  SERIALISED, and that is half the fix, not tidiness. `await` moves the stall
+ *  off the event loop but not off libuv's threadpool, which is FOUR threads —
+ *  so four concurrent `\\10.255.255.n\s\x` resolutions (one agent can emit
+ *  parallel tool calls) park every other async fs operation in main behind
+ *  them: measured, a `readdir("C:\Windows\System32")` issued during four of
+ *  them took 20,636 ms, versus 4 ms during one. The file browser, the viewer,
+ *  session parsing and every trash op are all `node:fs/promises`. One at a time
+ *  caps an outside caller at a single worker. */
 export async function canonicalizeAsync(p: string): Promise<string> {
-  for (const [cur, rest] of ancestors(p)) {
-    try {
-      return path.join(await realpathNative(cur), ...rest)
-    } catch {
-      /* keep walking up */
+  return resolveOne(async () => {
+    for (const [cur, rest] of ancestors(p)) {
+      try {
+        return path.join(await realpathNative(cur), ...rest)
+      } catch {
+        /* keep walking up */
+      }
     }
-  }
-  return path.resolve(p)
+    return path.resolve(p)
+  })
 }
 
 export function check(

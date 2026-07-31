@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { classify, check, gate, canonicalize, canonicalizeAsync, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
+import { classify, check, gate, canonicalize, canonicalizeAsync, oneAtATime, CONFIRM_WORD, TRASH_DIR_NAME } from '../src/main/policy'
 import type { Op } from '../src/main/policy'
 
 const ROOTS = ['C:\\FakeWindows', 'C:\\Fake Program Files']
@@ -257,5 +257,39 @@ describe('canonicalize', () => {
       '',
     ]
     for (const p of cases) expect(await canonicalizeAsync(p)).toBe(canonicalize(p))
+  })
+})
+
+// The gate canonicalizeAsync runs inside. `await` moves a 21-second UNC stall
+// off the event loop but NOT off libuv's threadpool, which is four threads — so
+// four concurrent resolutions of a caller-named path (one agent can emit
+// parallel tool calls) park every other async fs op in main behind them.
+// Measured with the real syscall: readdir("C:\Windows\System32") took 4 ms
+// alongside ONE such resolution and 20,636 ms alongside four. The real stall is
+// not a unit test; the ordering rule that prevents it is.
+describe('oneAtATime', () => {
+  it('runs one at a time in call order, and a rejection does not wedge the queue', async () => {
+    const gated = oneAtATime()
+    const log: string[] = []
+    let running = 0
+    let peak = 0
+    const task = (name: string, fail = false) =>
+      gated(async () => {
+        peak = Math.max(peak, ++running)
+        log.push(`+${name}`)
+        // A real await, so an ungated version genuinely overlaps rather than
+        // finishing inside its own microtask and only LOOKING serialised.
+        await new Promise((r) => setTimeout(r, 5))
+        log.push(`-${name}`)
+        running--
+        if (fail) throw new Error(name)
+        return name
+      })
+
+    const settled = await Promise.allSettled([task('a'), task('b', true), task('c')])
+    expect(peak).toBe(1) // never two workers held at once
+    expect(log).toEqual(['+a', '-a', '+b', '-b', '+c', '-c'])
+    // 'c' was queued behind a REJECTING 'b' and still ran, and still last.
+    expect(settled.map((s) => s.status)).toEqual(['fulfilled', 'rejected', 'fulfilled'])
   })
 })
