@@ -21,6 +21,7 @@ import { registerControlHandlers } from './control.handlers'
 import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
 import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
 import { setMcpInjection } from './pty'
+import { getSettings } from './settings'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
 import { CH } from '../shared/ipc'
@@ -75,8 +76,20 @@ function sendPendingCli(): void {
  * A failure here disables agent control and nothing else: setMcpInjection is
  * never called, so spawn() adds no flag and no token. Losing a tool is not a
  * reason to refuse to start a file manager.
+ *
+ * KAN-42 made this the whole lifecycle rather than a startup step: it runs at
+ * launch AND after every settings save, and reads `agentControl` each time. The
+ * off branch is the kill switch — the listener goes away now, and the next
+ * spawn gets no --mcp-config and no token. It is deliberately NOT retroactive:
+ * a Claude session already running holds the token in its own environment and
+ * nothing here reaches into that process (the dead listener is what stops it).
  */
-async function startAgentControl(): Promise<void> {
+async function applyAgentControl(): Promise<void> {
+  if (!getSettings().agentControl) {
+    stopMcpServer()
+    setMcpInjection(null)
+    return
+  }
   try {
     const { port, token } = await startMcpServer()
     const configPath = join(app.getPath('userData'), 'mcp-agent-control.json')
@@ -201,7 +214,10 @@ app.whenReady().then(async () => {
   registerFsMutateHandlers()
   registerTrashHandlers()
   registerOpenHandlers()
-  registerSettingsHandlers()
+  // KAN-42: the kill switch. Awaited inside the handler, so settingsSet does not
+  // resolve until the listener has actually bound (or gone) — a renderer that
+  // saves and then spawns a tab must not race the port.
+  registerSettingsHandlers(applyAgentControl)
   registerIdeHandlers()
   registerFileReadHandlers()
   // Was never called: git:status and git:diff had a CH entry, an Api method and
@@ -231,7 +247,7 @@ app.whenReady().then(async () => {
   // land before sweep() finishes. That is harmless: opening a tab pushes
   // nothing onto the undo stack, which is the only thing D-1 cares about.
   pendingCli = resolveCliIntent(parseCliArgs(process.argv, process.cwd()))
-  await startAgentControl()
+  await applyAgentControl()
   createWindow()
   initUpdater()
   app.on('activate', () => {

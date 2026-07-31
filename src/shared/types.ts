@@ -45,6 +45,12 @@ export interface Settings {
    *  Default true: opening a file from a grouped repo tab keeps them together,
    *  which is the whole point of the grouping. */
   groupWithSource: boolean
+  /** The agent-control surface (KAN-42): the in-process MCP server, and the
+   *  --mcp-config + bearer token handed to Claude sessions this app launches.
+   *  Default true. False stops the server immediately and injects nothing into
+   *  the NEXT spawn — it is NOT retroactive: a session already running has the
+   *  token in its environment and nothing reaches into that process. */
+  agentControl: boolean
 }
 
 /**
