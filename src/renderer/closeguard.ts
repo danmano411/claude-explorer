@@ -86,21 +86,6 @@ export function closeReason(risks: readonly CloseRisk[]): string | null {
 }
 
 /**
- * The space-delete sentence. Byte-identical to the pre-KAN-57 wording when
- * nothing in the space is live and nothing in it is pinned, so the common case
- * reads unchanged; the live clause is the part that was missing, and it is the
- * unrecoverable part.
- *
- * THE PINNED CLAUSE (KAN-57 review). Deleting a space closes its pinned tabs —
- * `onDeleteSpace` closes the whole membership and does not route through
- * `requestClose`'s pinned filter. That behaviour is deliberate: a space delete is
- * explicit and already confirmed, and a space you do not want deleted can itself
- * be pinned. What is NOT acceptable is doing it silently, when the same pin
- * refuses every other close route in the app — so the sentence says so, and the
- * user's pin means what the dialog says it means rather than what a comment
- * elsewhere claims.
- */
-/**
  * MOVING A TAB TO ANOTHER SPACE (KAN-66), or **null when the move needs no
  * dialog at all** — the same contract as `closeReason`, and here for the same
  * selectivity rule stated at the top of this file.
@@ -126,6 +111,21 @@ export function moveTabReason(grouped: boolean): string | null {
     : null
 }
 
+/**
+ * The space-delete sentence. Byte-identical to the pre-KAN-57 wording when
+ * nothing in the space is live and nothing in it is pinned, so the common case
+ * reads unchanged; the live clause is the part that was missing, and it is the
+ * unrecoverable part.
+ *
+ * THE PINNED CLAUSE (KAN-57 review). Deleting a space closes its pinned tabs —
+ * `onDeleteSpace` closes the whole membership and does not route through
+ * `requestClose`'s pinned filter. That behaviour is deliberate: a space delete is
+ * explicit and already confirmed, and a space you do not want deleted can itself
+ * be pinned. What is NOT acceptable is doing it silently, when the same pin
+ * refuses every other close route in the app — so the sentence says so, and the
+ * user's pin means what the dialog says it means rather than what a comment
+ * elsewhere claims.
+ */
 export function deleteSpaceReason(
   name: string, tabCount: number, risks: readonly CloseRisk[], pinnedCount: number,
 ): string {
