@@ -1,11 +1,26 @@
-import { Fragment, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type { Tab } from './tabs';
 import type { PtyStatus, TabGroup } from '../shared/types';
+import type { CellKey, Side } from './gridlayout';
 import { useAppState, type DragPayload } from './appstate';
 import { GROUP_COLORS, moveGroupRun, reorderWithGroups, segments } from '../shared/groups';
 import { ContextMenu } from './components/ContextMenu';
 
-const TAB_MIME = 'application/x-ce-tab';
+export const TAB_MIME = 'application/x-ce-tab';
+/**
+ * Set, with no value, only when the dragged tab is the ONLY tab of its strip
+ * (KAN-56).
+ *
+ * `dataTransfer.getData()` is blocked during `dragover` but `types` is
+ * readable, so this is how the pane area picks its drop zones without knowing
+ * which tab it is: a lone tab is offered no seam zones, because taking it out
+ * of its pane removes that pane, which compacts the grid and re-ranks the very
+ * track indices a seam is identified by (see `insertAtSeam`).
+ *
+ * Answered from this strip's own `tabs` prop rather than from a list App feeds
+ * down — a strip IS a pane's tab set, so it already knows.
+ */
+export const LONE_MIME = 'application/x-ce-tab-lone';
 /** Dragging a group by its label chip carries the group id, not a tab id — the
  *  two drags land through different model calls, so they need different types. */
 const GROUP_MIME = 'application/x-ce-tabgroup';
@@ -51,32 +66,35 @@ export interface GroupActions {
 }
 
 /**
- * Split view, from the strip's point of view (KAN-46). One object, same seam
+ * Split view, from the strip's point of view (KAN-56). One object, same seam
  * shape as `GroupActions`.
  *
- * The strip stays global and single: there is one row of tabs no matter how
- * many panes are up, and a tab is not "in" a pane — panes are placement only.
- * So the only thing the menu needs to know is whether the right-clicked tab
- * currently HAS a pane, which decides between "put it in a new one" and "take
- * its pane away".
+ * A pane now OWNS an ordered set of tabs and draws its own strip, so this
+ * component is that strip — `tabs` is the pane's list, not the space's. Every
+ * question the menu used to ask App ("does this tab have a pane?") is answered
+ * from `tabs` itself, which is why the old `placed: string[]` is gone.
  */
 export interface SplitActions {
-  /** Tab ids with a pane right now. With no split up this is the active tab,
-   *  which is the single pane — that is what keeps "Split right" off the menu
-   *  of the tab you are already looking at, where it could only be a no-op. */
-  placed: string[];
   /** More than one pane is up, i.e. there is a pane to close. */
   split: boolean;
-  /** Splits the FOCUSED pane and shows `tabId` in the half that appears. */
-  onSplit: (tabId: string, axis: 'col' | 'row') => void;
-  /** Removes `tabId`'s pane. The tab itself stays on the strip. */
-  onClosePane: (tabId: string) => void;
+  /** Move `tabId` out of this pane into a NEW one on `side`. Offered only when
+   *  this strip has two or more tabs: splitting out a lone tab would empty the
+   *  pane being cut, and the model refuses it. */
+  onSplit: (tabId: string, side: Side) => void;
+  /** Close the pane this strip belongs to. Its tabs are NOT closed — they merge
+   *  into the neighbour that absorbs the rectangle. */
+  onClosePane: (paneKey: CellKey) => void;
 }
 
 interface Props {
-  /** The ACTIVE SPACE's ordered slice, not every tab that exists — the strip
-   *  renders one space (KAN-45). `segments()` and the `onReorder` indices below
-   *  are therefore space-relative; see the authority rule in renderer/spaces.ts. */
+  /**
+   * THIS STRIP's ordered tabs. With no split that is the active space's whole
+   * slice (KAN-45); with a split it is one pane's `cell.tabIds` (KAN-56).
+   * `segments()` and every index below — `onReorder`, `onAdopt` — are relative
+   * to THIS list, so a pane strip talks in its own coordinates and App maps
+   * them back through `setCellTabs`. See the authority rule in
+   * renderer/spaces.ts.
+   */
   tabs: Tab[];
   groups: TabGroup[];
   groupActions: GroupActions;
@@ -100,13 +118,27 @@ interface Props {
   onOpenIde: (id: string) => void;
   /** Rendered at the very left edge — the only control there. The File menu
    *  (New Tab / Open Recent) used to live in this strip too, but KAN-55 moved
-   *  it into the native app menu, so `spaceMenu` is on its own now. */
-  spaceMenu: ReactNode;
+   *  it into the native app menu, so `spaceMenu` is on its own now. Optional:
+   *  a PANE strip gets none, because there is one space, not one per pane. */
+  spaceMenu?: ReactNode;
+  /** Which pane this strip belongs to, or `null` for the single global strip
+   *  (`layout === null`). Everything pane-shaped below is gated on it, so the
+   *  classic path renders byte-for-byte what it always did. */
+  paneKey?: CellKey | null;
+  /** A tab dragged in from ANOTHER strip. `insert` is post-splice in THIS
+   *  strip's list. Absent on the global strip, where there is nowhere else for
+   *  a tab to come from. */
+  onAdopt?: (tabId: string, insert: number) => void;
+  /** pointerdown on the strip's own BACKGROUND — grab the pane and move it,
+   *  the way a title bar moves a window. Never fired from a tab, a group chip
+   *  or a button; those are their own gestures. */
+  onPaneGrab?: (e: ReactPointerEvent<HTMLDivElement>) => void;
 }
 
 export function TabBar({
   tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
   onReorderGroup, onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu,
+  paneKey = null, onAdopt, onPaneGrab,
 }: Props) {
   // useAppState throws until the provider is mounted (V4); tolerate that pre-V4.
   let drag: DragPayload = null;
@@ -332,6 +364,22 @@ export function TabBar({
   const insertAt = (x: number, ids: Set<string>) =>
     geom.current.reduce((n, g) => n + (!ids.has(g.id) && g.center < x ? 1 : 0), 0);
 
+  /**
+   * The same index for a tab arriving from ANOTHER pane's strip (KAN-56).
+   *
+   * Measured LIVE rather than frozen at dragstart, which the local drag has to
+   * do and this one must not: the incoming tab is not in this list, so nothing
+   * here moves as it crosses, and there is no threshold that could slide out
+   * from under the pointer. It also cannot be frozen — this strip never saw the
+   * dragstart.
+   */
+  const adoptInsertAt = (x: number) =>
+    tabs.reduce((n, t) => {
+      const node = slideNode(t.id) ?? (t.groupId ? slideNode(`g:${t.groupId}`) : null);
+      const r = node?.getBoundingClientRect();
+      return n + (r && r.left + r.width / 2 < x ? 1 : 0);
+    }, 0);
+
   const follow = (x: number) => {
     for (const key of dndRef.current?.moveKeys ?? []) {
       const n = slideNode(key);
@@ -366,6 +414,11 @@ export function TabBar({
         onDragStart={(e) => {
           beginDrag({ kind: 'tab', id: t.id, ids: new Set([t.id]), moveKeys: [t.id] }, e, e.currentTarget);
           e.dataTransfer.setData(TAB_MIME, t.id);
+          // A flag, read from `types` during dragover (KAN-56). Its VALUE is
+          // never read — the tab id already rides on TAB_MIME — but it is not
+          // empty, because an empty payload is not worth relying on across
+          // Chromium's DataTransfer implementations.
+          if (tabs.length === 1) e.dataTransfer.setData(LONE_MIME, t.id);
         }}
         onDragEnter={(e) => {
           // File drag from a FileBrowser → spring-load this tab after a hover.
@@ -400,11 +453,40 @@ export function TabBar({
 
   return (
     <div
-      className="tabbar"
+      className={paneKey === null ? 'tabbar' : 'tabbar panestrip'}
+      // The pane area's own drop handling is capture-phase on `.content` and
+      // bails on this attribute, so a drop aimed at a strip beats the edge
+      // quarter underneath it (KAN-56).
+      data-panestrip={paneKey ?? undefined}
       ref={stripRef}
+      // Grabbing the strip's BACKGROUND moves the whole pane — the title-bar
+      // idiom this feature emulates. The strip is chrome over neither xterm nor
+      // file list, so there is nothing here to steal a selection from.
+      //
+      // "Background" is `target === currentTarget`, NOT a list of things to
+      // exclude. Everything this strip renders is a descendant — the tabs, the
+      // group wrappers, the `+`, and the CONTEXT MENU, which is what an
+      // exclusion list gets wrong: an unlisted `<li>` armed the grab, and the
+      // grab's pointer capture then retargeted the pointerup, so the menu item's
+      // `click` never fired and the menu could not close. An identity test
+      // cannot acquire a new hole when this strip grows a new child.
+      onPointerDown={(e) => {
+        if (!onPaneGrab || e.button !== 0 || e.target !== e.currentTarget) return;
+        onPaneGrab(e);
+      }}
       onDragOver={(e) => {
         const d = dndRef.current;
-        if (!d || !(e.dataTransfer.types.includes(TAB_MIME) || e.dataTransfer.types.includes(GROUP_MIME))) return;
+        if (!(e.dataTransfer.types.includes(TAB_MIME) || e.dataTransfer.types.includes(GROUP_MIME))) return;
+        // No local drag in flight but a tab is being dragged: it belongs to
+        // ANOTHER pane's strip, and dropping it here joins this pane's set.
+        // `getData` is blocked during dragover, so "is it ours?" is answered by
+        // whether WE started the drag — which is exactly what `dndRef` says.
+        if (!d) {
+          if (!onAdopt) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          return;
+        }
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         const at = insertAt(e.clientX, d.ids);
@@ -417,7 +499,13 @@ export function TabBar({
         // Unconditional: a FILE dropped on a tab lands here too, and its
         // spring-load timer must not survive the drop that ended the hover.
         clearSpring();
-        if (!d) return;
+        if (!d) {
+          const id = onAdopt && e.dataTransfer.getData(TAB_MIME);
+          if (!id) return;
+          e.preventDefault();
+          onAdopt!(id, adoptInsertAt(e.clientX));
+          return;
+        }
         e.preventDefault();
         endDrag();
         if (at === null) return;
@@ -495,27 +583,26 @@ export function TabBar({
 
       {menu && (() => {
         const t = tabs.find((x) => x.id === menu.id);
-        const hasPane = splitActions.placed.includes(menu.id);
-        // Exactly one of these two is ever offered, because "does this tab have
-        // a pane" is the whole state machine: a tab with no pane can be split
-        // into one, a tab with a pane can lose it. Splitting a tab that is
-        // already on screen would just be a move, and closing the only pane
-        // there is is what `layout: null` already means.
+        // Splitting MOVES this tab into a pane of its own, so it needs a tab to
+        // leave behind: a lone tab would empty the pane being cut and the model
+        // refuses it. "Close pane" needs a second pane to merge into. Both are
+        // read off this strip alone, which is the whole point of a pane owning
+        // its tabs.
         //
-        // Empty for the common case — the active tab with no split up
-        // (`hasPane && !split`, "close pane" makes no sense with nothing to
-        // close). Its leading separator rides along with it: spread in below
-        // ONLY when there is something to separate, or an empty array between
-        // two unconditional separators renders a double rule (ContextMenu does
-        // not collapse runs of them) every time that common case hits.
-        const splitItems = hasPane
-          ? splitActions.split
-            ? [{ label: 'Close pane', onClick: () => splitActions.onClosePane(menu.id) }]
-            : []
-          : [
-            { label: 'Split right', onClick: () => splitActions.onSplit(menu.id, 'col' as const) },
-            { label: 'Split down', onClick: () => splitActions.onSplit(menu.id, 'row' as const) },
-          ];
+        // Empty for the common case — a single tab, no split — and its leading
+        // separator rides along with it: spread in below ONLY when there is
+        // something to separate, or an empty array between two unconditional
+        // separators renders a double rule (ContextMenu does not collapse runs
+        // of them).
+        const splitItems = [
+          ...(tabs.length >= 2 ? [
+            { label: 'Split right', onClick: () => splitActions.onSplit(menu.id, 'right' as const) },
+            { label: 'Split down', onClick: () => splitActions.onSplit(menu.id, 'bottom' as const) },
+          ] : []),
+          ...(splitActions.split && paneKey !== null
+            ? [{ label: 'Close pane', onClick: () => splitActions.onClosePane(paneKey) }]
+            : []),
+        ];
         return (
           <ContextMenu
             x={menu.x}
