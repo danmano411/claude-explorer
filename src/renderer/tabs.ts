@@ -1,6 +1,6 @@
 import { winBasename, winDirname } from '../shared/pathutil'
 import { addToGroup } from '../shared/groups'
-import type { PersistedTab, TabView } from '../shared/types'
+import type { ControlTab, PersistedTab, PtyStatus, TabView } from '../shared/types'
 
 export interface Tab {
   id: string
@@ -41,6 +41,26 @@ export function toPersisted(t: Tab): PersistedTab {
     resumeSessionId: t.sessionId,
     filePath: t.filePath,
     viewerMode: t.viewerMode,
+  }
+}
+
+/**
+ * One `listTabs` row (KAN-39). A projection beside `toPersisted`, not a second
+ * tab model: `groupId`/`pinned` are dropped on purpose — the control channel
+ * does not speak M5's grouping model — and `status` is joined in from
+ * `usePtyStatus()`'s map, which is keyed by **ptyId**, not by tab id. A tab
+ * with no process (files, viewer) therefore reports no status at all, and
+ * neither does a terminal whose pty has not emitted yet.
+ */
+export function toControlTab(t: Tab, status: ReadonlyMap<string, PtyStatus>): ControlTab {
+  return {
+    id: t.id,
+    ptyId: t.ptyId,
+    view: t.view,
+    cwd: t.cwd,
+    title: t.title,
+    terminalKind: t.terminalKind,
+    status: t.ptyId ? status.get(t.ptyId) : undefined,
   }
 }
 

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
-import type { SearchHit, SearchDone, TrashWarn } from '../shared/types';
+import type { SearchHit, SearchDone, TrashWarn, ControlRequest } from '../shared/types';
 
 const api: Api = {
   fsList: (p) => ipcRenderer.invoke(CH.fsList, p),
@@ -75,6 +75,13 @@ const api: Api = {
   // --- M5 workspace ---
   workspaceGet: () => ipcRenderer.invoke(CH.workspaceGet),
   workspaceSet: (w) => ipcRenderer.invoke(CH.workspaceSet, w),
+  // --- KAN-39 control channel ---
+  onControlRequest: (cb) => {
+    const h = (_e: unknown, req: ControlRequest) => cb(req);
+    ipcRenderer.on(CH.controlRequest, h);
+    return () => ipcRenderer.off(CH.controlRequest, h);
+  },
+  controlReply: (reply) => ipcRenderer.send(CH.controlReply, reply),
 };
 
 contextBridge.exposeInMainWorld('api', api);

@@ -8,6 +8,3 @@ CLAUDE.md
 .env
 .gstack/
 test/harness/*.png
-
-# Tycho's machine-local state (tally, heartbeat, turn record).
-.tycho/

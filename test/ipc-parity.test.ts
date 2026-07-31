@@ -78,6 +78,7 @@ import { registerFileReadHandlers } from '../src/main/fileread.handlers'
 import { registerGitHandlers } from '../src/main/git.handlers'
 import { registerSearchHandlers } from '../src/main/search.handlers'
 import { registerWorkspaceHandlers } from '../src/main/workspace.handlers'
+import { registerControlHandlers } from '../src/main/control.handlers'
 
 // Side-effect import: runs contextBridge.exposeInMainWorld('api', api) at
 // module load, which the mock above captures into h.exposedApi.
@@ -97,6 +98,7 @@ registerFileReadHandlers()
 registerGitHandlers()
 registerSearchHandlers(() => null)
 registerWorkspaceHandlers()
+registerControlHandlers(() => null)
 
 // ---------------------------------------------------------------------------
 // CH <-> Api parity via text (Api is erased at runtime — see header comment).
@@ -123,6 +125,9 @@ const EVENT_CHANNELS = new Set<string>([
   CH.menuCommand, // main -> renderer: File/Settings menu clicks
   CH.menuSession, // main -> renderer: native File > Open Recent rows (KAN-55)
   CH.trashWarn, // main -> renderer: a flush couldn't reach the Recycle Bin (KAN-32)
+  CH.controlRequest, // main -> renderer: control-channel request (KAN-39)
+  // NOT CH.controlReply: that half travels renderer -> main, so it has a real
+  // ipcMain.on listener (control.handlers.ts) and must be checked like one.
 ])
 
 function apiNameFor(key: string, value: string): string {
