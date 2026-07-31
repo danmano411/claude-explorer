@@ -53,10 +53,14 @@ const check = (name, pass, detail = '') => {
  * it to die. Resolves the exit code, or null if it was still alive after 6 s —
  * which is what "it became a second app instead of forwarding" looks like.
  */
-function secondInstance(...args) {
-  const child = spawn(ELECTRON, [`--user-data-dir=${PROFILE}`, ENTRY, ...args], {
+function fireSecondInstance(...args) {
+  return spawn(ELECTRON, [`--user-data-dir=${PROFILE}`, ENTRY, ...args], {
     cwd: ROOT, stdio: 'ignore',
   });
+}
+
+function secondInstance(...args) {
+  const child = fireSecondInstance(...args);
   return new Promise((resolve) => {
     const t = setTimeout(() => { child.kill(); resolve(null); }, 6_000);
     child.once('exit', (code) => { clearTimeout(t); resolve(code); });
@@ -162,6 +166,75 @@ console.log(`\ninstance 1 — cold start with --open ${ROOT}`);
   const afterBad = (await titles(win)).length;
   check('an unreachable path opens no tab and still exits 0',
     badCode === 0 && afterBad === beforeBad, `exit ${badCode}, ${beforeBad} -> ${afterBad} tabs`);
+
+  // 6. KAN-65 — the DoS. `--open \\10.255.255.n\s` makes the app canonicalize
+  //    AND stat a path whose SMB host never answers: ~21 s per syscall (21,056
+  //    ms measured), negative-cached per host so a different n stalls fresh
+  //    every time. Spelt synchronously in main that was ~42 s of pinned process
+  //    per launch — no IPC, no pty:data forwarding, no menu, no paint — from an
+  //    unauthenticated one-line loop, because anyone who can start a process as
+  //    this user can send that.
+  //
+  //    The probe is a REAL filesystem round-trip — fs:list, i.e. a readdir plus
+  //    a stat per row, in main — and NOT an event-loop ping. That distinction is
+  //    the whole reason the fix serialises as well as awaits: `await` moves the
+  //    stall off the event loop but not off libuv's four-thread pool, so timers
+  //    keep firing and a ping reports a perfectly healthy app while every fs
+  //    call in it is parked for 20 s.
+  //
+  //    Timed HERE, not inside the renderer with performance.now(). Playwright
+  //    reaches the page through the browser process's CDP endpoint, so a frozen
+  //    main blocks the evaluate itself: the in-page clock never starts and
+  //    honestly reports 20 ms for a call the harness waited 20.8 SECONDS for.
+  //    That spelling passed against the frozen build. Wall clock around the
+  //    whole round trip is the only number that cannot be fooled that way, and
+  //    the race is what stops a truly wedged main from hanging the harness (the
+  //    evaluate is left to settle on its own — hence the bare catch).
+  const probe = async () => {
+    const t = Date.now();
+    const p = win.evaluate((dir) => window.api.fsList(dir).then(() => true, () => true), ROOT);
+    p.catch(() => {});
+    const ok = await Promise.race([p, new Promise((r) => setTimeout(() => r(false), 40_000))]);
+    return [Date.now() - t, ok === true];
+  };
+
+  const [idleMs] = await probe();
+  // Four, not one: four is what it takes to hold every libuv worker, and it is
+  // one line of shell. Distinct hosts because Windows negative-caches per host
+  // — measured here, realpathSync.native on a cold \\10.255.255.n\s is 21,033
+  // ms and on a warm one is 0 ms, so reusing a host would make the flood free
+  // after the first launch.
+  const floodAt = Date.now();
+  const flood = [21, 22, 23, 24].map((n) =>
+    fireSecondInstance('--open', `\\\\10.255.255.${n}\\s`));
+  // A child exits only after requestSingleInstanceLock has handed its payload to
+  // the primary's message loop, so "it exited 0" is the witness that main really
+  // was asked to resolve a dead host — without it a probe that merely ran before
+  // the children got going would pass against the very build this exists to
+  // fail. Against the frozen build they cannot exit (their SendMessage is
+  // waiting on a message loop that is inside realpathSync), which is the same
+  // symptom seen from the other end.
+  const exits = Promise.all(flood.map((c) => new Promise((r) => {
+    const t = setTimeout(() => r(false), 45_000);
+    c.once('exit', (code) => { clearTimeout(t); r(code === 0); });
+  })));
+
+  // Sampled across the whole resolution window rather than once: the launches
+  // are handled one at a time, and the worst sample is the one that counts.
+  let floodMs = 0;
+  let floodOk = true;
+  while (Date.now() - floodAt < 30_000) {
+    const [ms, ok] = await probe();
+    floodMs = Math.max(floodMs, ms);
+    if (!ok) { floodOk = false; break; }
+    await win.waitForTimeout(250);
+  }
+  const forwarded = (await exits).filter(Boolean).length;
+  check('the window still serves a real filesystem request while four unreachable UNC --opens resolve',
+    floodOk && floodMs < 3_000 && forwarded === flood.length,
+    `folder listing: ${idleMs}ms idle -> worst ${floodMs}ms under the flood`
+      + `${floodOk ? '' : ' (never completed)'}; ${forwarded}/${flood.length} launches forwarded and exited 0`);
+  for (const c of flood) c.kill();
 
   beforeRestart = await titles(win);
   await win.waitForTimeout(1_500); // the debounced workspace save is 400ms
