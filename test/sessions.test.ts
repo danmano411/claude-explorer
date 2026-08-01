@@ -259,7 +259,19 @@ describe('listSessions', () => {
   // Deliberately LAST in this describe: it leaves the module-level memo at its
   // 2000-key ceiling, and it counts the entries evicted, so tests added after
   // it would be measuring a map this one already filled.
-  it('overflowing the memo evicts the oldest keys, it does not drop the whole map', async () => {
+  //
+  // KAN-88: explicit 30 s timeout, not the 5 s default. This test writes 2001
+  // real files, and CLAUDE.md already listed it as a known load-sensitive flake
+  // locally (it goes red under a concurrent build in another worktree). On a
+  // GitHub runner that is not an occasional flake, it is the normal case — the
+  // first CI run timed out here at exactly 5000 ms.
+  //
+  // The timeout is not what this test asserts. It measures WHICH keys survive
+  // eviction, and that assertion is untouched: a slower disk changes how long
+  // 2001 writes take and nothing about which entries the memo keeps. Making a
+  // required status check flaky is worse than not having one, because a red
+  // that means nothing trains people to ignore a red that does.
+  it('overflowing the memo evicts the oldest keys, it does not drop the whole map', { timeout: 30_000 }, async () => {
     const dir = projectDir();
     // One more file than the memo holds, so the last insert must evict. Written
     // flat (no per-file utimes/timestamp spread) because nothing here depends on
