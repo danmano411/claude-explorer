@@ -129,6 +129,16 @@ export const CH = {
   // main/index.ts), so the click asks main to do that one thing and switches
   // the tab itself, renderer-side, with no round trip needed for that part.
   notifyFocusWindow: 'notify:focus-window',
+  // --- KAN-78: the desktop/taskbar unread indicator. Renderer -> main, one-way,
+  // ONE BOOLEAN — "does anything need attention right now" — never the
+  // ClaudeState map itself and never a transition history. The renderer already
+  // owns every input the decision needs (claudeState, which tab is visible,
+  // whether the window has focus — see src/renderer/attention.ts's
+  // `attentionNeeded`), so main is not handed the state map to re-derive the
+  // same answer a second way; it is handed the answer. main's only job is the
+  // OS call (src/main/badge.ts) — Windows setOverlayIcon/flashFrame today,
+  // macOS/Linux behind their own platform guard once M9 exists.
+  setAttention: 'app:attention',
   // --- KAN-89: "are these two paths on the same volume?", the one path
   // question the renderer cannot answer for itself. On Windows it is a string
   // compare of drive letters, but on POSIX it is an st_dev compare — and
@@ -264,6 +274,12 @@ export interface Api {
    *  un-minimizes/shows/focuses its one window; the renderer switches the tab
    *  itself with no reply to wait for. */
   notifyFocusWindow(): void
+  // --- KAN-78 desktop/taskbar unread indicator.
+  /** Fire-and-forget `send`, like ptyWrite/controlReply/spawnConfirmAnswer:
+   *  this IS the notification, not a request with an answer. Called by
+   *  App.tsx whenever `attentionNeeded()` flips — see the CH.setAttention
+   *  comment in ipc.ts for why main gets exactly this one boolean. */
+  setAttention(needsAttention: boolean): void
   // --- KAN-89 cross-platform volume identity.
   /** Same volume => a drop without Ctrl is a move; different volumes => a copy.
    *  Async because POSIX has to stat both paths (st_dev); on Windows main

@@ -81,6 +81,7 @@ import { registerWorkspaceHandlers } from '../src/main/workspace.handlers'
 import { registerControlHandlers } from '../src/main/control.handlers'
 import { registerSpawnConfirmHandlers } from '../src/main/spawnconfirm.handlers'
 import { registerNotifyHandlers } from '../src/main/notify.handlers'
+import { registerBadgeHandlers } from '../src/main/badge.handlers'
 
 // Side-effect import: runs contextBridge.exposeInMainWorld('api', api) at
 // module load, which the mock above captures into h.exposedApi.
@@ -103,6 +104,7 @@ registerWorkspaceHandlers()
 registerControlHandlers(() => null)
 registerSpawnConfirmHandlers(() => null, () => {})
 registerNotifyHandlers(() => null)
+registerBadgeHandlers(() => null)
 
 // ---------------------------------------------------------------------------
 // CH <-> Api parity via text (Api is erased at runtime — see header comment).

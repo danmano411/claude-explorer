@@ -107,6 +107,8 @@ const api: Api = {
   },
   // --- KAN-79 toast click ---
   notifyFocusWindow: () => ipcRenderer.send(CH.notifyFocusWindow),
+  // --- KAN-78 desktop/taskbar unread indicator ---
+  setAttention: (needsAttention) => ipcRenderer.send(CH.setAttention, needsAttention),
   // --- KAN-89 volume identity ---
   sameVolume: (a, b) => ipcRenderer.invoke(CH.sameVolume, a, b),
 };
