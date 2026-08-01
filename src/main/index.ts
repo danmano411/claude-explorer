@@ -19,6 +19,7 @@ import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
 import { registerControlHandlers } from './control.handlers'
 import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
+import { registerBadgeHandlers } from './badge.handlers'
 import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
 import { setMcpInjection, stripInheritedAppSecrets } from './pty'
 import { hookSettings } from './claudestate'
@@ -251,6 +252,15 @@ function createWindow(): void {
   // global; every one of them already guards with `?.` or `if (mainWindow)`,
   // which only works when null actually means null.
   mainWindow.on('closed', () => { mainWindow = null })
+  // KAN-78: `flashFrame(true)` (badge.ts, win32 branch) flashes the taskbar
+  // button CONTINUOUSLY until told to stop. This clear is deliberately
+  // independent of the renderer's own attention decision — that one only
+  // turns the PERSISTENT overlay off once the blocked tab is the one on
+  // screen (attentionNeeded() in attention.ts), but a flash exists purely to
+  // pull the user's focus back to the app at all, so regaining focus is
+  // reason enough to stop it regardless of which tab they land on. Guarded to
+  // win32 because that is the only branch that ever calls flashFrame.
+  mainWindow.on('focus', () => { if (process.platform === 'win32') mainWindow?.flashFrame(false) })
   // ponytail: this closes the throw, not the underlying hang — while the
   // primary is alive-but-windowless (mid-flushAll, or a throw before
   // createWindow()), the lock is still held and a new launch's
@@ -303,6 +313,10 @@ app.whenReady().then(async () => {
   // prompt in front of a human is neither. The answer function comes from mcp.ts
   // (which owns the guard) and is passed in, so the glue stays a leaf.
   registerSpawnConfirmHandlers(() => mainWindow, answerSpawnConfirm)
+  // KAN-78: the desktop/taskbar unread indicator. main gets one boolean per
+  // change from the renderer, never the ClaudeState map itself — see the
+  // CH.setAttention comment in ipc.ts.
+  registerBadgeHandlers(() => mainWindow)
   // Async since KAN-55 — File > Open Recent now lists each recent folder's
   // Claude sessions, and a native menu template is built ahead of the click.
   // Not awaited: the window must not wait on a session-directory scan, and

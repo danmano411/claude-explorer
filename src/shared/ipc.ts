@@ -120,6 +120,16 @@ export const CH = {
   // folds this channel into a state map must fold pty:exit in as well, or a
   // finished session sits on its last hook state forever.
   claudeState: 'claude:state', // main -> renderer event
+  // --- KAN-78: the desktop/taskbar unread indicator. Renderer -> main, one-way,
+  // ONE BOOLEAN — "does anything need attention right now" — never the
+  // ClaudeState map itself and never a transition history. The renderer already
+  // owns every input the decision needs (claudeState, which tab is visible,
+  // whether the window has focus — see src/renderer/attention.ts's
+  // `attentionNeeded`), so main is not handed the state map to re-derive the
+  // same answer a second way; it is handed the answer. main's only job is the
+  // OS call (src/main/badge.ts) — Windows setOverlayIcon/flashFrame today,
+  // macOS/Linux behind their own platform guard once M9 exists.
+  setAttention: 'app:attention',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -243,4 +253,10 @@ export interface Api {
    *
    *  'stopped' never arrives here — see the CH.claudeState comment. */
   onClaudeState(cb: (ptyId: string, state: ClaudeState) => void): () => void
+  // --- KAN-78 desktop/taskbar unread indicator.
+  /** Fire-and-forget `send`, like ptyWrite/controlReply/spawnConfirmAnswer:
+   *  this IS the notification, not a request with an answer. Called by
+   *  App.tsx whenever `attentionNeeded()` flips — see the CH.setAttention
+   *  comment in ipc.ts for why main gets exactly this one boolean. */
+  setAttention(needsAttention: boolean): void
 }

@@ -105,6 +105,8 @@ const api: Api = {
     ipcRenderer.on(CH.claudeState, h);
     return () => ipcRenderer.off(CH.claudeState, h);
   },
+  // --- KAN-78 desktop/taskbar unread indicator ---
+  setAttention: (needsAttention) => ipcRenderer.send(CH.setAttention, needsAttention),
 };
 
 contextBridge.exposeInMainWorld('api', api);
