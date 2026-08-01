@@ -97,7 +97,22 @@ export interface Mods {
  * decided once, here.
  */
 export function isMac(): boolean {
-  return process.platform === 'darwin'
+  // MUST be guarded. This file is RENDERER code, and the renderer runs with
+  // `contextIsolation: true` / `nodeIntegration: false` — there is no `process`
+  // global there at all, so a bare `process.platform` is a ReferenceError, not
+  // an undefined read. `DEFAULT_SPACE_KEYBINDS` below calls this at module
+  // evaluation time, so that throw happened before React ever mounted and took
+  // the ENTIRE APP down: `#root` stayed empty and every harness timed out
+  // waiting for `.app`.
+  //
+  // `npm test` cannot catch this — vitest runs in node, where `process` exists.
+  // Only launching the real app does. Same shape, same reason, and the same
+  // fallback as `detectWindows()` in shared/pathutil.ts; keep the two in step.
+  if (typeof process !== 'undefined' && typeof process.platform === 'string') {
+    return process.platform === 'darwin'
+  }
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+  return /Macintosh|Mac OS X/i.test(ua)
 }
 
 /**

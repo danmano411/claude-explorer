@@ -45,7 +45,29 @@ fs.rmSync(TMP_PROFILE, { recursive: true, force: true });
  */
 export async function launchApp({
   timeout = 30_000, userDataDir = TMP_PROFILE, realProfile = false, extraArgs = [],
+  notifSetup = false,
 } = {}) {
+  // KAN-79's first-run card is MODAL, and every harness runs on a throwaway
+  // profile — so without this, EVERY harness is a first run, the card opens, and
+  // its `.modal-backdrop` intercepts every click in the suite. All 24 broke at
+  // once when that ticket landed.
+  //
+  // Seeded rather than dismissed after the fact: dismissing races the card's
+  // appearance, and a harness that is not about notifications should not have to
+  // know the card exists. `notifSetupSeen` is the app's own "already asked" key
+  // (deliberately absent from DEFAULTS so it cannot be manufactured), so writing
+  // it is exactly what a returning user's profile looks like.
+  //
+  // Pass `notifSetup: true` to get the card — that is the opt-in for a test that
+  // wants to assert on it.
+  if (!realProfile && !notifSetup) {
+    fs.mkdirSync(userDataDir, { recursive: true });
+    const f = path.join(userDataDir, 'settings.json');
+    const cur = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : {};
+    if (cur.notifSetupSeen !== true) {
+      fs.writeFileSync(f, JSON.stringify({ ...cur, notifSetupSeen: true }, null, 2));
+    }
+  }
   // A separate boolean rather than `userDataDir: null` on purpose: a
   // null/undefined distinction is the kind of subtlety that silently
   // reintroduces the bug this default exists to prevent.
