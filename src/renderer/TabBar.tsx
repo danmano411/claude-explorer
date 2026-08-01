@@ -50,7 +50,9 @@ const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)'
 
 // GROUP_COLORS is the palette; these are just human labels for the recolor
 // menu, positional. A colour the list doesn't name still gets an entry.
-const COLOR_NAMES = ['Clay', 'Sage', 'Sand'];
+// Exported: SpaceMenu.tsx reuses it verbatim for the space color menu
+// (KAN-84) rather than defining a second set of names for the same palette.
+export const COLOR_NAMES = ['Clay', 'Sage', 'Sand'];
 
 /** Everything the strip can do to a tab folder. One object rather than eight
  *  more flat props — the seam is frozen here for the rest of M5. */

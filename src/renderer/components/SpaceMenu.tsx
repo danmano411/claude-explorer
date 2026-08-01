@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Space } from '../../shared/types'
+import type { Space, SpaceColor } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
 import { deleteSpaceReason, type CloseRisk } from '../closeguard'
 import { ConfirmDialog } from './ConfirmDialog'
-import { GROUP_MIME, TAB_MIME } from '../TabBar'
+import { SpaceColorPicker } from './SpaceColorPicker'
+import { GROUP_MIME, TAB_MIME, COLOR_NAMES } from '../TabBar'
+import { GROUP_COLORS } from '../../shared/groups'
 // Styles live in index.css (the .spacemenu block, next to .recentmenu), matching
 // every other component here — the separate stylesheet only existed because
 // index.css was owned by a parallel M5 ticket during the fan-out.
@@ -53,6 +55,8 @@ export interface SpaceMenuProps {
   /** Pin / unpin a space (KAN-57). Gates exactly one operation — Delete — and
    *  says nothing at all about the space's TABS. */
   onTogglePin: (id: string, pinned: boolean) => void
+  /** Set or clear (`undefined`) a space's ambient wash color (KAN-84/85). */
+  onSetColor: (id: string, color: SpaceColor | undefined) => void
   /** What the delete confirm has to say about a space's tabs (KAN-57): the
    *  live-work risk of each, and how many are PINNED — a space delete closes
    *  those too, and the sentence has to admit it. App owns the join because
@@ -72,7 +76,7 @@ export interface SpaceMenuProps {
 const movable = (t: DataTransfer) => t.types.includes(TAB_MIME) || t.types.includes(GROUP_MIME)
 
 export function SpaceMenu({
-  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, tabsOf,
+  spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, onSetColor, tabsOf,
   onMoveTab, onMoveGroup,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
@@ -81,6 +85,11 @@ export function SpaceMenu({
   const [adding, setAdding] = useState(false)
   const [addDraft, setAddDraft] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // KAN-85: the space whose custom-color dialog is open, or null. Kept as an
+  // id, not a boolean, so `active` (which can change under an open dropdown
+  // exactly like `confirmDeleteId` above) is re-resolved on every render
+  // rather than captured stale at the moment "Custom…" was clicked.
+  const [customColorId, setCustomColorId] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const itemRefs = useRef<(HTMLElement | null)[]>([])
   itemRefs.current = []
@@ -323,6 +332,38 @@ export function SpaceMenu({
                 </button>
               </li>
             )}
+            {/* KAN-84/85: the existing ContextMenu swatch pattern (TabBar.tsx's
+                group recolor menu / ContextMenu.tsx), reused verbatim as a hover
+                submenu nested in THIS dropdown rather than a second floating
+                menu — a second `.ctx-backdrop` here would fight this dropdown's
+                own z-index for no benefit. Not registered with `registerItem`
+                (unlike every other row): like TabBar's own ContextMenu
+                submenus, this is a hover-only affordance with no arrow-key
+                traversal, so it must not eat a slot in the ArrowUp/ArrowDown
+                cycle with nothing for Enter to do. */}
+            {active && (
+              <li className="ctx-item ctx-sub">
+                Color
+                <span className="ctx-caret">▸</span>
+                <ul className="ctx-menu">
+                  {GROUP_COLORS.map((c, i) => (
+                    <li key={c} className="ctx-item" onClick={() => { onSetColor(active.id, c); close() }}>
+                      <span className="ctx-swatch" style={{ background: c }} />
+                      {COLOR_NAMES[i] ?? `Color ${i + 1}`}
+                    </li>
+                  ))}
+                  <li className="ctx-sep" />
+                  <li className="ctx-item" onClick={() => { setCustomColorId(active.id); close() }}>
+                    Custom…
+                  </li>
+                  {active.color !== undefined && (
+                    <li className="ctx-item" onClick={() => { onSetColor(active.id, undefined); close() }}>
+                      No color
+                    </li>
+                  )}
+                </ul>
+              </li>
+            )}
             {active && canDeleteSpace(uniqueSpaces.length, active.pinned) && (
               <li>
                 <button
@@ -362,6 +403,22 @@ export function SpaceMenu({
               },
             }}
             onClose={() => setConfirmDeleteId(null)}
+          />
+        )
+      })()}
+
+      {/* KAN-85. Same "resolve the target fresh on every render" discipline as
+          the delete confirm above: a space renamed or deleted while this is
+          open is reflected (or, if it's gone, the dialog simply stops
+          rendering) rather than acting on a stale snapshot. */}
+      {customColorId && (() => {
+        const target = uniqueSpaces.find((s) => s.id === customColorId)
+        if (!target) return null
+        return (
+          <SpaceColorPicker
+            initial={typeof target.color === 'object' ? target.color : undefined}
+            onApply={(color) => { onSetColor(target.id, color); setCustomColorId(null) }}
+            onCancel={() => setCustomColorId(null)}
           />
         )
       })()}

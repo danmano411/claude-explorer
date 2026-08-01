@@ -94,6 +94,7 @@
  */
 
 import { reorder } from '../shared/tabreorder'
+import type { SpaceColor } from '../shared/types'
 
 /**
  * The minimal shape this module needs from a space — the `groups.ts` `Grouped`
@@ -110,6 +111,8 @@ export type Spaced = {
   activeTabId?: string
   /** KAN-57. Absent means unpinned; see `Space.pinned` in ../shared/types.ts. */
   pinned?: boolean
+  /** KAN-84/85. Absent means uncolored; see `Space.color` in ../shared/types.ts. */
+  color?: SpaceColor
 }
 
 /**
@@ -193,6 +196,28 @@ export function setSpacePinned<T extends Spaced>(spaces: readonly T[], spaceId: 
     return replaceAt(spaces, i, rest as T)
   }
   return replaceAt(spaces, i, { ...spaces[i], pinned: true })
+}
+
+/**
+ * Sets or clears a space's ambient color (KAN-84/85). `undefined` clears it —
+ * same delete-the-key convention as unpinning above, so an uncolored space
+ * persists identically whether it was never colored or had its color cleared,
+ * and neither writes a key a pre-0.10.0 reader would choke on.
+ *
+ * No-op (same reference) for an unknown spaceId.
+ */
+export function setSpaceColor<T extends Spaced>(
+  spaces: readonly T[],
+  spaceId: string,
+  color: SpaceColor | undefined,
+): T[] {
+  const i = spaces.findIndex((s) => s.id === spaceId)
+  if (i === -1) return spaces as T[]
+  if (color === undefined) {
+    const { color: _drop, ...rest } = spaces[i]
+    return replaceAt(spaces, i, rest as T)
+  }
+  return replaceAt(spaces, i, { ...spaces[i], color })
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   newFilesTab, newTerminalTab, toPersisted, toControlTab, fromPersisted, needsSpawn,
   closeTabList, openViewerTabList, type Tab,
@@ -20,8 +20,9 @@ import {
 } from '../shared/groups';
 import {
   addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
-  reorderInSpace, setActiveTab, setSpacePinned, switchSpace,
+  reorderInSpace, setActiveTab, setSpaceColor, setSpacePinned, switchSpace,
 } from './spaces';
+import { spaceColorStyle } from '../shared/spacecolor';
 import { closeReason, closeRisk, moveTabReason, type CloseRisk } from './closeguard';
 import type { ConfirmRequest } from './opresult';
 import type {
@@ -1941,6 +1942,7 @@ export function App() {
       onRename={(id, name) => setSpaces((ss) => renameSpace(ss, id, name))}
       onDelete={onDeleteSpace}
       onTogglePin={(id, pinned) => setSpaces((ss) => setSpacePinned(ss, id, pinned))}
+      onSetColor={(id, color) => setSpaces((ss) => setSpaceColor(ss, id, color))}
       // KAN-66: dropping a tab / a group on a space row is the same operation
       // the strip's "Move Tab to ▸" is, down to the same function — so the
       // confirm, the source-pane cleanup and the focus re-pick cannot drift
@@ -1961,7 +1963,20 @@ export function App() {
   );
 
   return (
-    <div className="app">
+    <div
+      // KAN-84/85: the whole ambient wash rides on this ONE class + these TWO
+      // inline custom properties. `app-colored` is applied only when the
+      // active space actually has a color, so an uncolored space's chrome
+      // runs no color-mix() at all (index.css) — byte-identical to before
+      // this feature, not "tinted 0%". CSS inheritance carries
+      // `--space-color-light`/`-dark` down to every descendant, including the
+      // FileBrowser `.navbar` nested many levels below `.content` — which is
+      // what lets index.css scope the wash to the chrome band (`.tabbar`,
+      // `.navbar`) with a plain descendant selector, no prop-drilling through
+      // FileBrowser/Terminal/Viewer needed.
+      className={activeSpace?.color !== undefined ? 'app app-colored' : 'app'}
+      style={spaceColorStyle(activeSpace?.color) as CSSProperties}
+    >
       {/* With a layout up the top bar keeps its CHROME and loses its tabs: the
           same element, the same height, the same bottom rule, so nothing jumps
           — the tab list and the `+` have moved into the per-pane strips, which

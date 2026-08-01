@@ -8,6 +8,7 @@ import type { GridCell, GridLayout, PersistedTab, Space, Workspace } from '../sh
 // deliberate: a second groupId repair path here would be a second thing to keep
 // in step with the TabBar's idea of a valid group.
 import { normalize } from '../shared/groups'
+import { sanitizeSpaceColor } from '../shared/spacecolor'
 
 const file = () => join(app.getPath('userData'), 'workspace.json')
 
@@ -285,6 +286,9 @@ export function sanitize(raw: unknown): Workspace {
       // that can explain it. `undefined` is dropped by JSON.stringify, so a
       // pre-KAN-57 file round-trips with no new key (KAN-57).
       pinned: s.pinned === true ? true : undefined,
+      // Same coercion discipline, same reason: a hand-edited color must not
+      // ride the spread above straight into an inline style unvalidated.
+      color: sanitizeSpaceColor(s.color),
       layout,
     }
   })

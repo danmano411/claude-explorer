@@ -8,6 +8,7 @@ import {
   renameSpace,
   reorderInSpace,
   setActiveTab,
+  setSpaceColor,
   setSpacePinned,
   switchSpace,
 } from '../src/renderer/spaces'
@@ -205,6 +206,33 @@ describe('setSpacePinned', () => {
   it('touches only the named space', () => {
     const spaces = [space('a'), space('b')]
     const result = setSpacePinned(spaces, 'a', true)
+    expect(result[1]).toBe(spaces[1])
+  })
+})
+
+describe('setSpaceColor', () => {
+  it('sets a preset (a plain var() string)', () => {
+    const result = setSpaceColor([space('a')], 'a', 'var(--clay)')
+    expect(result[0].color).toBe('var(--clay)')
+  })
+  it('sets a custom light/dark pair', () => {
+    const result = setSpaceColor([space('a')], 'a', { light: '#C15F3Cff', dark: '#D2795Aff' })
+    expect(result[0].color).toEqual({ light: '#C15F3Cff', dark: '#D2795Aff' })
+  })
+  it('is a no-op (same reference) for an unknown spaceId', () => {
+    const spaces = [space('a')]
+    expect(setSpaceColor(spaces, 'ghost', 'var(--clay)')).toBe(spaces)
+  })
+  // Same delete-the-key convention as unpinning: an uncolored space and one
+  // whose color was cleared must persist identically.
+  it('clearing (undefined) deletes the key rather than writing it', () => {
+    const colored = setSpaceColor([space('a')], 'a', 'var(--clay)')
+    const cleared = setSpaceColor(colored, 'a', undefined)
+    expect('color' in cleared[0]).toBe(false)
+  })
+  it('touches only the named space', () => {
+    const spaces = [space('a'), space('b')]
+    const result = setSpaceColor(spaces, 'a', 'var(--clay)')
     expect(result[1]).toBe(spaces[1])
   })
 })
