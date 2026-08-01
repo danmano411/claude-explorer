@@ -83,11 +83,21 @@ jobs:
   # malicious software" and must right-click → Open (or allow it under System
   # Settings → Privacy & Security). README's Platform support section says so.
   #
-  # electron-builder still ad-hoc signs the arm64 bundle (`codesign -s -`)
-  # because an Apple Silicon binary with NO signature at all cannot execute.
-  # That is automatic and needs no config — which is why `mac.identity` is
-  # left unset in package.json rather than set to null: null means "skip
-  # signing entirely" and would produce an arm64 app that refuses to launch.
+  # Nothing is signed at all. This leg's log says so verbatim: "skipped macOS
+  # application code signing ... 0 identities found". Ad-hoc signing
+  # (`mac.identity: "-"`) is deliberately NOT used as a consolation prize —
+  # it produces a signature with no Apple Team ID, so it buys nothing with
+  # Gatekeeper, and electron-builder defaults `hardenedRuntime` to true once
+  # signing is on, which without `com.apple.security.cs.allow-jit` and
+  # `allow-unsigned-executable-memory` entitlements kills Electron's V8 JIT.
+  # KAN-92 records that trade-off; changing it means adding an entitlements
+  # plist, not flipping a flag.
+  #
+  # UNVERIFIED, and the honest caveat on this whole leg: nobody has launched
+  # the DMG on a Mac. On Apple Silicon an unsigned bundle sometimes reports
+  # "is damaged and can't be opened" rather than the normal Gatekeeper
+  # prompt; `xattr -cr` on the installed app clears it, and the README says
+  # so. Confirming which of the two a real Mac shows needs real hardware.
   #
   # Auto-update is disabled on macOS in src/main/updater.ts (Squirrel.Mac
   # verifies a Developer ID signature that does not exist), so this leg
@@ -111,10 +121,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `macho` is what `file(1)` calls the same architecture — the
+          # verify step below compares against it.
           - runner: macos-latest
             arch: arm64
+            macho: arm64
           - runner: macos-15-intel
             arch: x64
+            macho: x86_64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -133,6 +147,25 @@ jobs:
 
       - name: Package (DMG)
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+
+      # KAN-92 acceptance criterion 3: search must find the darwin ripgrep in
+      # the packaged app. This is the one behavioural criterion a runner can
+      # actually settle, and it is worth settling — `extraResources` points at
+      # @vscode/ripgrep-darwin-${arch}, a PER-ARCH optional dependency, so the
+      # failure mode is a package that builds clean and then degrades every
+      # search to filename-only forever (resolveRg() returns null by design
+      # rather than throwing). Running `rg --version` is the assertion: a
+      # wrong-architecture binary copies in perfectly and only fails to execute.
+      - name: Verify packaged resources
+        run: |
+          set -euo pipefail
+          app=$(ls -d dist/mac*/'Claude Explorer.app')
+          echo "bundle: $app"
+          file "$app/Contents/MacOS/Claude Explorer"
+          file "$app/Contents/MacOS/Claude Explorer" | grep -q '${{ matrix.macho }}'
+          file "$app/Contents/Resources/rg"
+          file "$app/Contents/Resources/rg" | grep -q '${{ matrix.macho }}'
+          "$app/Contents/Resources/rg" --version
 
       # Only the DMG. latest-mac.yml is generated but deliberately NOT
       # uploaded: publishing an update feed for a platform whose updater is
@@ -180,6 +213,29 @@ jobs:
       # node-gyp just produced above loads in Electron unchanged.
       - name: Package (AppImage)
         run: npx electron-builder --linux --publish never
+
+      # KAN-93 acceptance criteria 1 and 3, checked against the artifact that
+      # actually ships rather than against dist/linux-unpacked. --appimage-extract
+      # is the AppImage runtime's own flag and needs no FUSE, so it works on a
+      # headless runner. Running `rg --version` is the real assertion: a
+      # wrong-platform binary copies in fine and only fails to execute.
+      - name: Verify packaged AppImage
+        run: |
+          set -euo pipefail
+          appimage=$(ls dist/Claude-Explorer-*.AppImage)
+          echo "artifact: $appimage"
+          "$appimage" --appimage-extract >/dev/null
+          echo '--- generated .desktop entry ---'
+          cat squashfs-root/*.desktop
+          echo '--- executable name (this is what Chromium reports as WM_CLASS) ---'
+          ls squashfs-root/claude-explorer
+          file squashfs-root/resources/rg
+          file squashfs-root/resources/rg | grep -q 'ELF 64-bit'
+          squashfs-root/resources/rg --version
+          # StartupWMClass only does its job if it matches the executable's own
+          # name; asserting that beats trusting the string in package.json.
+          grep -qx 'StartupWMClass=claude-explorer' squashfs-root/*.desktop
+          grep -qx 'Categories=Development;' squashfs-root/*.desktop
 
       # latest-linux.yml IS uploaded — unlike macOS, AppImage auto-update
       # works, so electron-updater needs its feed in the release.

@@ -12,10 +12,9 @@ export function initUpdater(): void {
   // Program membership ($99/yr), so there is no `Developer ID Application`
   // certificate and no notarization. electron-updater's macOS path hands the
   // download to Squirrel.Mac, which verifies the update's code signature
-  // against the running app's before swapping it in, and with no real
-  // signature that check cannot pass. The ad-hoc signature electron-builder
-  // applies (`codesign -s -`, needed only so the arm64 binary can execute at
-  // all) carries no Team ID and does not satisfy it either.
+  // against the running app's before swapping it in, and there is no
+  // signature for it to verify — the CI log reads
+  // "skipped macOS application code signing ... 0 identities found".
   //
   // Left enabled this would download ~100 MB on every launch and then fail at
   // install, which reads to a user as a broken app rather than as an app

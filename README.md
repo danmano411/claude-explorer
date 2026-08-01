@@ -94,7 +94,7 @@ Every decision is made in the main process, not the UI, so no call site can forg
 | Windows | `Claude-Explorer-Setup-x.y.z.exe` | Yes |
 | macOS (Apple Silicon) | `Claude-Explorer-x.y.z-arm64.dmg` | **No** — see below |
 | macOS (Intel) | `Claude-Explorer-x.y.z-x64.dmg` | **No** — see below |
-| Linux (x64) | `Claude-Explorer-x.y.z-x64.AppImage` | Yes |
+| Linux (x64) | `Claude-Explorer-x.y.z-x86_64.AppImage` | Yes |
 
 ### macOS: the app is unsigned, and Gatekeeper will say so
 
@@ -108,6 +108,10 @@ To open it anyway:
 
 1. **Right-click** (or Control-click) the app in Applications and choose **Open**, then **Open** again in the dialog. Double-clicking will *not* offer this — the right-click menu is what unlocks it.
 2. On Apple Silicon you may instead need **System Settings → Privacy & Security**, scroll to the message about Claude Explorer, and click **Open Anyway**.
+3. If macOS instead insists the app **"is damaged and can't be opened"**, that is the quarantine flag rather than actual damage. Clear it:
+   ```bash
+   xattr -cr "/Applications/Claude Explorer.app"
+   ```
 
 You only have to do this once per installed version.
 
