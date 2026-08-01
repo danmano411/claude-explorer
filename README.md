@@ -12,16 +12,6 @@
 
 ---
 
-## What it is, and why it exists
-
-If you live in Claude Code, you spend a surprising amount of your day `cd`-ing into a project and typing `claude`. Then doing it again in another terminal for another project. Then losing track of which window was which.
-
-Claude Explorer collapses that. It browses your filesystem like File Explorer does — rename, copy, move, delete, undo — but every folder row has an arrow that opens a Claude Code session in that directory, inside the app, in a tab.
-
-The interesting part is what happens once you have several. Sessions live in **spaces**: separate, named workspaces you switch between, each remembering its own tabs and layout. One space per project — and the app tells you when a session in a space you *aren't* looking at is waiting on you. That is the whole design goal: running several Claude sessions at once without any of them quietly stalling on a permission prompt you never saw.
-
-Editing stays in Claude. The file viewer is read-only on purpose — this app's job is to *supervise* the AI doing the editing (browse, launch, watch, review the diff), not to be a worse version of two tools you already have.
-
 ## Quickstart
 
 Requires [Claude Code](https://claude.com/claude-code) on your `PATH`. Claude Explorer launches your existing `claude` CLI; it does not bundle one.
@@ -39,6 +29,16 @@ npm install
 npm run package          # → dist/Claude Explorer Setup x.y.z.exe
 ```
 Then run the installer in `dist/`. For live development instead, `npm run dev`.
+
+## What it is, and why it exists
+
+If you live in Claude Code, you spend a surprising amount of your day `cd`-ing into a project and typing `claude`. Then doing it again in another terminal for another project. Then losing track of which window was which.
+
+Claude Explorer collapses that. It browses your filesystem like File Explorer does — rename, copy, move, delete, undo — but every folder row has an arrow that opens a Claude Code session in that directory, inside the app, in a tab.
+
+The interesting part is what happens once you have several. Sessions live in **spaces**: separate, named workspaces you switch between, each remembering its own tabs and layout. One space per project — and the app tells you when a session in a space you *aren't* looking at is waiting on you. That is the whole design goal: running several Claude sessions at once without any of them quietly stalling on a permission prompt you never saw.
+
+Editing stays in Claude. The file viewer is read-only on purpose — this app's job is to *supervise* the AI doing the editing (browse, launch, watch, review the diff), not to be a worse version of two tools you already have.
 
 ## Features
 
