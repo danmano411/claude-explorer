@@ -468,9 +468,18 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   await win.waitForTimeout(300);
   await openSpaceMenu(win);
   r = await rows();
-  check('unpinning returns the space to the unpinned run in its ORIGINAL relative position',
+  // RED-FIRST NOTE (`git checkout f4fd0ec -- src/`, rebuild, rerun): the four
+  // checks above this line (order, marker, accelerators, separator-appears)
+  // go red on unmodified main, where nothing sorts or draws `pinned` at all.
+  // The two below, and the "every space pinned" pair further down, pass on
+  // BOTH builds — labelled REGRESSION GUARD, same convention as paste.mjs —
+  // because "no separator" and "order preserved" are also true of a build
+  // that never inserts a separator or reorders anything in the first place.
+  // They still earn their place paired with the assertions above that DO
+  // distinguish the builds.
+  check('unpinning returns the space to the unpinned run in its ORIGINAL relative position  [REGRESSION GUARD]',
     r.names.join('|') === 'Space|Beta|Gamma', r.names.join(' | '));
-  check('and the separator is gone — no pinned spaces left, no stray line',
+  check('and the separator is gone — no pinned spaces left, no stray line  [REGRESSION GUARD]',
     r.seps === 0, String(r.seps));
   await win.keyboard.press('Escape');
 
@@ -483,9 +492,9 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   }
   await openSpaceMenu(win);
   r = await rows();
-  check('every space pinned: still no stray separator',
+  check('every space pinned: still no stray separator  [REGRESSION GUARD]',
     r.seps === 0, String(r.seps));
-  check('every space pinned: order preserved, nothing scrambled',
+  check('every space pinned: order preserved, nothing scrambled  [REGRESSION GUARD]',
     r.names.join('|') === 'Space|Beta|Gamma', r.names.join(' | '));
   await win.keyboard.press('Escape');
 
