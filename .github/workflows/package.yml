@@ -1,0 +1,139 @@
+name: Package
+
+# Packaging. Runs on a version-tag push (matching release.ps1's `v<version>`
+# tag convention) or manual dispatch. `workflow_dispatch` builds but never
+# publishes; only a tag push creates a release, and it is a DRAFT — Dan still
+# publishes manually (see CLAUDE.md "Release process"). Nothing auto-publishes.
+#
+# Phase 0 is WINDOWS ONLY. macOS and Linux legs arrive with KAN-89..KAN-93;
+# see the block above publish-draft for why they are not stubbed in here.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (NSIS)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # `--publish never`, always. electron-builder 26.x's own `--publish
+      # always` races itself into duplicate drafts (see release.ps1 and
+      # CLAUDE.md's Release process section) — that bug is why release.ps1
+      # never uses electron-builder to publish and instead calls `gh
+      # release create` itself once, by hand, over already-built files. The
+      # publish-draft job below reproduces exactly that, from artifacts
+      # collected here.
+      - name: Package (NSIS)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish never
+
+      # electron-builder writes dist/latest.yml referencing the HYPHENATED
+      # asset name ("Claude-Explorer-Setup-<version>.exe") because GitHub
+      # mangles spaces in release asset filenames, but the NSIS installer it
+      # actually produces is named with spaces
+      # ("Claude Explorer Setup <version>.exe"). release.ps1 copies the
+      # built files to the hyphenated names before uploading so the asset
+      # electron-updater fetches matches what latest.yml points at — mirror
+      # that exactly here.
+      - name: Rename installer assets to match latest.yml
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $dist = Join-Path $PWD 'dist'
+          $exe = Join-Path $dist "Claude-Explorer-Setup-$version.exe"
+          Copy-Item (Join-Path $dist "Claude Explorer Setup $version.exe") $exe -Force
+          Copy-Item (Join-Path $dist "Claude Explorer Setup $version.exe.blockmap") "$exe.blockmap" -Force
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/Claude-Explorer-Setup-*.exe
+            dist/Claude-Explorer-Setup-*.exe.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+
+  # --- macOS and Linux legs: deliberately absent in Phase 0 ---
+  #
+  # Not "tests only" placeholders either, because `npm test` CANNOT PASS on
+  # POSIX today and a failing leg here would block publish-draft through
+  # `needs`. src/main/cli.ts imports `resolve` from 'node:path' (the
+  # platform-default implementation) while cli.test.ts asserts Windows-shaped
+  # output; on Linux/macOS path.posix.resolve treats 'C:\base' as a single
+  # relative segment and prefixes cwd. Several other suites feed real Windows
+  # paths to platform-default path code the same way.
+  #
+  # These legs arrive with the work that makes them meaningful:
+  #   KAN-89  cross-platform path abstraction (the contract)
+  #   KAN-90  POSIX branches for policy/trash/pty/ide/search/external
+  #   KAN-92  macOS build   — needs `build.mac` in package.json + the signing
+  #                           decision ($99/yr Apple Developer; unsigned means
+  #                           no auto-update at all)
+  #   KAN-93  Linux build   — needs `build.linux`, and the runner must
+  #                           `apt-get install -y build-essential python3`
+  #                           BEFORE `npm ci`: node-pty ships prebuilds for
+  #                           darwin-arm64/x64 and win32-arm64/x64 only, with
+  #                           NO Linux prebuild, so its install falls back to
+  #                           `node-gyp rebuild`.
+  #
+  # Adding a green-but-empty leg now would be worse than having none: it would
+  # read as "macOS is covered" on a repo where nothing has ever run there.
+
+  publish-draft:
+    name: Publish draft release
+    needs: [windows]
+    # Only a tag push publishes anything; `workflow_dispatch` builds/tests
+    # every leg and stops (artifacts stay attached to the run for
+    # inspection). `success()` must be explicit: adding a custom `if:` to a
+    # job replaces the default "all `needs` succeeded" gate rather than
+    # adding to it.
+    if: success() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+
+      # Add macos-installer / linux-installer downloads here once KAN-92 and
+      # KAN-93 add those legs, and add their files to the `gh release create`
+      # list below (mac also needs latest-mac.yml, Linux latest-linux.yml, or
+      # electron-updater has no feed for that platform).
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft --title "${{ github.ref_name }}" --generate-notes \
+            dist/Claude-Explorer-Setup-*.exe \
+            dist/Claude-Explorer-Setup-*.exe.blockmap \
+            dist/latest.yml
