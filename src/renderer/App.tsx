@@ -35,6 +35,7 @@ import {
 import { usePtyStatus } from './ptystatus';
 import { useClaudeState } from './claudestate';
 import { spaceNeedsInput } from './spacemenu';
+import { attentionNeeded } from './attention';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
@@ -126,6 +127,41 @@ export function App() {
   // today's behaviour for every session with no hook signal — an agentSpawned
   // worker, a session this app did not launch, or agentControl: false.
   const claudeState = useClaudeState();
+  // KAN-78. Window focus, tracked locally: `attentionNeeded()` (attention.ts)
+  // needs it for the "you are already looking at it" exception, and main's
+  // OWN focus (BrowserWindow.isFocused()) is not exposed to the renderer.
+  // `document.hasFocus()` as the seed value, DOM 'focus'/'blur' on `window` to
+  // stay live — this app has exactly one BrowserWindow, so the renderer's own
+  // focus state and that window's OS focus are the same fact.
+  const [focused, setFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const onFocus = () => setFocused(true);
+    const onBlur = () => setFocused(false);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+  // KAN-78. The one thing main needs to drive the taskbar overlay/flash — not
+  // every claudeState transition, just the current answer to "does anything
+  // need attention right now" (see the CH.setAttention comment in ipc.ts).
+  // `lastSent` guards against a duplicate `send` for a recompute that didn't
+  // actually flip the boolean — this effect re-runs on every tab switch and
+  // every claudeState event, most of which change nothing about the answer.
+  const lastAttentionSent = useRef<boolean | null>(null);
+  useEffect(() => {
+    // The visible tab's ptyId. Only `active` (this space's shown tab), not
+    // every pane split view can show at once — see the ponytail note on
+    // `attentionNeeded` in attention.ts.
+    const visiblePtyId = tabs.find((t) => t.id === active)?.ptyId ?? null;
+    const need = attentionNeeded(claudeState, focused, visiblePtyId);
+    if (need !== lastAttentionSent.current) {
+      lastAttentionSent.current = need;
+      window.api.setAttention(need);
+    }
+  }, [claudeState, focused, active, tabs]);
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
   // fractions against its box.
