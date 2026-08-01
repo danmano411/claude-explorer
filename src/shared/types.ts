@@ -51,7 +51,36 @@ export interface Settings {
    *  the NEXT spawn — it is NOT retroactive: a session already running has the
    *  token in its environment and nothing reaches into that process. */
   agentControl: boolean
+  /**
+   * KAN-64. How many Claude sessions the MCP spawn tool may open WITHOUT
+   * asking. A FREE ALLOWANCE, not a cap: at or above it the user is asked, and
+   * an approval opens the session anyway. There is no count at which the tool
+   * stops working — it throttles, it never blocks. "Never" is already
+   * `agentControl: false`, which takes the whole surface away; this must not
+   * become a second spelling of it.
+   *
+   * One of AGENT_FREE_SESSION_CHOICES; anything else read off disk is
+   * normalized back to DEFAULT_AGENT_FREE_SESSIONS (settings.ts). Never to
+   * "unlimited" and never to a value that skips the prompt entirely — a
+   * hand-edited `"agentFreeSessions": 9999` must not be a way to disable the
+   * human gate.
+   */
+  agentFreeSessions: number
 }
+
+/**
+ * The only reachable values for `Settings.agentFreeSessions`, and the order the
+ * Settings modal offers them in. A fixed set rather than a free number field:
+ * the interesting decision is "ask every time / a few / the default / a lot",
+ * and a text box invites a 500 that nobody meant and that no UI can explain.
+ * 16 is deliberately the largest offered.
+ */
+export const AGENT_FREE_SESSION_CHOICES = [0, 4, 8, 16] as const
+
+/** KAN-64's default, stated once. A security-relevant loosening on upgrade —
+ *  eight sessions used to cost eight human clicks and now cost none — chosen
+ *  deliberately with that in front of us; 0 keeps the old behaviour exactly. */
+export const DEFAULT_AGENT_FREE_SESSIONS = 8
 
 /**
  * Result of a policy-gated mutating operation. A union, not a thrown Error:
@@ -292,6 +321,16 @@ export interface ControlTab {
   title: string
   terminalKind?: 'claude' | 'shell'
   status?: PtyStatus
+  /**
+   * KAN-64. This tab was opened BY the spawn tool, not by the user. Here
+   * because it is half of the only test that can tell a DEAD agent tab (reap
+   * it) from a tab the user opened themselves (never reap it) — and this row is
+   * the only place `agentSpawned` and `status` are visible together. The other
+   * half is `status === 'stopped'`; "no status" is NOT dead (a tab restored
+   * from before a restart, and a spawn that has not emitted its first byte,
+   * both report none).
+   */
+  agentSpawned?: true
 }
 
 /**

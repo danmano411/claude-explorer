@@ -81,6 +81,20 @@ const WORK = path.join(TMP, 'work');
 const PROFILE = path.join(TMP, 'profile');
 for (const d of [SHIM, DUMP, WORK, PROFILE]) fs.mkdirSync(d, { recursive: true });
 
+/**
+ * KAN-64. Pre-write a profile's settings.json so an app run starts with a known
+ * free allowance. Every section from §0 to §8 was written against KAN-41, where
+ * open_claude_session asked EVERY time — which is exactly what an allowance of
+ * 0 means, so setting it here keeps all of them measuring the confirmation path
+ * they were built for. That is not a workaround: "0 = ask every time = today's
+ * shipped behaviour, and it must stay reachable" is one of this ticket's
+ * acceptance criteria, and the fifty-odd checks below ARE that proof, run end
+ * to end against the real server.
+ */
+const allowanceProfile = (dir, agentFreeSessions) =>
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ agentFreeSessions }, null, 2));
+allowanceProfile(PROFILE, 0);
+
 // realpath.native, because main canonicalizes every caller-supplied path that
 // way (policy.ts) — comparing a reply's `path` to a raw %TEMP% string would
 // compare two spellings of the same folder.
@@ -194,6 +208,10 @@ try {
 } catch { /* the expected case: not a repo */ }
 
 const CAP_DIRS = Array.from({ length: 8 }, (_, i) => mkdir(path.join(WORK, `cap-${i}`)));
+// §7's ninth session gets its own folder rather than borrowing a FANOUT one:
+// those hold `.ce-real` outside --fast, and starting a REAL Claude Code there
+// would pollute the transcripts §9 goes on to measure.
+const NINTH_DIR = mkdir(path.join(WORK, 'ninth'));
 // Three DIFFERENTLY named folders, so §9's "titled with the folder basename" is
 // three distinct strings and cannot pass by coincidence.
 const FANOUT = ['alpha', 'bravo', 'charlie'].map((n) => mkdir(path.join(WORK, `fan-${n}`)));
@@ -252,16 +270,28 @@ async function tool(name, args = {}) {
 const json = (t) => { try { return JSON.parse(t.text); } catch { return null; } };
 const tabs = async () => json(await tool('list_tabs')) ?? [];
 
+/** The open_claude_session description a MODEL actually receives, read off the
+ *  live server — so it is the text mcp.ts built from THIS profile's allowance,
+ *  never a string the harness re-derived. */
+const spawnToolDescription = async () => {
+  const r = await rpc({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/list', params: {} });
+  return (r.result?.tools ?? []).find((t) => t.name === 'open_claude_session')?.description ?? '';
+};
+
 // --- the window -------------------------------------------------------------
 
 const VIS = '.pane:not([hidden]) ';
 const { win, close } = await launchApp({ userDataDir: PROFILE });
 
 const xterms = () => win.evaluate(() => document.querySelectorAll('.xterm').length);
-const promptPath = () => win.evaluate(() => {
+/** The spawn dialog's path in a GIVEN window, or null when no dialog is up.
+ *  §11 and §12 launch app instances of their own, so they cannot use
+ *  `promptPath()` below — it is bound to the first window. */
+const modalPathIn = (w) => w.evaluate(() => {
   const el = document.querySelector('.spawn-modal .spawn-path');
   return el ? el.textContent : null;
 });
+const promptPath = () => modalPathIn(win);
 const clickAnswer = async (allow) => {
   await win.waitForSelector('.spawn-modal', { timeout: 15_000 });
   await win.locator(`.spawn-modal .modal-actions button${allow ? '.primary' : ':not(.primary)'}`).click();
@@ -344,6 +374,22 @@ let VIEWER_SCHEMA = null;
   const props = Object.keys(VIEWER_SCHEMA?.properties ?? {});
   check('open_viewer_tab advertises `path` and has no `mode` property at all',
     JSON.stringify(props) === '["path"]', props.join(', ') || JSON.stringify(VIEWER_SCHEMA));
+
+  // KAN-64. The description is the ONLY thing a model reads about this server,
+  // and "the description and the enforced behaviour say the same thing in both
+  // directions" is this ticket's stated bar. THIS PROFILE RUNS AT 0, where
+  // spawnguard.ts skips the reap outright (`if (allowance() > 0)`) and no count
+  // can ever produce a free start — so a text promising either is a lie told to
+  // the one reader who cannot check it. §11 asserts the other direction at 8.
+  const desc0 = await spawnToolDescription();
+  check('open_claude_session\'s description carries this profile\'s allowance of 0',
+    /currently 0\./.test(desc0) && /ASKS EVERY TIME/i.test(desc0),
+    desc0.replace(/\s+/g, ' ').slice(0, 200) || 'no description');
+  check('and at 0 it promises neither a silent start nor the reap, because 0 does neither',
+    desc0.length > 0 && !/starts the session immediately/i.test(desc0)
+      && !/closes the tabs THIS TOOL opened/.test(desc0)
+      && !/no prompt after all/i.test(desc0),
+    desc0.replace(/\s+/g, ' ').slice(-260) || 'no description');
 }
 
 // === 2. bad input is a typed error, never an exception =======================
@@ -589,11 +635,18 @@ console.log('\n6 — what the agent-spawned child was actually handed');
     /--strict-mcp-config/.test(childArgv), childArgv);
 }
 
-// === 7. the cap =============================================================
-console.log('\n7 — eight, and then no more');
+// === 7. eight, and then a ninth ==============================================
+//
+// KAN-64 REWROTE THIS SECTION. It used to assert the opposite: that the ninth
+// session was REFUSED with a typed cap error and that the user was never asked
+// about it. The number is a free allowance now, not a ceiling — this profile
+// runs at 0, so every one of these nine costs a human click, and the ninth is
+// asked about and then GRANTED rather than refused. "It throttles; it never
+// blocks", measured end to end.
+console.log('\n7 — eight, and then a ninth');
 const CAP_TABS = [];
 {
-  // One session already exists from §5, so seven more reach the cap.
+  // One session already exists from §5, so seven more make eight.
   let started = 1;
   for (let i = 1; i < 8; i++) {
     const r = await confirmSpawn(CAP_DIRS[i]);
@@ -602,21 +655,32 @@ const CAP_TABS = [];
   }
   check('eight concurrent app-spawned sessions are allowed', started === 8, `${started} started`);
 
-  const ninth = await tool('open_claude_session', { path: FANOUT[0] });
-  check('the ninth is refused with the typed cap error',
-    ninth.isError && /at most 8 Claude sessions started by this tool/i.test(ninth.text), ninth.text);
-  // The cap is checked at MINT, so the user is never asked to approve something
-  // that cannot land.
-  check('and the user was never prompted for it', (await promptPath()) === null,
-    String(await promptPath()));
-
   // The harvest tab has been a live Claude session for this whole section. If
-  // user-launched sessions counted, the eighth would have been refused.
+  // user-launched sessions counted, one of the eight would have been an ask too
+  // many — and, in §12's terms, the user's tab is not the tool's to manage.
   const live = (await tabs()).filter((t) => t.terminalKind === 'claude');
   CAP_TABS.push(...live.filter((t) => t.cwd !== HARVEST));
-  check('a session the USER started does not consume the cap',
+  check('a session the USER started is not one of the tool\'s',
     live.some((t) => t.cwd === HARVEST) && CAP_TABS.length === 8,
     `${CAP_TABS.length} app-spawned + ${live.length - CAP_TABS.length} user`);
+
+  // THE KAN-64 REVERSAL. Nine already-open sessions used to be unreachable at
+  // any price; now it costs exactly what the first eight cost — one Allow.
+  const ninth = await confirmSpawn(NINTH_DIR);
+  check('the ninth is ASKED about, not refused by a cap',
+    !ninth.ask.isError && json(ninth.ask)?.needsConfirm === true, ninth.ask.text.slice(0, 200));
+  check('and approving it opens a ninth app-spawned session',
+    !ninth.started.isError && json(ninth.started)?.started === true,
+    ninth.started.text.slice(0, 200));
+  const ninthTab = (await tabs()).find((t) => t.cwd.toLowerCase() === NINTH_DIR.toLowerCase());
+  check('which really is a ninth tab, live in the window',
+    !!ninthTab && (await tabs()).filter((t) => t.terminalKind === 'claude' && t.cwd !== HARVEST)
+      .length === 9,
+    ninthTab ? ninthTab.title : 'no tab for the ninth folder');
+
+  // Handed back to §8 at eight, which is the state the rest of this file was
+  // written against.
+  if (ninthTab) await tool('close_tab', { tabId: ninthTab.id });
 }
 
 // === 8. five closes, back to back ===========================================
@@ -643,10 +707,12 @@ console.log('\n8 — five close_tab calls with no gap');
   check('and five terminals really went away', (await xterms()) === beforeTerms - 5,
     `${beforeTerms} -> ${await xterms()} .xterm elements`);
 
-  // The cap is derived from the live pty map, not a counter — so closing frees
-  // it. A monotonic counter would refuse this forever after the eighth session.
+  // Still serving after five closes in one tick, and still willing to ask. At
+  // this profile's allowance of 0 the ask is unconditional, so what this
+  // measures is that close_tab left the guard in a working state — the count's
+  // own bookkeeping is §11's and §12's job, where the allowance is not 0.
   const again = await tool('open_claude_session', { path: FANOUT[0] });
-  check('with three left, the cap lets a new session be asked for again',
+  check('with three left, a new session can still be asked for',
     !again.isError && json(again)?.needsConfirm === true, again.text.slice(0, 160));
   await clickAnswer(false);
 
@@ -892,6 +958,412 @@ if (!FAST) {
     back.every(Boolean), back.map((v, i) => `${path.basename(FANOUT[i])}:${v}`).join(' '));
 
   await close2();
+}
+
+// === 11. KAN-64 — restored agent tabs count, and are never reaped ===========
+//
+// Its OWN app run and its own throwaway profile, still under TMP (so the pid
+// suffix that guards the single-instance lock covers it too) rather than
+// reusing PROFILE — §9/§10's profile already carries three real Claude
+// sessions and this section's claim is sharper with a workspace containing
+// exactly eight agent-spawned tabs and nothing else. Every session below is a
+// stand-in (no `.ce-real` anywhere under WORK/k64-*), so this needs no real
+// Claude Code and costs seconds, not minutes — it runs whether or not --fast
+// was passed.
+//
+// THE GAP THIS PROVES CLOSED: `PtyManager.agentSessions()` (KAN-41) is DERIVED
+// from the live pty handle map, and a brand-new process starts that map empty
+// — a restored terminal tab spawns on first activation, not at launch (App.tsx,
+// `needsSpawn`). So a fresh process that has never had any of its restored
+// agent tabs clicked reports zero live agent sessions no matter how many the
+// last run left open, and without the fix the ninth `open_claude_session`
+// below would open SILENTLY, with the user never told.
+//
+// THIS PROFILE RUNS AT THE DEFAULT ALLOWANCE OF 8, unlike §0-§8's 0, so it
+// measures three things the rest of the file cannot:
+//   - eight sessions opening with NO dialog at all (the free path);
+//   - a restored tab still holding its slot, so the ninth ASKS;
+//   - and the reap that runs before that ask leaving every DORMANT tab alone.
+//
+// RED-FIRST: reverting pty.handlers.ts's `agentSessionCount` to
+// `mgr.agentSessions()` alone (workspace.ts's `agentSpawnedTabCount` un-called)
+// turns the ninth-ask check red — nothing is live in run 2, so the ninth spawns
+// silently instead of asking. Captured verbatim in the report.
+console.log('\n11 — restored agent tabs count, and are never reaped');
+{
+  const PROFILE2 = mkdir(path.join(TMP, 'profile-kan64'));
+  allowanceProfile(PROFILE2, 8);
+  // [0] is the user-launched harvest folder (does not count against the cap,
+  // exactly like HARVEST in §0/§7); [1..8] are the eight app-spawned ones.
+  const K64 = Array.from({ length: 9 }, (_, i) => mkdir(path.join(WORK, `k64-${i}`)));
+
+  const harvestToken = async (win, dir, name) => {
+    await win.locator('.tab.add').click();
+    await win.waitForTimeout(600);
+    await win.locator('.address').click();
+    await win.waitForTimeout(200);
+    await win.locator('.address-input').fill(WORK);
+    await win.keyboard.press('Enter');
+    await win.waitForTimeout(1_200);
+    await win.locator('.entry', { hasText: name }).first().locator('.entry-open').click();
+    const f = await waitFor(() => dumpsFor(dir)[0] ?? null, 20_000);
+    return f ? (/^CLAUDE_EXPLORER_MCP_TOKEN=(.*)$/m.exec(dumpBody(f))?.[1] ?? '') : '';
+  };
+
+  // --- run 1: eight FREE sessions, then quit with all eight tabs open -------
+  const run1 = await launchApp({ userDataDir: PROFILE2 });
+  const cfg1 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'mcp-agent-control.json'), 'utf8'));
+  PORT = Number(/:(\d+)\//.exec(cfg1.mcpServers.explorer.url)[1]);
+  TOKEN = await harvestToken(run1.win, K64[0], 'k64-0');
+  check('run 1: a user-launched session yields this run\'s own token',
+    /^[0-9a-f]{64}$/.test(TOKEN), TOKEN ? 'ok' : 'no dump');
+
+  // The other direction of §1's pair. Same tool, same reader, a profile whose
+  // allowance is 8 — so here the free start and the reap are real and the text
+  // has to say so, naming 8 and not some hardcoded number.
+  const desc8 = await spawnToolDescription();
+  check('run 1: at an allowance of 8 the description names 8, the silent start and the reap',
+    /currently 8\./.test(desc8)
+      && /fewer than 8 are open, this call starts the session immediately/i.test(desc8)
+      && /closes the tabs THIS TOOL opened whose Claude process has already exited/.test(desc8),
+    desc8.replace(/\s+/g, ' ').slice(-280) || 'no description');
+
+  const answerIn = async (w, allow) => {
+    await w.waitForSelector('.spawn-modal', { timeout: 15_000 });
+    await w.locator(`.spawn-modal .modal-actions button${allow ? '.primary' : ':not(.primary)'}`).click();
+    await w.waitForSelector('.spawn-modal', { state: 'detached', timeout: 5_000 });
+  };
+
+  // ONE CALL EACH, no token step anywhere: under the allowance the tool starts
+  // the session outright. The dialog is probed after every call — the reply
+  // only comes back once the spawn has landed, so a prompt would have to be on
+  // screen at that moment.
+  let started1 = 0;
+  const seenModal = [];
+  for (let i = 1; i <= 8; i++) {
+    const r = await tool('open_claude_session', { path: K64[i] });
+    if (!r.isError && json(r)?.started === true) started1++;
+    else console.log(`    (session ${i}: ${r.text.slice(0, 120)})`);
+    seenModal.push(await modalPathIn(run1.win));
+  }
+  check('run 1: eight sessions started with one call each — no token, no dialog',
+    started1 === 8, `${started1} started`);
+  check('run 1: and the user was never asked, not once',
+    seenModal.every((p) => p === null), seenModal.filter(Boolean).join(' | ') || 'no prompt seen');
+  // The strongest witness that all eight really ran: eight dump files, i.e. the
+  // CLI was executed eight times. A reply cannot fake that. Polled, because the
+  // tool answers when the SPAWN lands and the shim writes its dump a moment
+  // later — a bare read here measured 7/8 once, and that was the harness racing
+  // the shim, not the app.
+  const ran1 = await waitFor(() => {
+    const n = K64.slice(1, 9).filter((d) => dumpsFor(d).length > 0).length;
+    return n === 8 ? n : null;
+  }, 20_000) ?? K64.slice(1, 9).filter((d) => dumpsFor(d).length > 0).length;
+  check('run 1: claude was really executed in all eight folders', ran1 === 8, `${ran1}/8 dumps`);
+
+  await run1.win.waitForTimeout(1_500); // debounced persist, same margin §9 gives it
+  const ws1 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'workspace.json'), 'utf8'));
+  const onDisk1 = ws1.tabs.filter((t) => t.agentSpawned === true).length;
+  check('run 1: workspace.json remembers all eight as agent-spawned tabs before any restart',
+    onDisk1 === 8, `${onDisk1} persisted`);
+
+  await run1.close(); // all eight left open on purpose — nothing closed them
+
+  // --- run 2: a fresh process, nothing live, nothing activated ---------------
+  const run2 = await launchApp({ userDataDir: PROFILE2 });
+  await run2.win.waitForSelector('.tab:not(.add)');
+  await run2.win.waitForTimeout(1_500);
+
+  // The tab active when run 1 quit is restored active too, and KAN-46 spawns
+  // a restored tab that is ON SCREEN immediately — not "clicked", but not the
+  // KAN-64 gap either: that is one process for the one tab the window shows
+  // by default (K64[8], the last one confirm1 selected), not all eight. So
+  // the live/dormant SPLIT is the real assertion, and it doubles as proof
+  // that the cap below is reading a genuine mix, not eight identical dormant
+  // rows — Math.max(mgr, disk) has to combine one live session with seven
+  // that are not for the ninth-ask refusal after this to mean anything.
+  const before64 = K64.slice(1, 9).map((d) => dumpsFor(d).length);
+  const respawnedOnOpen = before64.filter((n) => n > 1).length;
+  check('run 2: opening the window respawns at most the one on-screen tab — the other seven stay dormant',
+    respawnedOnOpen <= 1 && before64.every((n) => n === 1 || n === 2), before64.join(','));
+
+  const cfg2 = JSON.parse(fs.readFileSync(path.join(PROFILE2, 'mcp-agent-control.json'), 'utf8'));
+  PORT = Number(/:(\d+)\//.exec(cfg2.mcpServers.explorer.url)[1]);
+  const HARVEST2 = mkdir(path.join(WORK, 'k64-harvest2'));
+  TOKEN = await harvestToken(run2.win, HARVEST2, 'k64-harvest2');
+  check('run 2: a fresh token was harvested after the restart',
+    /^[0-9a-f]{64}$/.test(TOKEN), TOKEN ? 'ok' : 'no dump');
+
+  const rows2 = await tabs();
+  const restored = rows2.filter((t) => K64.slice(1, 9).some((d) => d.toLowerCase() === t.cwd.toLowerCase()));
+  check('run 2: list_tabs sees all eight restored agent tabs',
+    restored.length === 8, restored.map((t) => t.title).join(', '));
+
+  // THE HEADLINE: no live pty for any of them (mgr.agentSessions() reads 0 on
+  // this brand-new process), and the allowance is still spent — so the ninth
+  // has to ask instead of opening silently. In run 1 the same call opened a
+  // session with no dialog eight times in a row; that contrast is the whole
+  // assertion, and it is why both halves live in this section.
+  const NINTH = mkdir(path.join(WORK, 'k64-ninth'));
+  const ninthAsk = await tool('open_claude_session', { path: NINTH });
+  check('run 2: a NINTH ASKS, although nothing has ever been live in this run',
+    !ninthAsk.isError && json(ninthAsk)?.needsConfirm === true, ninthAsk.text.slice(0, 200));
+  const promptAfterNinth = await modalPathIn(run2.win);
+  check('run 2: and the user really is being shown that exact folder',
+    promptAfterNinth === NINTH, String(promptAfterNinth));
+
+  // KAN-64: the number is the user's, so the dialog that exists BECAUSE of it
+  // has to say where it lives. Someone meeting this for the ninth time should
+  // not have to go looking. Asserted on the dialog's own text, and on the menu
+  // path a person would actually follow.
+  const modalText = await run2.win.evaluate(() =>
+    document.querySelector('.spawn-modal')?.textContent ?? '');
+  check('run 2: and the dialog says where to change the number',
+    /Settings/i.test(modalText) && /Preferences/i.test(modalText) && /Ctrl\+,/.test(modalText),
+    modalText.replace(/\s+/g, ' ').slice(-190));
+
+  // THE CRITERION THAT PROTECTS THE USER'S DATA. Asking crossed the allowance,
+  // so the reap ran — against eight tabs that are agent-spawned and have no
+  // live process. Seven were never activated (no ptyId, so no status at all)
+  // and one respawned on screen. NONE of them is dead, and all eight must still
+  // be here. A reap keyed on "no live pty" or on "status is not running" wipes
+  // the lot, silently, at the exact moment the user is being asked a question.
+  const afterReap = await tabs();
+  const survived = afterReap.filter((t) => K64.slice(1, 9).some((d) => d.toLowerCase() === t.cwd.toLowerCase()));
+  check('run 2: the reap before that ask left all eight DORMANT restored tabs alone',
+    survived.length === 8, `${survived.length}/8 survived: ${survived.map((t) => t.title).join(', ')}`);
+  check('run 2: and it closed nothing else in the window either',
+    afterReap.length === rows2.length, `${rows2.length} -> ${afterReap.length} tabs`);
+
+  // ...and approving opens the ninth, over the number, exactly as §7 shows at
+  // an allowance of 0. There is no count that refuses.
+  await answerIn(run2.win, true);
+  const ninthStarted = await tool('open_claude_session', { path: NINTH, token: json(ninthAsk).token });
+  check('run 2: approving it opens a ninth session past the allowance',
+    !ninthStarted.isError && json(ninthStarted)?.started === true,
+    ninthStarted.text.slice(0, 200));
+
+  // NOT a monotonic restart-lockout, and the other direction of the same rule:
+  // take the count back under the allowance and the next session is free again.
+  // Two tabs, because the ninth just landed — the ninth's own tab and one
+  // restored-but-still-dormant one (never activated, no ptyId anywhere).
+  const ninthTab2 = (await tabs()).find((t) => t.cwd.toLowerCase() === NINTH.toLowerCase());
+  if (ninthTab2) await tool('close_tab', { tabId: ninthTab2.id });
+  await tool('close_tab', { tabId: survived[0].id });
+  await run2.win.waitForTimeout(700); // let the persist land, §9's own margin
+  const TENTH = mkdir(path.join(WORK, 'k64-tenth'));
+  const afterClose = await tool('open_claude_session', { path: TENTH });
+  check('run 2: closing tabs takes it back under the allowance and the next one is free',
+    !afterClose.isError && json(afterClose)?.started === true, afterClose.text.slice(0, 160));
+  check('run 2: with no dialog for it', (await modalPathIn(run2.win)) === null,
+    String(await modalPathIn(run2.win)));
+
+  await run2.close();
+}
+
+// === 12. KAN-64 — the reap: dead agent tabs, and only those =================
+//
+// The other half of §11. There the reap ran and correctly did NOTHING; here it
+// runs and closes exactly the right tabs. Its own profile and app run, at an
+// allowance of 4 so the arithmetic is short.
+//
+// HOW A TAB IS MADE GENUINELY DEAD: the session's process is killed from
+// OUTSIDE the app, the way a crash ends one. The pty really ran and really
+// ended, so pty:exit really reached the renderer and the tab's status really is
+// 'stopped' — nothing here fakes a status. Each kill names ONE process, matched
+// on the session UUID the app minted for it (the app passes it as
+// --session-id, so it is in that child's command line and nowhere else).
+//
+// NOT by having the stand-in exit on its own, and not by typing into its pane:
+// both wedge the whole app, main included — an unrelated hazard around a
+// ConPTY whose cmd.exe root exits of its own accord, reproducible with a
+// four-line probe and nothing to do with this ticket. See the report; it is
+// worth its own investigation, and this harness deliberately does not depend
+// on it.
+//
+// The two things that must NOT be reaped are both here, and both look identical
+// to a lazy test — "it has no live process" / "its status is not running":
+//   - a tab THE USER opened whose Claude has exited (dead, but not the tool's);
+//   - an agent tab whose session is still up, which reports 'waiting' rather
+//     than 'running' once it has gone quiet — so "not running" is not death
+//     either.
+// The third, a dormant restored tab, is §11's.
+console.log('\n12 — the reap');
+{
+  const PROFILE3 = mkdir(path.join(TMP, 'profile-reap'));
+  allowanceProfile(PROFILE3, 4);
+  const HARVEST3 = mkdir(path.join(WORK, 'reap-harvest')); // user-opened, stays up
+  const USER_DEAD = mkdir(path.join(WORK, 'reap-user'));   // user-opened, killed
+  const DEAD = ['reap-a', 'reap-b', 'reap-c'].map((n) => mkdir(path.join(WORK, n))); // agent, killed
+  const ALIVE = mkdir(path.join(WORK, 'reap-alive'));      // agent-opened, stays up
+  const FIFTH = mkdir(path.join(WORK, 'reap-fifth'));      // the one that needs room
+
+  /** Kill the ONE stand-in behind `dir`'s session. The dump the shim wrote is
+   *  named after that session's UUID, and the app put the same UUID on the
+   *  child's command line (--session-id), so this matches exactly one process
+   *  however many sessions are running. */
+  const killSession = (dir) => {
+    const id = /^d-(.+)-\d+\.txt$/.exec(dumpsFor(dir)[0] ?? '')?.[1];
+    if (!id) return false;
+    execFileSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.CommandLine -like '*${id}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
+    { stdio: 'ignore' });
+    return true;
+  };
+
+  const run3 = await launchApp({ userDataDir: PROFILE3 });
+  const cfg3 = JSON.parse(fs.readFileSync(path.join(PROFILE3, 'mcp-agent-control.json'), 'utf8'));
+  PORT = Number(/:(\d+)\//.exec(cfg3.mcpServers.explorer.url)[1]);
+
+  /** Open a folder's Claude session the way a PERSON does — the orange arrow in
+   *  the file list — so the tab it makes is not the tool's. */
+  const userSession = async (name) => {
+    await run3.win.locator('.tab.add').click();
+    await run3.win.waitForTimeout(600);
+    await run3.win.locator('.address').click();
+    await run3.win.waitForTimeout(200);
+    await run3.win.locator('.address-input').fill(WORK);
+    await run3.win.keyboard.press('Enter');
+    await run3.win.waitForTimeout(1_200);
+    await run3.win.locator('.entry', { hasText: name }).first().locator('.entry-open').click();
+  };
+
+  await userSession('reap-harvest');
+  const hf = await waitFor(() => dumpsFor(HARVEST3)[0] ?? null, 20_000);
+  TOKEN = hf ? (/^CLAUDE_EXPLORER_MCP_TOKEN=(.*)$/m.exec(dumpBody(hf))?.[1] ?? '') : '';
+  check('a user-launched session yields this run\'s token', /^[0-9a-f]{64}$/.test(TOKEN),
+    TOKEN ? 'ok' : 'no dump');
+
+  // The user's OWN tab, killed below exactly as the agent tabs are — the
+  // control for "a tab the user created is never reaped". Same death,
+  // different provenance, and provenance is the whole of what may not be
+  // ignored.
+  await userSession('reap-user');
+  await waitFor(() => dumpsFor(USER_DEAD)[0] ?? null, 20_000);
+
+  // Four agent sessions, all free: the allowance is 4 and nothing of the tool's
+  // is open yet. The user's two tabs are not the tool's and do not count.
+  let opened = 0;
+  for (const d of [...DEAD, ALIVE]) {
+    const r = await tool('open_claude_session', { path: d });
+    if (!r.isError && json(r)?.started === true) opened++;
+    else console.log(`    (${path.basename(d)}: ${r.text.slice(0, 120)})`);
+  }
+  check('four agent sessions opened freely under an allowance of 4', opened === 4, `${opened}/4`);
+  // Every stand-in has to have written its dump before anything is killed —
+  // that file is what names the process to kill.
+  await waitFor(() => [...DEAD, ALIVE].every((d) => dumpsFor(d).length > 0) || null, 20_000);
+
+  const killed = [...DEAD, USER_DEAD].filter(killSession).length;
+  check('three agent sessions and the user\'s were killed from outside the app',
+    killed === 4, `${killed}/4 found`);
+
+  // The status the whole reap turns on, read out of list_tabs rather than
+  // assumed. Polled: pty:exit travels main -> renderer -> a React commit.
+  const settled = await waitFor(async () => {
+    const rows = await tabs();
+    const gone = rows.filter((t) => [...DEAD, USER_DEAD].some((d) => d.toLowerCase() === t.cwd.toLowerCase()));
+    return gone.length === 4 && gone.every((t) => t.status === 'stopped') ? rows : null;
+  }, 30_000);
+  const aliveRow = (settled ?? []).find((t) => t.cwd.toLowerCase() === ALIVE.toLowerCase());
+  const userRow = (settled ?? []).find((t) => t.cwd.toLowerCase() === USER_DEAD.toLowerCase());
+  check('list_tabs reports the four ended sessions as stopped, and the live one as not',
+    !!settled && !!aliveRow && aliveRow.status !== 'stopped',
+    aliveRow ? `alive: ${aliveRow.status}` : 'never settled');
+  check('and it marks the tool\'s tabs agentSpawned while the user\'s tab is not',
+    aliveRow?.agentSpawned === true && userRow?.agentSpawned === undefined
+      && userRow?.status === 'stopped',
+    `user: agentSpawned=${userRow?.agentSpawned} status=${userRow?.status}`);
+
+  // NOTHING IS REAPED WHILE YOU ARE MERELY USING THE APP. No timer, no boot
+  // sweep, no background reaper — a dead agent tab stays on screen as the
+  // record of what happened until its slot is actually wanted. So: click
+  // around, wait several seconds, and count again.
+  const beforeIdle = (await tabs()).length;
+  await run3.win.locator('.tab:not(.add)').first().click();
+  await run3.win.waitForTimeout(1_500);
+  await run3.win.locator('.tab:not(.add)').last().click();
+  await run3.win.waitForTimeout(3_500);
+  const idleRows = await tabs();
+  check('nothing is reaped while the app is merely being used',
+    idleRows.length === beforeIdle
+      && DEAD.every((d) => idleRows.some((t) => t.cwd.toLowerCase() === d.toLowerCase())),
+    `${beforeIdle} -> ${idleRows.length} tabs`);
+
+  // NOW ask for one more. This is the only moment a reap may happen: the fifth
+  // session would cross the allowance of 4, the three dead agent tabs are
+  // closed, that leaves one — and the session opens with NO prompt.
+  const fifth = await tool('open_claude_session', { path: FIFTH });
+  check('the fifth session opens with no prompt, because the reap made room',
+    !fifth.isError && json(fifth)?.started === true, fifth.text.slice(0, 200));
+  check('and the user was never asked', (await modalPathIn(run3.win)) === null,
+    String(await modalPathIn(run3.win)));
+
+  const after = await tabs();
+  const stillDead = DEAD.filter((d) => after.some((t) => t.cwd.toLowerCase() === d.toLowerCase()));
+  check('the three DEAD agent tabs were closed', stillDead.length === 0,
+    stillDead.map((d) => path.basename(d)).join(', ') || 'none left');
+  const left = after.map((t) => t.title).join(', ');
+  check('the agent tab whose session is still up was not touched',
+    after.some((t) => t.cwd.toLowerCase() === ALIVE.toLowerCase()), left);
+  check('the tab the USER opened was not touched, dead though it is',
+    after.some((t) => t.cwd.toLowerCase() === USER_DEAD.toLowerCase()), left);
+  check('and the fifth session really has a tab of its own',
+    after.some((t) => t.cwd.toLowerCase() === FIFTH.toLowerCase()), left);
+  // The reap goes through the ordinary close path, so the closed tabs' xterms
+  // are really gone from the DOM — not merely dropped from a list. The element,
+  // never its text (ConPTY repaints its whole buffer on resize).
+  const terms = await run3.win.evaluate(() => document.querySelectorAll('.xterm').length);
+  check('and their terminals really left the window',
+    terms === after.filter((t) => t.view === 'terminal').length,
+    `${terms} .xterm elements for ${after.filter((t) => t.view === 'terminal').length} terminal tabs`);
+
+  // --- close_tab hands the slot back AT ONCE, so nothing else dies for it ---
+  //
+  // PR #49's other half, and the only thing left that can measure it. main
+  // counts agent tabs off the PERSISTED workspace document (a restored tab has
+  // no live pty to count instead), and App.tsx writes that document immediately
+  // when the tab count DROPS rather than on its 400 ms debounce. Debounced, a
+  // spawn arriving inside that window reads the old, too-high count, concludes
+  // it is at the allowance — and reaps, spending a dead tab the user is still
+  // looking at on a slot close_tab had already handed back.
+  //
+  // The spawn is free either way (the reap would make room too). What differs is
+  // whether anything had to DIE for it, which is the ticket's own rule: a dead
+  // agent tab stays on screen as the record of what happened until its slot is
+  // GENUINELY wanted — and here it is not wanted, because close_tab freed one.
+  const SIXTH = mkdir(path.join(WORK, 'reap-sixth'));     // agent, closed by the tool
+  const SEVENTH = mkdir(path.join(WORK, 'reap-seventh')); // agent, killed -> dead
+  const EIGHTH = mkdir(path.join(WORK, 'reap-eighth'));   // the one that needs room
+  let filled = 0;
+  for (const d of [SIXTH, SEVENTH]) {
+    const r = await tool('open_claude_session', { path: d });
+    if (!r.isError && json(r)?.started === true) filled++;
+    else console.log(`    (${path.basename(d)}: ${r.text.slice(0, 120)})`);
+  }
+  await waitFor(() => [SIXTH, SEVENTH].every((d) => dumpsFor(d).length > 0) || null, 20_000);
+  killSession(SEVENTH);
+  const seventhDead = await waitFor(async () => {
+    const row = (await tabs()).find((t) => t.cwd.toLowerCase() === SEVENTH.toLowerCase());
+    return row?.status === 'stopped' ? row : null;
+  }, 30_000);
+  check('back at the allowance of 4: three agent sessions alive and one dead',
+    filled === 2 && !!seventhDead, `${filled}/2 opened, seventh: ${seventhDead?.status}`);
+
+  const sixthRow = (await tabs()).find((t) => t.cwd.toLowerCase() === SIXTH.toLowerCase());
+  await tool('close_tab', { tabId: sixthRow?.id ?? 'none' });
+  // Comfortably after the immediate write and comfortably inside the 400 ms
+  // debounce it replaced, so this measures WHICH write happened, not a race.
+  await run3.win.waitForTimeout(150);
+  const eighth = await tool('open_claude_session', { path: EIGHTH });
+  check('a session asked for right after close_tab is free, on the slot close_tab freed',
+    !eighth.isError && json(eighth)?.started === true, eighth.text.slice(0, 200));
+  const afterEighth = await tabs();
+  check('and the dead agent tab was NOT spent on it — close_tab had already made the room',
+    afterEighth.some((t) => t.cwd.toLowerCase() === SEVENTH.toLowerCase()),
+    afterEighth.map((t) => t.title).join(', '));
+
+  await run3.close();
 }
 
 // The stand-in sessions block on stdin; killing their tabs above took the ones

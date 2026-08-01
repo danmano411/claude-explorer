@@ -301,6 +301,23 @@ export function getWorkspace(): Workspace {
   }
 }
 
+/**
+ * KAN-64. How many tabs the LAST persisted workspace remembers as agent-
+ * spawned. Deliberately not "how many are live" — a restored terminal tab
+ * spawns no process until the user activates it (see `needsSpawn`/`fromPersisted`
+ * in tabs.ts), so right after a restart every one of those tabs is agent-spawned
+ * on disk while `PtyManager.agentSessions()` (a fresh process, an empty handle
+ * map) reads zero. `agentSpawned` is never persisted for a shell tab (tabs.ts
+ * only ever sets it on a Claude terminal), so no `terminalKind` filter is needed
+ * here either — same as `PtyManager.agentSessions()`'s own filter.
+ *
+ * Read fresh off disk each call rather than cached: this is the counterpart to
+ * a live-process count, which is also read fresh every time.
+ */
+export function agentSpawnedTabCount(): number {
+  return getWorkspace().tabs.filter((t) => t.agentSpawned === true).length
+}
+
 export function setWorkspace(w: Workspace): void {
   // Write-then-rename: a crash mid-write would otherwise leave a truncated
   // workspace.json, and losing the whole layout to a half-written file is

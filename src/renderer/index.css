@@ -448,7 +448,11 @@ body {
 /* settings modal */
 .settings-field { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; }
 .settings-field span { font-size: 13px; color: var(--ink-soft); }
-.settings-field input { font: inherit; padding: 6px 8px; border: 1px solid var(--ink-soft); border-radius: 4px; background: var(--bg); color: var(--ink); }
+.settings-field input,
+.settings-field select { font: inherit; padding: 6px 8px; border: 1px solid var(--ink-soft); border-radius: 4px; background: var(--bg); color: var(--ink); }
+/* KAN-64's dropdown sizes to its content instead of stretching the modal's full
+   width like the IDE-command text input it shares a class with. */
+.settings-field select { align-self: flex-start; }
 .settings-hint { font-size: 12px; color: var(--ink-soft); }
 .settings-hint code { background: var(--bg-panel); padding: 0 3px; border-radius: 3px; }
 .settings-checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--ink-soft); }

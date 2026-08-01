@@ -54,6 +54,17 @@ export function SpawnConfirm({
           It will run with your permissions and that folder's CLAUDE.md, hooks and settings —
           the same as launching Claude Code there yourself.
         </p>
+        {/* KAN-64. This dialog is only shown once the free allowance is used
+            up, and that number is the user's. Someone meeting it for the ninth
+            time should not have to go looking for where it lives: name the menu
+            path and the accelerator, and say which way it turns in both
+            directions. `.settings-hint` is the existing small-print style —
+            no second palette, no new class. */}
+        <p className="settings-hint">
+          You are being asked because Claude has reached the number of sessions it may open on its
+          own. Change it in <b>Settings &rsaquo; Preferences…</b> (Ctrl+,): raise it to be asked
+          less often, or set it to 0 to be asked every time.
+        </p>
         <div className="modal-actions">
           <button autoFocus onClick={() => onAnswer(false)}>Deny</button>
           <button className="primary" onClick={() => onAnswer(true)}>Allow</button>

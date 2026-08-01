@@ -25,6 +25,11 @@ function harness(overrides: Partial<SpawnGuardOpts> = {}) {
   const opts: SpawnGuardOpts = {
     liveCount: overrides.liveCount ?? (() => 0),
     prompt: overrides.prompt ?? ((p) => { prompts.push(p); return true }),
+    // KAN-64: 0 by default, i.e. ask every time — so every KAN-41 test above
+    // keeps measuring the confirmation path it was written for, and the
+    // allowance tests below name the number they mean.
+    allowance: overrides.allowance ?? (() => 0),
+    reap: overrides.reap,
     now: overrides.now ?? (() => clock),
     newToken: overrides.newToken ?? (() => `tok${++n}`),
     schedule:
@@ -38,7 +43,6 @@ function harness(overrides: Partial<SpawnGuardOpts> = {}) {
       }),
     ttlMs: overrides.ttlMs,
     waitMs: overrides.waitMs,
-    max: overrides.max,
     cooldownMs: overrides.cooldownMs,
   }
   const guard = createSpawnGuard(opts)
@@ -250,85 +254,231 @@ describe('spawnguard token lifecycle', () => {
   })
 })
 
-describe('spawnguard cap', () => {
-  it('refuses the 9th concurrent session, and recovers the moment one exits', async () => {
-    // liveCount is driven by hand, the way PtyManager.agentSessions() is
-    // driven by the real handle map: it goes up only once request() actually
-    // spawns, and the test decrements it to model a pty exiting.
+// KAN-64. The number stopped being a cap and became a FREE ALLOWANCE: below it
+// nothing is asked, at it the user is asked, and an approval always lands. The
+// describe it replaces asserted the opposite in three places ("refuses the
+// 9th", "does not prompt for a request the cap can never satisfy", "re-checks
+// the cap after the human answers") — those were the leash Dan called too
+// tight, and their removal is the ticket, not collateral.
+describe('spawnguard free allowance', () => {
+  it('spawns silently below the allowance — no prompt, no token, no dialog', async () => {
     let live = 0
-    const { guard } = harness({ liveCount: () => live, max: 8 })
-    const spawnThatCounts = async () => {
-      live++
-    }
+    const { guard, prompts, spawnCalls } = harness({ liveCount: () => live, allowance: () => 8 })
+    const spawnThatCounts = async (p: string) => { spawnCalls.push(p); live++ }
 
     for (let i = 0; i < 8; i++) {
-      const ask = await guard.request(`C:\\r${i}`, undefined, spawnThatCounts)
-      const token = needsToken(ask)
-      guard.answer(token, true)
-      const result = await guard.request(`C:\\r${i}`, token, spawnThatCounts)
-      expect(result.kind).toBe('spawned')
+      const r = await guard.request(`C:\\r${i}`, undefined, spawnThatCounts)
+      expect(r).toEqual({ kind: 'spawned' })
     }
     expect(live).toBe(8)
-
-    // 9th: refused at the mint step, before a human is ever asked.
-    const ninthAsk = await guard.request('C:\\r8', undefined, spawnThatCounts)
-    expect(ninthAsk.kind).toBe('refused')
-    expect(live).toBe(8) // the cap refusal never called spawn
-
-    // One session exits — the cap must fall with it, not stay pinned at 8.
-    live--
-    const recovered = await guard.request('C:\\r8', undefined, spawnThatCounts)
-    expect(recovered.kind).toBe('needsConfirm')
+    expect(prompts).toEqual([]) // the whole point: the user was never interrupted
+    expect(guard.pending).toBeNull() // and nothing minted a permission to hold
   })
 
-  it('does not prompt the user for a request the cap can never satisfy', async () => {
-    const { guard, prompts } = harness({ liveCount: () => 8, max: 8 })
-    const result = await guard.request('C:\\repo', undefined, async () => {})
-    expect(result.kind).toBe('refused')
-    expect(prompts).toEqual([]) // no human was asked about a folder that cannot launch
+  it('asks AT the allowance, and an approval opens the 9th — and the 10th', async () => {
+    let live = 8
+    const { guard, prompts, spawnCalls } = harness({ liveCount: () => live, allowance: () => 8 })
+    const spawnThatCounts = async (p: string) => { spawnCalls.push(p); live++ }
+
+    // At 8 of 8 the tool asks rather than refusing, and the folder it asks
+    // about is the one that was requested.
+    const ask = await guard.request('C:\\r8', undefined, spawnThatCounts)
+    const token = needsToken(ask)
+    expect(prompts.map((p) => p.path)).toEqual(['C:\\r8'])
+    expect(spawnCalls).toEqual([]) // nothing started while the user was thinking
+
+    guard.answer(token, true)
+    expect(await guard.request('C:\\r8', token, spawnThatCounts)).toEqual({ kind: 'spawned' })
+    expect(live).toBe(9) // PAST the number, which the old cap made unreachable
+
+    // ...and again, from over the line. "It throttles, it never blocks": there
+    // is no count at which the tool stops working.
+    const ask2 = await guard.request('C:\\r9', undefined, spawnThatCounts)
+    const token2 = needsToken(ask2)
+    guard.answer(token2, true)
+    expect(await guard.request('C:\\r9', token2, spawnThatCounts)).toEqual({ kind: 'spawned' })
+    expect(live).toBe(10)
+    expect(spawnCalls).toEqual(['C:\\r8', 'C:\\r9'])
+  })
+
+  it('never re-checks the count after the human said yes', async () => {
+    // The removed hard refusal, asserted as an absence. The old guard
+    // re-checked at the claim and refused an approval the user had just given
+    // because the world had moved while they read the dialog.
+    let live = 0
+    const { guard, spawnCalls } = harness({ liveCount: () => live, allowance: () => 1 })
+    const spawn = async (p: string) => { spawnCalls.push(p) }
+    live = 1 // at the allowance, so this one has to be asked about
+    const token = needsToken(await guard.request('C:\\a', undefined, spawn))
+    live = 99 // the user opened a dozen themselves while the dialog was up
+
+    guard.answer(token, true)
+    expect(await guard.request('C:\\a', token, spawn)).toEqual({ kind: 'spawned' })
+    expect(spawnCalls).toEqual(['C:\\a'])
+  })
+
+  it('with the allowance at 0, every single call asks — KAN-41 behaviour, unchanged', async () => {
+    const { guard, prompts, spawnCalls } = harness({ liveCount: () => 0, allowance: () => 0 })
+    const spawn = async (p: string) => { spawnCalls.push(p) }
+    for (let i = 0; i < 3; i++) {
+      const token = needsToken(await guard.request(`C:\\r${i}`, undefined, spawn))
+      expect(spawnCalls.length).toBe(i) // nothing spawned by the ASK itself
+      guard.answer(token, true)
+      expect(await guard.request(`C:\\r${i}`, token, spawn)).toEqual({ kind: 'spawned' })
+    }
+    expect(prompts.length).toBe(3) // three sessions, three human answers
   })
 
   it('counts a spawn that is still in flight, before its pty exists', async () => {
     // liveCount stays 0 for this whole test ON PURPOSE: this is the window
     // between control() being asked for a session and the pty appearing in the
-    // handle map. Without the in-flight term, N redemptions overlapping in that
-    // window all read the same pre-spawn total and all pass the cap.
-    const { guard } = harness({ liveCount: () => 0, max: 1 })
+    // handle map. Without the in-flight term, N requests overlapping in that
+    // window all read the same pre-spawn total and all spawn FREELY — the
+    // allowance is not a cap any more, but it is still the thing that decides
+    // whether a human is involved, and losing count of an in-flight spawn is
+    // how an agent gets N sessions for one allowance of 1.
+    const { guard, prompts } = harness({ liveCount: () => 0, allowance: () => 1 })
     let release = () => {}
     const hang = () => new Promise<void>((r) => { release = r })
 
-    const token = needsToken(await guard.request('C:\\a', undefined, hang))
-    guard.answer(token, true)
-    const spawning = guard.request('C:\\a', token, hang)
+    const spawning = guard.request('C:\\a', undefined, hang) // free: 0 of 1
     await flush()
     expect(guard.inFlight).toBe(1)
 
     const second = await guard.request('C:\\b', undefined, hang)
-    expect(second.kind).toBe('refused')
-    expect(refusal(second)).toMatch(/at most 1 Claude sessions/i)
+    expect(second.kind).toBe('needsConfirm') // asked, not silently spawned
+    expect(prompts.map((p) => p.path)).toEqual(['C:\\b'])
 
     // And it is a window, not a leak: the term goes away when the spawn returns.
     release()
     expect(await spawning).toEqual({ kind: 'spawned' })
     expect(guard.inFlight).toBe(0)
-    expect((await guard.request('C:\\b', undefined, hang)).kind).toBe('needsConfirm')
   })
 
-  it('re-checks the cap after the human answers, not only before they were asked', async () => {
-    // The world moves while a human thinks. A token minted under the cap two
-    // minutes ago is not evidence there is still room, and the mint-time check
-    // is the only other one.
-    let live = 0
-    const { guard, spawnCalls } = harness({ liveCount: () => live, max: 1 })
+  it('a Deny still silences the next ask even when the allowance has room', async () => {
+    // The cooldown outranks the free path. Otherwise a user's refusal is walked
+    // around by one tab closing: the very next call would spawn SILENTLY,
+    // giving the agent by default what it was just told it could not have.
+    let live = 8
+    const { guard, spawnCalls, advance } = harness({
+      liveCount: () => live, allowance: () => 8, cooldownMs: 10_000,
+    })
     const spawn = async (p: string) => { spawnCalls.push(p) }
-    const token = needsToken(await guard.request('C:\\a', undefined, spawn))
-    guard.answer(token, true)
-    live = 1 // the user started one themselves, or another redemption landed
+    const token = needsToken(await guard.request('C:\\a', undefined, spawn)) // at 8 of 8: asked
+    guard.answer(token, false)
 
-    const r = await guard.request('C:\\a', token, spawn)
-    expect(r.kind).toBe('refused')
-    expect(refusal(r)).toMatch(/at most 1 Claude sessions/i)
+    live = 0 // a tab closed: there is now room for eight free spawns
+    const denied = await guard.request('C:\\a', undefined, spawn)
+    expect(denied.kind).toBe('refused')
+    expect(refusal(denied)).toMatch(/denied the last request/i)
+    expect(spawnCalls).toEqual([]) // and nothing started behind the refusal
+
+    // The control, and the reason this is not merely asserting a constant: the
+    // same guard with the same room spawns freely once the cooldown wears off.
+    advance(10_000)
+    expect(await guard.request('C:\\a', undefined, spawn)).toEqual({ kind: 'spawned' })
+    expect(spawnCalls).toEqual(['C:\\a'])
+  })
+})
+
+// KAN-64's reap. Every case here is about WHICH tabs may be closed and WHEN —
+// the risk the ticket calls "the whole risk", because a dead tab and a dormant
+// restored one both have no live process and only one of them is disposable.
+// This file owns the WHEN (the guard never reaps unless a spawn needs the
+// room); mcp.ts owns the WHICH, and the harness owns proving it on real tabs.
+describe('spawnguard reap', () => {
+  it('is not called at all while there is room', async () => {
+    let reaps = 0
+    const { guard, spawnCalls } = harness({
+      liveCount: () => 3,
+      allowance: () => 8,
+      reap: async () => { reaps++; return 0 },
+    })
+    const r = await guard.request('C:\\a', undefined, async (p) => { spawnCalls.push(p) })
+    expect(r).toEqual({ kind: 'spawned' })
+    expect(reaps).toBe(0) // nothing disappears while the user is merely using the app
+  })
+
+  it('runs when a spawn would cross the allowance, and a freed slot means no prompt', async () => {
+    let reaps = 0
+    const { guard, prompts, spawnCalls } = harness({
+      liveCount: () => 8,
+      allowance: () => 8,
+      // Two dead tabs closed: the snapshot had 8 agent tabs, 6 are left.
+      reap: async () => { reaps++; return 6 },
+    })
+    const r = await guard.request('C:\\a', undefined, async (p) => { spawnCalls.push(p) })
+    expect(reaps).toBe(1)
+    expect(r).toEqual({ kind: 'spawned' })
+    expect(prompts).toEqual([]) // the user was never asked — the room was already theirs
+    expect(spawnCalls).toEqual(['C:\\a'])
+  })
+
+  it('prompts, not refuses, when the reap frees nothing', async () => {
+    const { guard, prompts, spawnCalls } = harness({
+      liveCount: () => 8,
+      allowance: () => 8,
+      reap: async () => 8, // every agent tab is alive or dormant; none was closed
+    })
+    const r = await guard.request('C:\\a', undefined, async (p) => { spawnCalls.push(p) })
+    expect(r.kind).toBe('needsConfirm')
+    expect(prompts.length).toBe(1)
     expect(spawnCalls).toEqual([])
+  })
+
+  it('treats a reap that could not tell (no window, a timeout) as no room freed', async () => {
+    const { guard, prompts } = harness({
+      liveCount: () => 8, allowance: () => 8, reap: async () => null,
+    })
+    const r = await guard.request('C:\\a', undefined, async () => {})
+    expect(r.kind).toBe('needsConfirm')
+    expect(prompts.length).toBe(1)
+  })
+
+  it('reads the room from the reap\'s own snapshot, not a re-poll of liveCount', async () => {
+    // liveCount is Math.max(live, persisted), and the persisted half reads
+    // stale-high until the renderer's immediate-persist lands. If the guard
+    // re-polled it after the reap, the slot the reap had just freed would be
+    // invisible and the user would be asked about a session that fits.
+    const { guard, prompts } = harness({
+      liveCount: () => 8, // never moves, exactly like a stale persisted count
+      allowance: () => 8,
+      reap: async () => 7,
+    })
+    expect(await guard.request('C:\\a', undefined, async () => {})).toEqual({ kind: 'spawned' })
+    expect(prompts).toEqual([])
+  })
+
+  it('does not reap at an allowance of 0 — no count there can ever make room', async () => {
+    let reaps = 0
+    const { guard } = harness({
+      liveCount: () => 0, allowance: () => 0, reap: async () => { reaps++; return 0 },
+    })
+    expect((await guard.request('C:\\a', undefined, async () => {})).kind).toBe('needsConfirm')
+    expect(reaps).toBe(0) // closing tabs to make room that cannot exist is pure loss
+  })
+
+  it('two requests that reap concurrently still leave exactly one prompt up', async () => {
+    // The reap introduced an `await` between the pending check and the mint. If
+    // the guard does not re-check after it, two calls that both crossed the
+    // allowance both mint — the second clobbers the first's pending record, the
+    // user sees two dialogs, and answering one settles a token nothing holds.
+    let release = () => {}
+    const gate = new Promise<void>((r) => { release = r })
+    const { guard, prompts } = harness({
+      liveCount: () => 8,
+      allowance: () => 8,
+      reap: async () => { await gate; return 8 },
+    })
+    const a = guard.request('C:\\a', undefined, async () => {})
+    const b = guard.request('C:\\b', undefined, async () => {})
+    release()
+    const [ra, rb] = await Promise.all([a, b])
+
+    expect(prompts.length).toBe(1) // ONE dialog for ONE outstanding confirmation
+    expect([ra.kind, rb.kind].sort()).toEqual(['needsConfirm', 'refused'])
+    expect(refusal(ra.kind === 'refused' ? ra : rb)).toMatch(/already asking/i)
+    expect(guard.pending?.path).toBe(prompts[0].path) // the record IS the dialog on screen
   })
 })
 

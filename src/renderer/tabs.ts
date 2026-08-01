@@ -56,6 +56,11 @@ export function toPersisted(t: Tab): PersistedTab {
  * `usePtyStatus()`'s map, which is keyed by **ptyId**, not by tab id. A tab
  * with no process (files, viewer) therefore reports no status at all, and
  * neither does a terminal whose pty has not emitted yet.
+ *
+ * `agentSpawned` IS reported (KAN-64), unlike `groupId`/`pinned`: it is the
+ * only way anything outside the renderer can tell a tab the spawn tool opened
+ * from one the user opened, which is half the dead-vs-dormant test the reap in
+ * mcp.ts makes before it closes anything. `status` is the other half.
  */
 export function toControlTab(t: Tab, status: ReadonlyMap<string, PtyStatus>): ControlTab {
   return {
@@ -66,6 +71,7 @@ export function toControlTab(t: Tab, status: ReadonlyMap<string, PtyStatus>): Co
     title: t.title,
     terminalKind: t.terminalKind,
     status: t.ptyId ? status.get(t.ptyId) : undefined,
+    agentSpawned: t.agentSpawned,
   }
 }
 
