@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { canReflow, type Side } from '../gridlayout';
+import { primaryMod } from '../keys';
 
 /** The ceiling on the arrangement this can express. ponytail: 5x5 is the line
  *  between "a keyboard path to the niche MxN arrangements" and a layout
@@ -7,7 +8,8 @@ import { canReflow, type Side } from '../gridlayout';
  *  actually wants a sixth track. */
 const MAX = 5;
 
-/** Ctrl+Arrow moves the focused pane; plain Arrow sizes the block. */
+/** Ctrl+Arrow (Cmd+Arrow on macOS — KAN-91) moves the focused pane; plain
+ *  Arrow sizes the block. */
 const DIRS: Record<string, Side> = {
   ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'top', ArrowDown: 'bottom',
 };
@@ -25,8 +27,9 @@ export interface GridPickerProps {
    *  (splitgrid.ts's container contract). */
   anchor: DOMRect | null;
   onApply: (cols: number, rows: number) => void;
-  /** Ctrl+Arrow. Committed immediately and NOT part of what Escape reverts —
-   *  same as the divider arrows, which also commit per press. */
+  /** Ctrl+Arrow (Cmd+Arrow on macOS). Committed immediately and NOT part of
+   *  what Escape reverts — same as the divider arrows, which also commit per
+   *  press. */
   onMovePane: (dir: Side) => void;
   onClose: () => void;
 }
@@ -73,7 +76,7 @@ export function GridPicker({ count, anchor, onApply, onMovePane, onClose }: Grid
     const dir = DIRS[e.key];
     if (!dir) return;
     e.preventDefault();
-    if (e.ctrlKey) { onMovePane(dir); return; }
+    if (primaryMod(e)) { onMovePane(dir); return; } // KAN-91: Cmd on macOS, Ctrl elsewhere
     const c = (sel?.c ?? 1) + (dir === 'right' ? 1 : dir === 'left' ? -1 : 0);
     const r = (sel?.r ?? 1) + (dir === 'bottom' ? 1 : dir === 'top' ? -1 : 0);
     if (c >= 1 && c <= MAX && r >= 1 && r <= MAX) pick(c, r);

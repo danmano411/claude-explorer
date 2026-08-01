@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { DEFAULT_SPACE_KEYBINDS, pinnedSpaceIndex, spaceCycle, spaceIndex, type SpaceKeybinds } from '../keys';
+import { DEFAULT_SPACE_KEYBINDS, pinnedSpaceIndex, primaryMod, spaceCycle, spaceIndex, type SpaceKeybinds } from '../keys';
 
 /** Quiet time after which a moving size is treated as finished. */
 const SETTLE_MS = 120;
@@ -55,7 +55,14 @@ export function Terminal({
       // helper textarea, xterm's native "paste" listener pastes a second time
       // (it stopPropagations but never preventDefaults), and the pty receives two
       // complete — separately bracketed — runs.
-      if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) {
+      //
+      // KAN-91: `primaryMod` (Cmd on macOS, Ctrl elsewhere), not a raw
+      // `e.ctrlKey` — a REAL mac terminal's Ctrl+V is bash/readline's own
+      // "quoted-insert", not paste; paste is Cmd+V there, same as everywhere
+      // else on the platform. Swapping the check (rather than adding `||
+      // e.metaKey`) is what keeps literal Ctrl+V reaching the shell on macOS
+      // instead of being swallowed as a second, wrong, paste binding.
+      if (primaryMod(e) && (e.key === 'v' || e.key === 'V')) {
         e.preventDefault();
         // KAN-60. An image on the clipboard is not bytes a pty can carry, and it
         // does not have to be: Claude Code reads the Windows clipboard ITSELF (a
@@ -106,7 +113,10 @@ export function Terminal({
       // Shift+Enter put "\n" then "\r" on the wire — a newline AND a submit.
       // (Ctrl+Enter escaped it only because that handler ignores ctrl-modified
       // keypresses, which is exactly the kind of accident not to rely on.)
-      if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+      // KAN-91: `primaryMod` instead of a raw `e.ctrlKey`, so Cmd+Enter is the
+      // macOS spelling of this — `e.shiftKey` alone is unaffected, Shift is
+      // the same physical key on every platform.
+      if (e.key === 'Enter' && (primaryMod(e) || e.shiftKey)) {
         e.preventDefault();
         window.api.ptyWrite(ptyId, '\n');
         return false;
