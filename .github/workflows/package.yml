@@ -5,8 +5,9 @@ name: Package
 # publishes; only a tag push creates a release, and it is a DRAFT — Dan still
 # publishes manually (see CLAUDE.md "Release process"). Nothing auto-publishes.
 #
-# Phase 0 is WINDOWS ONLY. macOS and Linux legs arrive with KAN-89..KAN-93;
-# see the block above publish-draft for why they are not stubbed in here.
+# Three platforms: Windows (NSIS), macOS (DMG, one leg per architecture) and
+# Linux (AppImage). No leg runs the test suite — that is PR Check's job, on
+# every PR into main; duplicating it here would only make releases slower.
 on:
   push:
     tags:
@@ -75,35 +76,181 @@ jobs:
             dist/latest.yml
           if-no-files-found: error
 
-  # --- macOS and Linux legs: deliberately absent in Phase 0 ---
+  # KAN-92. UNSIGNED, by owner decision — no Apple Developer Program
+  # membership ($99/yr), so no `Developer ID Application` certificate, no
+  # notarization, and NO SIGNING SECRETS ANYWHERE IN THIS FILE. The visible
+  # consequence is Gatekeeper: users get "Apple cannot check this app for
+  # malicious software" and must right-click → Open (or allow it under System
+  # Settings → Privacy & Security). README's Platform support section says so.
   #
-  # Not "tests only" placeholders either, because `npm test` CANNOT PASS on
-  # POSIX today and a failing leg here would block publish-draft through
-  # `needs`. src/main/cli.ts imports `resolve` from 'node:path' (the
-  # platform-default implementation) while cli.test.ts asserts Windows-shaped
-  # output; on Linux/macOS path.posix.resolve treats 'C:\base' as a single
-  # relative segment and prefixes cwd. Several other suites feed real Windows
-  # paths to platform-default path code the same way.
+  # Nothing is signed at all. This leg's log says so verbatim: "skipped macOS
+  # application code signing ... 0 identities found". Ad-hoc signing
+  # (`mac.identity: "-"`) is deliberately NOT used as a consolation prize —
+  # it produces a signature with no Apple Team ID, so it buys nothing with
+  # Gatekeeper, and electron-builder defaults `hardenedRuntime` to true once
+  # signing is on, which without `com.apple.security.cs.allow-jit` and
+  # `allow-unsigned-executable-memory` entitlements kills Electron's V8 JIT.
+  # KAN-92 records that trade-off; changing it means adding an entitlements
+  # plist, not flipping a flag.
   #
-  # These legs arrive with the work that makes them meaningful:
-  #   KAN-89  cross-platform path abstraction (the contract)
-  #   KAN-90  POSIX branches for policy/trash/pty/ide/search/external
-  #   KAN-92  macOS build   — needs `build.mac` in package.json + the signing
-  #                           decision ($99/yr Apple Developer; unsigned means
-  #                           no auto-update at all)
-  #   KAN-93  Linux build   — needs `build.linux`, and the runner must
-  #                           `apt-get install -y build-essential python3`
-  #                           BEFORE `npm ci`: node-pty ships prebuilds for
-  #                           darwin-arm64/x64 and win32-arm64/x64 only, with
-  #                           NO Linux prebuild, so its install falls back to
-  #                           `node-gyp rebuild`.
+  # UNVERIFIED, and the honest caveat on this whole leg: nobody has launched
+  # the DMG on a Mac. On Apple Silicon an unsigned bundle sometimes reports
+  # "is damaged and can't be opened" rather than the normal Gatekeeper
+  # prompt; `xattr -cr` on the installed app clears it, and the README says
+  # so. Confirming which of the two a real Mac shows needs real hardware.
   #
-  # Adding a green-but-empty leg now would be worse than having none: it would
-  # read as "macOS is covered" on a repo where nothing has ever run there.
+  # Auto-update is disabled on macOS in src/main/updater.ts (Squirrel.Mac
+  # verifies a Developer ID signature that does not exist), so this leg
+  # deliberately builds DMG ONLY. electron-builder's usual advice is to ship a
+  # zip alongside the DMG, but a zip's only job is to feed electron-updater —
+  # with no update path it is a second ~100 MB asset nobody can use, and the
+  # DMG is what a Mac user expects to download anyway. Add `zip` to
+  # build.mac.target, and latest-mac.yml to publish-draft, the day signing lands.
+  #
+  # One leg per architecture rather than a universal binary, because
+  # @vscode/ripgrep ships per-arch optional dependencies: `npm ci` on an
+  # arm64 runner installs @vscode/ripgrep-darwin-arm64 and NOT -darwin-x64,
+  # so a cross-built x64 package would fail to find its extraResources.
+  # node-pty is fine either way — it vendors every prebuild in one package.
+  macos:
+    name: macOS (DMG, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One arch failing must not cancel the other; they are separate
+      # deliverables and a broken Intel leg should not hide a good arm64 DMG.
+      fail-fast: false
+      matrix:
+        include:
+          # `macho` is what `file(1)` calls the same architecture — the
+          # verify step below compares against it.
+          - runner: macos-latest
+            arch: arm64
+            macho: arm64
+          - runner: macos-15-intel
+            arch: x64
+            macho: x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package (DMG)
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+
+      # KAN-92 acceptance criterion 3: search must find the darwin ripgrep in
+      # the packaged app. This is the one behavioural criterion a runner can
+      # actually settle, and it is worth settling — `extraResources` points at
+      # @vscode/ripgrep-darwin-${arch}, a PER-ARCH optional dependency, so the
+      # failure mode is a package that builds clean and then degrades every
+      # search to filename-only forever (resolveRg() returns null by design
+      # rather than throwing). Running `rg --version` is the assertion: a
+      # wrong-architecture binary copies in perfectly and only fails to execute.
+      - name: Verify packaged resources
+        run: |
+          set -euo pipefail
+          app=$(ls -d dist/mac*/'Claude Explorer.app')
+          echo "bundle: $app"
+          file "$app/Contents/MacOS/Claude Explorer"
+          file "$app/Contents/MacOS/Claude Explorer" | grep -q '${{ matrix.macho }}'
+          file "$app/Contents/Resources/rg"
+          file "$app/Contents/Resources/rg" | grep -q '${{ matrix.macho }}'
+          "$app/Contents/Resources/rg" --version
+
+      # Only the DMG. latest-mac.yml is generated but deliberately NOT
+      # uploaded: publishing an update feed for a platform whose updater is
+      # switched off is how a user ends up with a download that cannot install.
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.arch }}
+          path: dist/Claude-Explorer-*.dmg
+          if-no-files-found: error
+
+  # KAN-93. AppImage only: the one Linux artifact electron-updater can update,
+  # and it needs no package manager. deb/rpm users update through theirs.
+  linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # BEFORE npm ci, and installed explicitly rather than assumed present.
+      # node-pty's prebuilds/ has darwin-arm64, darwin-x64, win32-arm64 and
+      # win32-x64 — and NOTHING for Linux — so its install script falls back to
+      # `node-gyp rebuild`, which needs a C++ toolchain and python3. Trusting
+      # the runner image for this is exactly what breaks silently the next time
+      # GitHub rotates it.
+      - name: Install node-pty build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # npmRebuild stays false even here: node-pty is N-API, so the binary
+      # node-gyp just produced above loads in Electron unchanged.
+      - name: Package (AppImage)
+        run: npx electron-builder --linux --publish never
+
+      # KAN-93 acceptance criteria 1 and 3, checked against the artifact that
+      # actually ships rather than against dist/linux-unpacked. --appimage-extract
+      # is the AppImage runtime's own flag and needs no FUSE, so it works on a
+      # headless runner. Running `rg --version` is the real assertion: a
+      # wrong-platform binary copies in fine and only fails to execute.
+      - name: Verify packaged AppImage
+        run: |
+          set -euo pipefail
+          appimage=$(ls dist/Claude-Explorer-*.AppImage)
+          echo "artifact: $appimage"
+          "$appimage" --appimage-extract >/dev/null
+          echo '--- generated .desktop entry ---'
+          cat squashfs-root/*.desktop
+          echo '--- executable name (this is what Chromium reports as WM_CLASS) ---'
+          ls squashfs-root/claude-explorer
+          file squashfs-root/resources/rg
+          file squashfs-root/resources/rg | grep -q 'ELF 64-bit'
+          squashfs-root/resources/rg --version
+          # StartupWMClass only does its job if it matches the executable's own
+          # name; asserting that beats trusting the string in package.json.
+          grep -qx 'StartupWMClass=claude-explorer' squashfs-root/*.desktop
+          grep -qx 'Categories=Development;' squashfs-root/*.desktop
+
+      # latest-linux.yml IS uploaded — unlike macOS, AppImage auto-update
+      # works, so electron-updater needs its feed in the release.
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            dist/Claude-Explorer-*.AppImage
+            dist/latest-linux.yml
+          if-no-files-found: error
 
   publish-draft:
     name: Publish draft release
-    needs: [windows]
+    needs: [windows, macos, linux]
     # Only a tag push publishes anything; `workflow_dispatch` builds/tests
     # every leg and stops (artifacts stay attached to the run for
     # inspection). `success()` must be explicit: adding a custom `if:` to a
@@ -123,11 +270,23 @@ jobs:
           name: windows-installer
           path: dist
 
-      # Add macos-installer / linux-installer downloads here once KAN-92 and
-      # KAN-93 add those legs, and add their files to the `gh release create`
-      # list below (mac also needs latest-mac.yml, Linux latest-linux.yml, or
-      # electron-updater has no feed for that platform).
+      # Two mac legs, one artifact each; merge-multiple flattens them into the
+      # same dist/ since their filenames already carry the architecture.
+      - name: Download macOS DMGs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-dmg-*
+          merge-multiple: true
+          path: dist
 
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist
+
+      # Update feeds: latest.yml (Windows) and latest-linux.yml (AppImage).
+      # There is no latest-mac.yml on purpose — see the macos job's comment.
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -136,4 +295,7 @@ jobs:
             --draft --title "${{ github.ref_name }}" --generate-notes \
             dist/Claude-Explorer-Setup-*.exe \
             dist/Claude-Explorer-Setup-*.exe.blockmap \
-            dist/latest.yml
+            dist/latest.yml \
+            dist/Claude-Explorer-*.dmg \
+            dist/Claude-Explorer-*.AppImage \
+            dist/latest-linux.yml

@@ -79,6 +79,10 @@
       ]
     },
     "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools",
+      "artifactName": "Claude-Explorer-${version}-${arch}.${ext}",
+      "notarize": false,
       "extraResources": [
         {
           "from": "node_modules/@vscode/ripgrep-darwin-${arch}/bin/rg",
@@ -87,6 +91,16 @@
       ]
     },
     "linux": {
+      "target": "AppImage",
+      "category": "Development",
+      "artifactName": "Claude-Explorer-${version}-${arch}.${ext}",
+      "desktop": {
+        "entry": {
+          "Comment": "Browse folders, open Claude Code in an embedded terminal",
+          "Keywords": "claude;code;terminal;files;explorer;",
+          "StartupWMClass": "claude-explorer"
+        }
+      },
       "extraResources": [
         {
           "from": "node_modules/@vscode/ripgrep-linux-${arch}/bin/rg",

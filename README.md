@@ -79,17 +79,53 @@ Every decision is made in the main process, not the UI, so no call site can forg
 
 ## Updating
 
-**Installed from a release:** Claude Explorer checks GitHub Releases on start, downloads new versions in the background, and offers to restart.
+**Installed from a release:** Claude Explorer checks GitHub Releases on start, downloads new versions in the background, and offers to restart. Windows and Linux only — see [Platform support](#platform-support) for why macOS updates by hand.
 
 **Built from source:** auto-update is off, since local builds are not tied to the release feed. `git pull && npm install && npm run package`, then run the freshly built installer.
 
 ## Platform support
 
-Windows today. macOS and Linux builds are in progress — the blocker is not the interface but a layer of genuinely Windows-shaped assumptions underneath it: drive letters, the Recycle Bin handoff, and how the `claude` binary gets resolved.
+**Windows** is the tested platform. Every release is built, run and QA'd there, and auto-update works.
+
+**macOS** and **Linux** builds are produced from the same release as of v0.10.0. They are new — the packaging is verified in CI, but they have had far less real-world use than the Windows build. Please report anything that looks wrong.
+
+| | Artifact | Auto-update |
+|---|---|---|
+| Windows | `Claude-Explorer-Setup-x.y.z.exe` | Yes |
+| macOS (Apple Silicon) | `Claude-Explorer-x.y.z-arm64.dmg` | **No** — see below |
+| macOS (Intel) | `Claude-Explorer-x.y.z-x64.dmg` | **No** — see below |
+| Linux (x64) | `Claude-Explorer-x.y.z-x86_64.AppImage` | Yes |
+
+### macOS: the app is unsigned, and Gatekeeper will say so
+
+Claude Explorer is not signed with an Apple `Developer ID` certificate and is not notarized. That requires an Apple Developer Program membership at $99/year, which this project does not have. Nothing is wrong with your download — Apple simply has no way to attest to it.
+
+The first time you open it you will get:
+
+> **"Claude Explorer" cannot be opened because Apple cannot check it for malicious software.**
+
+To open it anyway:
+
+1. **Right-click** (or Control-click) the app in Applications and choose **Open**, then **Open** again in the dialog. Double-clicking will *not* offer this — the right-click menu is what unlocks it.
+2. On Apple Silicon you may instead need **System Settings → Privacy & Security**, scroll to the message about Claude Explorer, and click **Open Anyway**.
+3. If macOS instead insists the app **"is damaged and can't be opened"**, that is the quarantine flag rather than actual damage. Clear it:
+   ```bash
+   xattr -cr "/Applications/Claude Explorer.app"
+   ```
+
+You only have to do this once per installed version.
+
+**Auto-update is switched off on macOS** as a direct consequence, deliberately rather than by accident. macOS verifies an update against the app's code signature before installing it, so an unsigned build cannot update itself; rather than download ~100 MB on every launch and fail at the last step, the app does not try. Watch the [Releases page](https://github.com/danmano411/claude-explorer/releases) and drag the new DMG over the old app. Windows and Linux update themselves normally.
+
+### Linux
+
+Download the AppImage, `chmod +x` it, and run it. It updates itself in place.
+
+Two differences from Windows, neither a bug: the unread-session badge goes through the Unity Launcher API, so Unity, KDE and GNOME-with-Dash-to-Dock show it while plain GNOME Shell shows nothing (the in-app markers carry the feature either way), and **Open in Terminal** tries a list of known terminal emulators — with none of them installed it declines rather than guessing.
 
 ## Tech stack
 
-Electron + electron-vite · React + TypeScript · [node-pty](https://github.com/microsoft/node-pty) · [@xterm/xterm](https://xtermjs.org/) · [Shiki](https://shiki.style) for syntax highlighting · bundled [ripgrep](https://github.com/BurntSushi/ripgrep) · Vitest + Playwright. Packaged with electron-builder (NSIS).
+Electron + electron-vite · React + TypeScript · [node-pty](https://github.com/microsoft/node-pty) · [@xterm/xterm](https://xtermjs.org/) · [Shiki](https://shiki.style) for syntax highlighting · bundled [ripgrep](https://github.com/BurntSushi/ripgrep) · Vitest + Playwright. Packaged with electron-builder — NSIS on Windows, DMG on macOS, AppImage on Linux.
 
 ## License
 
