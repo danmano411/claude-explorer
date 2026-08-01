@@ -1,0 +1,41 @@
+name: PR Check
+
+# Fast, cheap check on every PR into main. Intended to be configured as a
+# required status check (job id/name: "test") in branch protection — that
+# repo setting is a separate, manual step once this workflow exists on main.
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Type-check & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      # NODE_OPTIONS=--experimental-require-module is already set inside the
+      # "test" script itself (package.json), so plain `npm test` is correct
+      # here. The KAN-67 env-leak quirk that fails 2 pty.test.ts assertions
+      # when run inside a Claude Explorer terminal does not apply on a
+      # runner: GitHub Actions sets no CLAUDE_EXPLORER_* variables.
+      - name: Test
+        run: npm test

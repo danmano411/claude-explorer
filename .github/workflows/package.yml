@@ -1,0 +1,200 @@
+name: Package
+
+# Packaging matrix: builds installers for all three platforms. Runs on a
+# version-tag push (matching release.ps1's `v<version>` tag convention) or
+# manual dispatch. `workflow_dispatch` builds/tests everything but never
+# publishes; only a tag push creates a release, and it is a DRAFT — Dan
+# still publishes manually (see CLAUDE.md "Release process"). Nothing here
+# auto-publishes.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (NSIS)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # `--publish never`, always. electron-builder 26.x's own `--publish
+      # always` races itself into duplicate drafts (see release.ps1 and
+      # CLAUDE.md's Release process section) — that bug is why release.ps1
+      # never uses electron-builder to publish and instead calls `gh
+      # release create` itself once, by hand, over already-built files. The
+      # publish-draft job below reproduces exactly that, from artifacts
+      # collected here.
+      - name: Package (NSIS)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish never
+
+      # electron-builder writes dist/latest.yml referencing the HYPHENATED
+      # asset name ("Claude-Explorer-Setup-<version>.exe") because GitHub
+      # mangles spaces in release asset filenames, but the NSIS installer it
+      # actually produces is named with spaces
+      # ("Claude Explorer Setup <version>.exe"). release.ps1 copies the
+      # built files to the hyphenated names before uploading so the asset
+      # electron-updater fetches matches what latest.yml points at — mirror
+      # that exactly here.
+      - name: Rename installer assets to match latest.yml
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $dist = Join-Path $PWD 'dist'
+          $exe = Join-Path $dist "Claude-Explorer-Setup-$version.exe"
+          Copy-Item (Join-Path $dist "Claude Explorer Setup $version.exe") $exe -Force
+          Copy-Item (Join-Path $dist "Claude Explorer Setup $version.exe.blockmap") "$exe.blockmap" -Force
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/Claude-Explorer-Setup-*.exe
+            dist/Claude-Explorer-Setup-*.exe.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+
+  macos:
+    # ponytail: Phase 0 (KAN-88) boundary. macOS packaging (DMG + zip) is
+    # deliberately NOT wired up yet — the cross-platform source work
+    # (KAN-89..KAN-93) hasn't landed and `build.mac` doesn't exist in
+    # package.json yet, so there is nothing for electron-builder to target.
+    # This leg only proves the app still type-checks and passes tests on
+    # macOS. Enabling packaging later is uncommenting the block below, not a
+    # rewrite, once package.json grows a `build.mac` target.
+    name: macOS (tests only — packaging not yet configured)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # --- enable once build.mac exists in package.json (KAN-89..KAN-93) ---
+      # - name: Build
+      #   run: npm run build
+      # - name: Package (DMG + zip)
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: npx electron-builder --mac --publish never
+      # - name: Upload installer artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: macos-installer
+      #     path: |
+      #       dist/*.dmg
+      #       dist/*.zip
+      #       dist/latest-mac.yml
+      #     if-no-files-found: error
+
+  linux:
+    # ponytail: same Phase 0 boundary as macOS above — AppImage packaging is
+    # deferred until the platform tickets land and `build.linux` exists.
+    # Tests only for now; uncomment to enable.
+    name: Linux (tests only — packaging not yet configured)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # node-pty ships prebuilt N-API binaries for darwin-arm64, darwin-x64,
+      # win32-arm64 and win32-x64 only — there is NO Linux prebuild, so its
+      # install falls back to `node-gyp rebuild`. Install the toolchain
+      # explicitly before `npm ci` rather than trusting the runner image to
+      # already have a working one.
+      - name: Install native build toolchain (node-pty has no Linux prebuild)
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # --- enable once build.linux exists in package.json (KAN-89..KAN-93) ---
+      # - name: Build
+      #   run: npm run build
+      # - name: Package (AppImage)
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: npx electron-builder --linux --publish never
+      # - name: Upload installer artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: linux-installer
+      #     path: |
+      #       dist/*.AppImage
+      #       dist/latest-linux.yml
+      #     if-no-files-found: error
+
+  publish-draft:
+    name: Publish draft release
+    needs: [windows, macos, linux]
+    # Only a tag push publishes anything; `workflow_dispatch` builds/tests
+    # every leg and stops (artifacts stay attached to the run for
+    # inspection). `success()` must be explicit: adding a custom `if:` to a
+    # job replaces the default "all `needs` succeeded" gate rather than
+    # adding to it.
+    if: success() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+
+      # Add macos-installer / linux-installer downloads here once those
+      # legs upload artifacts (see the commented-out blocks above), and add
+      # their files to the `gh release create` file list below.
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft --title "${{ github.ref_name }}" --generate-notes \
+            dist/Claude-Explorer-Setup-*.exe \
+            dist/Claude-Explorer-Setup-*.exe.blockmap \
+            dist/latest.yml
