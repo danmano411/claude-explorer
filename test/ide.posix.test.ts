@@ -24,7 +24,7 @@ vi.mock('node:child_process', () => ({
   },
 }))
 
-const fake = vi.hoisted(() => ({ exists: (_p: string) => false, ideCommand: 'code' }))
+const fake = vi.hoisted(() => ({ exists: (_p: string): boolean => false, ideCommand: 'code' }))
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>()
   const existsSync = (p: unknown) => fake.exists(String(p))

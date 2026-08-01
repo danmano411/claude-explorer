@@ -16,7 +16,7 @@ import { join } from 'node:path'
  * expectations are built with the same join() the module uses.
  */
 
-const box = vi.hoisted(() => ({ isPackaged: false, appPath: '/app', exists: (_p: string) => false }))
+const box = vi.hoisted(() => ({ isPackaged: false, appPath: '/app', exists: (_p: string): boolean => false }))
 vi.mock('electron', () => ({
   app: {
     get isPackaged() {

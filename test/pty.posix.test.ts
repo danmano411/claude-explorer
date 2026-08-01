@@ -40,7 +40,7 @@ vi.mock('node-pty', () => ({
 // resolveClaude() runs at import time and decides everything below by scanning
 // with existsSync. Which file "exists" is the test's decision, never the
 // machine's — that is the trap pty.test.ts documents for the .exe/.cmd split.
-const fake = vi.hoisted(() => ({ exists: (_p: string) => false }))
+const fake = vi.hoisted(() => ({ exists: (_p: string): boolean => false }))
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>()
   const existsSync = (p: unknown) => fake.exists(String(p))
