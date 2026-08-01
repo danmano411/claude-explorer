@@ -10,10 +10,10 @@
  * dialog has already been made invisible by habit. So a close is only ever
  * questioned when something dies with it that nothing on disk can bring back:
  *
- *   Claude, running/waiting → the live turn dies and the xterm scrollback is
- *                             not serialised anywhere (Terminal.tsx disposes
+ *   Claude, mid-turn        → the live turn dies and the xterm scrollback is
+ *   (working/awaiting-input)  not serialised anywhere (Terminal.tsx disposes
  *                             the instance)
- *   Claude, stopped         → nothing; the transcript is on disk and Open
+ *   Claude, idle/stopped    → nothing; the transcript is on disk and Open
  *                             Recent reopens the conversation
  *   shell                   → nothing about a shell is written anywhere, ever
  *   files / viewer          → nothing to kill
@@ -22,9 +22,18 @@
  * Deliberately not a risk: a rectangle is one drag to recreate, no process and
  * no buffer go with it, and prompting about layout is exactly the click-through
  * training above. Nothing here mentions panes, and neither does the copy.
+ *
+ * KAN-75. "Claude, idle" used to read as "running or waiting" — the only
+ * signal this file had was pty bytes (ptystatus.ts), and silence at an idle
+ * prompt is indistinguishable from silence mid-turn on bytes alone. Claude
+ * Code's own hook-reported state (claudestate.ts) can tell them apart, so idle
+ * now joins stopped in the "nothing" row above. Scrollback is still lost
+ * either way, on purpose: the transcript is the recoverable artifact, and
+ * confirming a close to protect a RENDERING of it is exactly the click-through
+ * training this file exists to avoid.
  */
 
-import type { PtyStatus, TabView } from '../shared/types'
+import type { ClaudeState, PtyStatus, TabView } from '../shared/types'
 
 export type CloseRisk = 'none' | 'claude' | 'shell'
 
@@ -50,11 +59,28 @@ export type Closeable = {
  *  - ptyId present, no map entry: the process exists and has not said anything
  *    yet. A pty that exists is alive; only `exit` says otherwise.
  *  - 'stopped': `pty:exit` has fired. The process is already gone.
+ *
+ * `claudeState` (KAN-73/75) answers a narrower question, ONLY for a Claude pty
+ * `status` has not already called stopped: is the session sitting idle at the
+ * prompt? Same absence rule as `status` — a ptyId missing from the map is
+ * UNKNOWN, never an optimistic default — which is exactly what covers every
+ * session with no hook state: an `agentSpawned` worker gets none by deliberate
+ * security decision, nor does a session this app did not launch, nor one
+ * spawned under `agentControl: false`. Those degrade to today's behaviour
+ * (unknown -> 'claude', the pre-KAN-75 default) rather than going silent.
+ * Only an explicit 'idle' clears the risk; 'working' and 'awaiting-input' both
+ * still mean a turn is in flight, and 'stopped' never arrives on this channel
+ * at all (see claudestate.ts) — that arm is handled above, off `status`.
  */
-export function closeRisk(t: Closeable, status: ReadonlyMap<string, PtyStatus>): CloseRisk {
+export function closeRisk(
+  t: Closeable,
+  status: ReadonlyMap<string, PtyStatus>,
+  claudeState: ReadonlyMap<string, ClaudeState> = new Map(),
+): CloseRisk {
   if (t.view !== 'terminal' || !t.ptyId) return 'none'
   if (status.get(t.ptyId) === 'stopped') return 'none'
-  return t.terminalKind === 'shell' ? 'shell' : 'claude'
+  if (t.terminalKind === 'shell') return 'shell'
+  return claudeState.get(t.ptyId) === 'idle' ? 'none' : 'claude'
 }
 
 /** "2 have a running Claude session and 1 is a live terminal" — the live tabs

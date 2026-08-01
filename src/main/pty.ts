@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 
-type Handle = { proc: pty.IPty; agentSpawned?: boolean }
+type Handle = { proc: pty.IPty; agentSpawned?: boolean; sessionId?: string }
 
 // node-pty on Windows does NOT PATH-resolve a bare command name (unlike a shell),
 // so `pty.spawn('claude', …)` throws "File not found". Resolve to an absolute path.
@@ -153,10 +153,22 @@ export function launchEnv(
  *
  * Shell tabs deliberately get neither: without --mcp-config the token buys them
  * nothing, and a shell hands its whole environment to everything the user runs.
+ *
+ * KAN-73 adds `settingsPath` — `claude --settings <path>`, the session-state
+ * hooks — to the SAME object rather than a second local, because it is gated on
+ * exactly the same three things: the server having bound (the hooks POST to
+ * it), the token existing (they authenticate with it), and `agentControl` being
+ * on (index.ts's kill switch clears this whole object). One local means the
+ * kill switch cannot take away two of the three and leave the third pointed at
+ * a dead port. All-or-nothing on purpose: if the settings file cannot be
+ * written, index.ts never calls this at all and the session simply has no
+ * hooks, which is a state the renderer already has to handle.
  */
-let mcp: { configPath: string; token: string } | null = null
+let mcp: { configPath: string; token: string; settingsPath: string } | null = null
 
-export function setMcpInjection(v: { configPath: string; token: string } | null): void {
+export function setMcpInjection(
+  v: { configPath: string; token: string; settingsPath: string } | null,
+): void {
   mcp = v
 }
 
@@ -209,6 +221,23 @@ function batchCommandLine(shim: string, args: string[]): string {
 
 export class PtyManager {
   private handles = new Map<string, Handle>()
+  /**
+   * KAN-73. Claude session id -> ptyId, so a hook that reports `session_id` can
+   * be addressed to the renderer the way everything else on this pty is
+   * (pty:data / pty:exit are keyed by ptyId).
+   *
+   * The correlation is free rather than inferred: spawn() already passes the
+   * session UUID as --session-id (a new conversation) or --resume (an existing
+   * one), and Claude Code reports THAT id back in every hook payload —
+   * including across a resume, which was measured rather than assumed, since a
+   * resume that minted a fresh id would silently break every restored tab.
+   *
+   * Written only after node-pty has actually returned a process, so a launch
+   * that threw leaves nothing behind, and deleted in both places the handle map
+   * is (onExit below and kill()) so a session id cannot outlive its pty and
+   * deliver a state to a tab that has gone.
+   */
+  private sessions = new Map<string, string>()
 
   spawn(
     opts: {
@@ -273,11 +302,41 @@ export class PtyManager {
     // It is a literal constant matching CMD_SAFE_BARE, so it needs no
     // SESSION_ID-style validation and goes out bare through batchCommandLine.
     //
-    // ONE local feeds BOTH injection sites: dropping the flag while leaving the
-    // bearer token in the child's environment is a half-fix, not a guard.
+    // ONE local feeds ALL THREE injection sites: dropping the flag while
+    // leaving the bearer token in the child's environment is a half-fix, not a
+    // guard.
+    //
+    // KAN-73 — DOES AN agentSpawned WORKER GET THE SESSION-STATE HOOK? NO, and
+    // the reasoning is required to live here rather than in a ticket.
+    //
+    // The case FOR is real: a worker blocked on a permission prompt is exactly
+    // the thing that should surface, and its tab shows the same misleading dot
+    // as any other. The case AGAINST is that it cannot be done without handing
+    // the worker the token, and the token is not a lesser credential than the
+    // config file — it is the WHOLE authentication for a loopback server that
+    // also serves /mcp. A worker holding it does not need --mcp-config: it has
+    // a shell, the port is in a file under userData, and a POST to /mcp is a
+    // few lines. So giving a worker the hook turns the recursion guard from a
+    // boundary into a formality — the very "half-fix" the paragraph above
+    // refuses, and the same reasoning KAN-67 used to strip an INHERITED copy of
+    // this token from exactly these children.
+    //
+    // What is given up is small and already a supported state: the worker falls
+    // back to PtyStatus and renders honest-unknown, which is the same
+    // degradation as a session started by hand in a shell tab. Its tab is
+    // visible, its output is on screen, and close_tab still reaches it.
+    //
+    // ponytail: the honest upgrade is a SECOND credential — a per-pty,
+    // state-only token that authenticates the hook route and nothing else, so a
+    // worker can report state without being able to call a tool. That needs a
+    // settings file per spawn (the URL or the header would differ per session)
+    // plus its lifecycle, for a dot on a worker tab. Build it if worker state
+    // ever turns out to matter; until then the guard stays absolute.
     const agentControl = opts.agentSpawned ? null : mcp
-    if (agentControl) claudeArgs.push('--mcp-config', agentControl.configPath)
-    else if (opts.agentSpawned) claudeArgs.push('--strict-mcp-config')
+    if (agentControl) {
+      claudeArgs.push('--mcp-config', agentControl.configPath)
+      claudeArgs.push('--settings', agentControl.settingsPath)
+    } else if (opts.agentSpawned) claudeArgs.push('--strict-mcp-config')
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)
     const file = isBatch ? process.env.COMSPEC || 'cmd.exe' : CLAUDE
@@ -310,13 +369,29 @@ export class PtyManager {
       return id
     }
 
+    // KAN-73. The id this session will report in its hook payloads: whichever
+    // of the two flags was actually passed above. `resumeId` first, matching
+    // the argv rule directly above it — when both are given claude gets
+    // --resume, so --resume is the id it will report.
+    const sessionId = opts.resumeId ?? opts.sessionId
     proc.onData((d) => onData(id, d))
     proc.onExit(({ exitCode }) => {
       onExit(id, exitCode)
       this.handles.delete(id)
+      if (sessionId) this.sessions.delete(sessionId)
     })
-    this.handles.set(id, { proc, agentSpawned: opts.agentSpawned })
+    this.handles.set(id, { proc, agentSpawned: opts.agentSpawned, sessionId })
+    if (sessionId) this.sessions.set(sessionId, id)
     return id
+  }
+
+  /** KAN-73. The live pty running Claude session `sessionId`, or undefined —
+   *  which is the answer for a session this app never spawned, one whose pty
+   *  has already exited, and any id a caller invented. Undefined means the
+   *  state is DROPPED in main; nothing reaches the renderer for a pty it does
+   *  not have. */
+  ptyForSession(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)
   }
 
   /** KAN-41's cap: how many app-spawned Claude sessions are alive right now.
@@ -365,7 +440,9 @@ export class PtyManager {
     }
   }
   kill(id: string) {
-    this.handles.get(id)?.proc.kill()
+    const h = this.handles.get(id)
+    h?.proc.kill()
     this.handles.delete(id)
+    if (h?.sessionId) this.sessions.delete(h.sessionId)
   }
 }

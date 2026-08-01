@@ -19,7 +19,7 @@ import {
   renameGroup, reorderWithGroups, setCollapsed, setPinned,
 } from '../shared/groups';
 import {
-  addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
+  addTabToSpace, createSpace, deleteSpace, orderSpaces, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, setSpaceColor, setSpacePinned, switchSpace,
 } from './spaces';
 import { spaceColorStyle } from '../shared/spacecolor';
@@ -28,8 +28,13 @@ import type { ConfirmRequest } from './opresult';
 import type {
   ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
-import { isTextBox, spaceIndex } from './keys';
+import {
+  DEFAULT_SPACE_KEYBINDS, isTextBox, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
+  type SpaceKeybinds,
+} from './keys';
 import { usePtyStatus } from './ptystatus';
+import { useClaudeState } from './claudestate';
+import { spaceNeedsInput } from './spacemenu';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
@@ -73,6 +78,22 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  // KAN-83. The resolved (all four fields present) space keybinds, cached here
+  // rather than re-read per keystroke — `settingsGet` is async and a keydown
+  // handler has to decide synchronously, before xterm's own capture-phase
+  // handling runs (see Terminal.tsx). Fetched on mount and again whenever the
+  // Settings modal closes (`refreshKeybinds` below), which is what makes a
+  // rebind take effect with no restart (KAN-83 acceptance #1) — the modal
+  // itself is the only writer, and `settingsSet` has already resolved by the
+  // time `onClose` fires. Passed down to every `Terminal` as a prop so both
+  // halves (this file's window listeners, Terminal.tsx's
+  // `attachCustomKeyEventHandler`) read the SAME value; see that file for how
+  // it stays live without re-running the effect that creates the xterm
+  // instance.
+  const [keybinds, setKeybinds] = useState<SpaceKeybinds>(DEFAULT_SPACE_KEYBINDS);
+  const refreshKeybinds = () =>
+    void window.api.settingsGet().then((s) => setKeybinds(resolveSpaceKeybinds(s.spaceKeybinds)));
+  useEffect(() => { refreshKeybinds(); }, []);
   /** KAN-41: the outstanding "an agent wants to start Claude in <path>" prompt.
    *  A single nullable, not a queue — main allows exactly one outstanding
    *  confirmation app-wide, so a second one arriving is a bug in main, not a
@@ -92,6 +113,19 @@ export function App() {
    *  close confirm and a move confirm silently overwrite each other. */
   const [pendingMove, setPendingMove] = useState<ConfirmRequest | null>(null);
   const status = usePtyStatus();
+  // KAN-73/74/75/76: the ONE Claude-session-state map, shared by the dot
+  // (TabBar.tsx), the cross-space markers (SpaceMenu.tsx) and the close guard
+  // (`closeRisk`, below). See renderer/claudestate.ts for why this is a single
+  // hook rather than a subscription per consumer: two subscriptions would NOT
+  // have conflicted in git, they would have silently disagreed about `pty:exit`
+  // — the only route to 'stopped', since a dead process cannot POST its own
+  // death, and the one thing a second hand-written copy is most likely to omit.
+  //
+  // Keyed by ptyId like `status`, and the same absence rule: a ptyId missing
+  // here is UNKNOWN, never "idle". That is precisely what lets `closeRisk` keep
+  // today's behaviour for every session with no hook signal — an agentSpawned
+  // worker, a session this app did not launch, or agentControl: false.
+  const claudeState = useClaudeState();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
   // fractions against its box.
@@ -808,7 +842,8 @@ export function App() {
     const rest = resolved.filter((t) => !t.pinned);
     const doomed = rest.map((t) => t.id);
     if (doomed.length) {
-      const reason = mode === 'now' ? null : closeReason(rest.map((t) => closeRisk(t, status)));
+      const reason = mode === 'now' ? null
+        : closeReason(rest.map((t) => closeRisk(t, status, claudeState)));
       // The common case — files, viewers, a finished Claude tab, a dead shell —
       // is byte-for-byte what it was: one click, no modal, nothing awaited.
       if (reason === null) closeNow(doomed);
@@ -1358,7 +1393,11 @@ export function App() {
     moveToSpace(owner.tabIds.filter((id) => byId.get(id)?.groupId === groupId), spaceId, false);
   };
 
-  // Ctrl+1..9 selects the nth space.
+  // Ctrl+1..9 selects the nth UNPINNED space; Ctrl+Shift+1..9 the nth PINNED
+  // one (KAN-82). Both group-relative, matching the accelerator labels
+  // SpaceMenu renders via `acceleratorLabel` — "Ctrl+3" is always the 3rd
+  // unpinned space, never the 3rd space overall, so a pinned space sliding in
+  // ahead of it in the dropdown never changes what the digit means.
   //
   // KAN-59: this used to be gated by `isTypingTarget`, which made it dead
   // whenever a terminal had focus — xterm's focus sink is a hidden
@@ -1369,13 +1408,14 @@ export function App() {
   // used it for exactly this distinction since KAN-56). Not a widened
   // `isTypingTarget`: that one is tag-based on purpose, and an xterm exception
   // by class name is a list to forget to update. The address bar / search box /
-  // rename inputs keep declining Ctrl+1..9 exactly as before — a rename in
+  // rename inputs keep declining these shortcuts exactly as before — a rename in
   // flight when the space changes out from under it is a state nobody asked for
   // — while a terminal, which is a <textarea> and not one of ours, no longer
   // does.
   //
   // The other half of the fix is in Terminal.tsx, and BOTH are needed — measured
-  // by breaking each one on its own (test/harness/paste.mjs §11 catches either).
+  // by breaking each one on its own (test/harness/paste.mjs §11 catches either,
+  // for the unpinned digits it already covered before KAN-82).
   // xterm registers its keydown listener on that textarea, i.e. at the TARGET
   // phase, strictly before this bubble-phase window listener, and for the six
   // digits that produce a control code it finishes in `cancel(event, true)` —
@@ -1384,20 +1424,64 @@ export function App() {
   // never arrives here and nothing switches at all. Terminal.tsx's arm returns
   // false before that cancel, which both withholds the byte and lets the press
   // through to us; this half performs the switch, because only App knows how
-  // many spaces there are.
+  // many spaces exist IN EACH GROUP.
+  //
+  // KAN-83: `keybinds.switchUnpinned`/`.switchPinned` are now passed in rather
+  // than hardcoded, and are therefore in the dependency array — cheap here
+  // (just re-attaching a window listener, not recreating an xterm instance
+  // the way Terminal.tsx's equivalent would be) so a rebind takes effect on
+  // the very next keystroke with no restart.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const i = spaceIndex(e);
-      if (i === null) return;
+      const unpinned = spaceIndex(e, keybinds.switchUnpinned);
+      const pinned = unpinned === null ? pinnedSpaceIndex(e, keybinds.switchPinned) : null;
+      if (unpinned === null && pinned === null) return;
       if (isTextBox(e.target)) return; // our own inputs only; a terminal is not one
-      const target = spaces[i];
-      if (!target) return; // fewer than n spaces: leave the key alone
+      const pool = pinned !== null ? spaces.filter((s) => s.pinned) : spaces.filter((s) => !s.pinned);
+      const target = pool[pinned !== null ? pinned : unpinned!];
+      if (!target) return; // fewer than n spaces IN THAT GROUP: leave the key alone
       e.preventDefault();
       switchToSpace(target.id);
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [spaces, activeSpaceId]);
+  }, [spaces, activeSpaceId, keybinds]);
+
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle to the next/previous space in DISPLAY
+  // order (KAN-82) — the same pinned-run-then-unpinned-run order
+  // `orderSpaces` gives SpaceMenu's dropdown, so "next" here always matches
+  // "next" visually. Wraps at both ends, matching the alt-tab feel the ticket
+  // describes.
+  //
+  // NOT Ctrl+Left/Right: those are word-jump inside Claude Code's own input,
+  // and claiming them globally the way Ctrl+1..9 is claimed would permanently
+  // break word-by-word cursor movement in every terminal tab. Tab has no such
+  // conflict in a shell or in Claude Code.
+  //
+  // Same two-halves shape as the digit shortcuts above (KAN-59), with the same
+  // `isTextBox` guard — but this ALSO calls preventDefault unconditionally
+  // (not only once a target is found): Tab's browser default is a focus move,
+  // and with zero or one space there is nothing to switch to but still a
+  // press to keep off the pty and off the DOM's own focus order. See
+  // Terminal.tsx's arm and keys.ts's `spaceCycle` doc for why this one, unlike
+  // the digits, cannot leave preventDefault to "only when something changes".
+  // KAN-83: `keybinds.cycleNext`/`.cyclePrev`, same reasoning as the digit
+  // effect above.
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const dir = spaceCycle(e, keybinds.cycleNext, keybinds.cyclePrev);
+      if (dir === null) return;
+      if (isTextBox(e.target)) return;
+      e.preventDefault();
+      const ordered = orderSpaces(spaces);
+      if (ordered.length === 0) return;
+      const from = ordered.findIndex((s) => s.id === activeSpaceId);
+      const next = ordered[((from === -1 ? 0 : from) + dir + ordered.length) % ordered.length];
+      switchToSpace(next.id);
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [spaces, activeSpaceId, keybinds]);
 
   /**
    * Everything a `.pane` element needs. The click-to-focus handler is split-only:
@@ -1914,7 +1998,7 @@ export function App() {
     groups,
     groupActions: groupActionsFor(key),
     splitActions,
-    status,
+    claudeState,
     onSelect: selectTab,
     // Both the `×` and the context menu's Close land here (KAN-57) — never on
     // `closeTab`, which `closeNow` is now the only caller of.
@@ -1955,10 +2039,15 @@ export function App() {
       tabsOf={(spaceId): { risks: CloseRisk[]; pinnedCount: number } => {
         const members = sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs);
         return {
-          risks: members.map((t) => closeRisk(t, status)),
+          risks: members.map((t) => closeRisk(t, status, claudeState)),
           pinnedCount: members.filter((t) => t.pinned).length,
         };
       }}
+      // KAN-76: same join shape as `tabsOf` above, over `claudeState` instead
+      // of `status` — App is the only place that has both a space's tab
+      // membership and the ptyId-keyed state map to join them.
+      needsInput={(spaceId) =>
+        spaceNeedsInput(sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs), claudeState)}
     />
   );
 
@@ -2056,7 +2145,7 @@ export function App() {
         {tabs.map((t) =>
           t.view === 'terminal' && t.ptyId ? (
             <div key={t.id} {...paneProps(t)} hidden={!visibleIds.has(t.id)}>
-              <Terminal ptyId={t.ptyId} kind={t.terminalKind} />
+              <Terminal ptyId={t.ptyId} kind={t.terminalKind} keybinds={keybinds} />
             </div>
           ) : null,
         )}
@@ -2129,7 +2218,14 @@ export function App() {
           onClose={() => setPicker(false)}
         />
       )}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        // KAN-83: closing the modal — Save or Cancel alike — re-reads settings
+        // so a keybind change takes effect immediately. Re-fetching on Cancel
+        // too is deliberate: it is a no-op read, and distinguishing the two
+        // outcomes here would only duplicate SettingsModal's own knowledge of
+        // whether it actually wrote anything.
+        <SettingsModal onClose={() => { setShowSettings(false); refreshKeybinds(); }} />
+      )}
       {pendingClose && (
         <ConfirmDialog request={pendingClose} onClose={() => setPendingClose(null)} />
       )}

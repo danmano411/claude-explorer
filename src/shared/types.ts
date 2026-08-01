@@ -66,6 +66,41 @@ export interface Settings {
    * human gate.
    */
   agentFreeSessions: number
+  /**
+   * KAN-83. Overrides for the four space-switching shortcuts (KAN-59's
+   * Ctrl+1..9, KAN-82's pinned Ctrl+Shift+1..9 and Ctrl+Tab/Ctrl+Shift+Tab
+   * cycling). Absent — not a filled-in map — so the built-in defaults apply
+   * and an existing settings.json needs no migration (the `pinned?` /
+   * `agentSpawned?` precedent); each of the four keys is independently
+   * optional for the same reason, so rebinding one action need not restate
+   * the other three.
+   *
+   * The switch actions store only a modifier set: the space NUMBER a press
+   * selects is read off the physical digit key at match time
+   * (`spaceIndex`/`pinnedSpaceIndex` in `renderer/keys.ts`), never off this
+   * map. The cycle actions store a modifier set AND a key, because there is
+   * no digit to imply it — Tab itself is the configurable part.
+   *
+   * Shaped exactly like `renderer/keys.ts`'s `Mods`/`KeyBinding` but NOT
+   * imported from there: this ticket touches only this interface in this
+   * file, so the shape is restated structurally rather than importing a
+   * renderer type into a shared one. TS's structural typing is what makes a
+   * value round-trip between the two without any conversion — see
+   * `renderer/keys.ts`'s `resolveSpaceKeybinds` and `main/settings.ts`'s
+   * `normalizeSpaceKeybinds` for the two ends of that round trip.
+   *
+   * Normalized on read AND write like `agentFreeSessions` above
+   * (`main/settings.ts`): a field that is missing, wrongly shaped, or
+   * collides with another of these four falls back to ITS OWN default
+   * rather than leaving that one action — or a sibling it collided with —
+   * unreachable.
+   */
+  spaceKeybinds?: {
+    switchUnpinned?: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }
+    switchPinned?: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }
+    cycleNext?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
+    cyclePrev?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
+  }
 }
 
 /**
@@ -120,6 +155,33 @@ export type GitStatusResult =
   | { ok: false; reason: string; kind: 'notrepo' | 'nogit' | 'error' }
 
 export type PtyStatus = 'running' | 'waiting' | 'stopped'
+
+/**
+ * KAN-73. What a Claude session is actually DOING, as reported by Claude Code's
+ * own hooks — not inferred from pty traffic.
+ *
+ * `PtyStatus` above stays exactly as it is and keeps serving shell tabs, where
+ * "bytes are moving" genuinely does mean "something is running". Two types
+ * because there are two questions: bytes cannot tell "needs your permission"
+ * from "finished its turn" from "thinking quietly", since all three are silence
+ * and a keystroke echo is indistinguishable from output. Collapsing them is
+ * what produced this release's dot bugs.
+ *
+ * ABSENCE FROM THE MAP MEANS UNKNOWN, and unknown must stay representable:
+ * there is no optimistic default anywhere downstream (KAN-74 deletes
+ * `?? 'running'`). Plenty of real sessions never report at all — one the user
+ * typed `claude` into inside a shell tab, one launched while `agentControl` was
+ * off, one whose own settings set `disableAllHooks` or that was started
+ * `--bare`. Those degrade to `PtyStatus` and render honest-unknown; none of
+ * them may show a state they never earned.
+ *
+ * 'stopped' is in the union but NEVER arrives on `CH.claudeState`, and that is
+ * structural rather than an omission: a dead process cannot POST its own death.
+ * It is derived in the renderer from the `pty:exit` event that already exists,
+ * which is also the only signal available for the hookless sessions above. See
+ * the CH.claudeState comment in ipc.ts.
+ */
+export type ClaudeState = 'working' | 'awaiting-input' | 'idle' | 'stopped'
 
 // --- M3 search -------------------------------------------------------------
 

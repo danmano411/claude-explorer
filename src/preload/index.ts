@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, clipboard } from 'electron';
 import { CH } from '../shared/ipc';
 import type { Api } from '../shared/ipc';
 import type {
-  SearchHit, SearchDone, TrashWarn, ControlRequest, SpawnConfirmRequest,
+  SearchHit, SearchDone, TrashWarn, ControlRequest, SpawnConfirmRequest, ClaudeState,
 } from '../shared/types';
 
 const api: Api = {
@@ -99,6 +99,12 @@ const api: Api = {
     return () => ipcRenderer.off(CH.spawnConfirm, h);
   },
   spawnConfirmAnswer: (token, allow) => ipcRenderer.send(CH.spawnConfirmAnswer, token, allow),
+  // --- KAN-73 session state ---
+  onClaudeState: (cb) => {
+    const h = (_e: unknown, ptyId: string, state: ClaudeState) => cb(ptyId, state);
+    ipcRenderer.on(CH.claudeState, h);
+    return () => ipcRenderer.off(CH.claudeState, h);
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

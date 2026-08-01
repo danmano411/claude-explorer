@@ -4,6 +4,7 @@ import {
   addTabToSpace,
   createSpace,
   deleteSpace,
+  orderSpaces,
   removeTabFromSpace,
   renameSpace,
   reorderInSpace,
@@ -234,6 +235,39 @@ describe('setSpaceColor', () => {
     const spaces = [space('a'), space('b')]
     const result = setSpaceColor(spaces, 'a', 'var(--clay)')
     expect(result[1]).toBe(spaces[1])
+  })
+})
+
+// KAN-81. The Jira ticket calls out the trap directly: "pinned sorts first"
+// is trivially true when the lone pinned space is already at index 0, so
+// every arrangement below interleaves pinned and unpinned so the sorted and
+// unsorted orders genuinely differ.
+describe('orderSpaces', () => {
+  it('partitions pinned before unpinned, preserving relative order WITHIN each run', () => {
+    // a, c unpinned; b, d pinned — interleaved, so a naive re-sort or a
+    // reversal would both look plausible if this assertion used a simpler
+    // input. The correct answer keeps b before d (their relative order among
+    // themselves) and a before c, with the whole pinned run leading.
+    const spaces = [space('a'), pinnedSpace('b'), space('c'), pinnedSpace('d')]
+    expect(orderSpaces(spaces).map((s) => s.id)).toEqual(['b', 'd', 'a', 'c'])
+  })
+  it('is a no-op ordering when nothing is pinned', () => {
+    const spaces = [space('a'), space('b'), space('c')]
+    expect(orderSpaces(spaces).map((s) => s.id)).toEqual(['a', 'b', 'c'])
+  })
+  it('is a no-op ordering when everything is pinned', () => {
+    const spaces = [pinnedSpace('a'), pinnedSpace('b'), pinnedSpace('c')]
+    expect(orderSpaces(spaces).map((s) => s.id)).toEqual(['a', 'b', 'c'])
+  })
+  it('handles a single pinned space at the END of the list — the case index-0 would miss', () => {
+    const spaces = [space('a'), space('b'), pinnedSpace('c')]
+    expect(orderSpaces(spaces).map((s) => s.id)).toEqual(['c', 'a', 'b'])
+  })
+  it('does not mutate its input', () => {
+    const spaces = [space('a'), pinnedSpace('b'), space('c')]
+    const snapshot = structuredClone(spaces)
+    orderSpaces(spaces)
+    expect(spaces).toEqual(snapshot)
   })
 })
 

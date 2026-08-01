@@ -319,6 +319,14 @@ body {
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* ===== Pinned spaces (KAN-81) =====
+   A subtle left rule in the clay accent — same colour `.spacemenu-item.active`
+   already uses for text, so a pinned+active row reads as one family rather
+   than two competing highlights fighting for attention. */
+.spacemenu-item.pinned { border-left: 2px solid var(--clay); padding-left: 12px; }
+
+.spacemenu-pin { flex: none; font-size: 11px; opacity: 0.8; }
+
 .spacemenu-accel {
   flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft);
 }
@@ -414,6 +422,13 @@ body {
 .modal {
   background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 4px 4px 0 var(--line);
   padding: 20px 22px; max-width: 380px; font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  /* KAN-83: the Keybinds section is the first thing to make Settings tall
+     enough to matter — without this, the window growing no taller than the
+     content pushed Save/Cancel below the fold with no way to reach them.
+     `max-height`, not a fixed one, so every OTHER modal (delete confirm,
+     spawn confirm) that already fits keeps its exact current size. */
+  max-height: 85vh;
+  overflow-y: auto;
 }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .modal-actions button {
@@ -475,15 +490,76 @@ body {
 .group-label[draggable='true']:active { cursor: grabbing; }
 .tab.spring-target { box-shadow: inset 0 0 0 2px var(--clay); background: var(--bg-panel); }
 
-/* tab status dot (feature 3) */
+/* KAN-73/KAN-74. The Claude tab's activity dot, one rule per reachable
+   `ClaudeState` plus the no-class base for "unknown" — five appearances,
+   each meant to be told apart from every other at a glance:
+
+     (no class)      dormant/unknown — a restored tab never activated, or a
+                     live one that has never reported (no hooks: an
+                     agentSpawned worker, agentControl off, disableAllHooks/
+                     --bare). Same grey as `.tab-status`'s base rule, full
+                     opacity, no animation: present, but vouching for
+                     nothing. THIS is the optimistic default's replacement —
+                     `?? 'running'` at the old TabBar.tsx:425 is gone, and
+                     this is what an unknown state looks like instead.
+     .working        green, pulsing — the ONLY state that pulses, so
+                     "pulsing == actually doing something" stays a signal a
+                     user can trust instead of a decoration every dot wears.
+                     `var(--diff-add)` rather than the old hardcoded #6a9a5b
+                     so it repaints for dark mode like everything else that
+                     colour already does.
+     .awaiting-input amber, steady. KAN-76: this MUST NOT pulse — pulsing is
+                     "working"'s whole visual vocabulary, and a "needs you"
+                     dot that also pulses reads as busy, which is the exact
+                     opposite of blocked-on-a-human. Same tone as the old
+                     PtyStatus 'waiting' amber, but the meaning underneath it
+                     is now exact (a real permission_prompt) rather than "no
+                     bytes for 700ms", which is what let it double as plain
+                     idle before.
+     .idle           clay-soft, steady — the turn ended and nothing is
+                     pending. Distinct from BOTH the unknown grey (this is a
+                     real, reported state, not an absence) and the amber
+                     (nobody needs to do anything).
+     .stopped        dim grey, unchanged from before this ticket.
+
+   THE RED DECISION (KAN-74 asks it be made explicitly, here): stopped stays
+   grey, not red. closeguard.ts's own selectivity rule already treats a
+   stopped Claude tab as the SAFE case — the transcript is on disk and Open
+   Recent reopens it, nothing is lost — and red on this app's palette reads
+   as "something is wrong", which a session ending (however it ended) is
+   not. Red is deliberately not used anywhere in this dot; if a future
+   ticket wants to flag a CRASH specifically (a non-zero pty:exit code,
+   which `onPtyExit` already carries and this map currently discards), that
+   is a new, narrower state to add here — not a repaint of this one. */
 .tab-status {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 6px; vertical-align: middle; background: var(--ink-soft);
 }
-.tab-status.running { background: #6a9a5b; animation: ce-pulse 1.2s ease-in-out infinite; }
-.tab-status.waiting { background: #d99a2b; }
+.tab-status.working { background: var(--diff-add); animation: ce-pulse 1.2s ease-in-out infinite; }
+.tab-status.awaiting-input { background: #d99a2b; }
+.tab-status.idle { background: var(--clay-soft); }
 .tab-status.stopped { background: var(--ink-soft); opacity: 0.5; }
 @keyframes ce-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+
+/* KAN-76. The tab-level "needs you" marker — deliberately a SEPARATE visual
+   cue from the dot's own amber above, not a restatement of it: an inset ring
+   around the whole tab, so the signal survives even where an 8px colour
+   difference would not (small screens, colour vision). Reuses the same
+   amber tone as `.tab-status.awaiting-input`, keeping one colour meaning
+   "needs you" everywhere it appears (tab, space chip, dropdown row) rather
+   than inventing a second one. */
+.tab.needs-input { box-shadow: inset 0 0 0 2px #d99a2b; }
+
+/* KAN-76. The space chip / dropdown-row rollup: a small steady dot, same
+   amber, same reasoning as `.tab.needs-input` above — this is deliberately
+   NOT one of the activity-dot classes reused verbatim, because the chip is
+   answering a different question ("does some OTHER space need me") than the
+   dot is ("what is THIS session doing"), and the two must stay visually
+   distinguishable at a glance even though they share a colour. */
+.spacemenu-flag {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #d99a2b; margin-left: 6px; flex: none;
+}
 
 /* inline tab rename */
 .tab-rename {
@@ -502,6 +578,24 @@ body {
 .settings-hint { font-size: 12px; color: var(--ink-soft); }
 .settings-hint code { background: var(--bg-panel); padding: 0 3px; border-radius: 3px; }
 .settings-checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--ink-soft); }
+
+/* KAN-83. The first sectioned area in what was a flat field list — KAN-77's
+   Notifications section follows this same `<h3 class="settings-section">` +
+   field-group shape rather than inventing a second one. */
+.settings-section {
+  margin: 20px 0 8px; padding-top: 14px; border-top: 1px solid var(--line);
+  font-family: var(--font-serif); font-size: 13px; font-weight: bold; color: var(--ink);
+}
+.keybind-row { display: flex; align-items: center; gap: 8px; }
+.keybind-row code {
+  background: var(--bg-panel); padding: 2px 6px; border-radius: var(--radius); font-family: var(--font-mono);
+}
+.keybind-row button {
+  font-family: var(--font-serif); font-size: 12px; padding: 3px 10px; border-radius: var(--radius);
+  cursor: pointer; border: 1px solid var(--line); background: var(--bg-sunken); color: var(--ink);
+}
+.keybind-row button.recording { background: var(--clay); border-color: var(--clay); color: #fff; }
+.keybind-warning { color: var(--clay); }
 
 /* Explorer / Developer mode toggle (status bar) */
 .mode-toggle {

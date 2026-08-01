@@ -2,15 +2,28 @@ import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { spaceIndex } from '../keys';
+import { DEFAULT_SPACE_KEYBINDS, pinnedSpaceIndex, spaceCycle, spaceIndex, type SpaceKeybinds } from '../keys';
 
 /** Quiet time after which a moving size is treated as finished. */
 const SETTLE_MS = 120;
 /** ...but a size is never withheld from the pty for longer than this. */
 const MAX_HOLD_MS = 250;
 
-export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'shell' }) {
+export function Terminal({
+  ptyId, kind, keybinds = DEFAULT_SPACE_KEYBINDS,
+}: { ptyId: string; kind?: 'claude' | 'shell'; keybinds?: SpaceKeybinds }) {
   const ref = useRef<HTMLDivElement>(null);
+  // KAN-83. `attachCustomKeyEventHandler` below is registered ONCE, inside the
+  // effect that creates the xterm instance (deps: `[ptyId, kind]` — see the
+  // KAN-23 note at that effect's end), so its callback closes over whatever
+  // `keybinds` WAS at mount time unless it reads through something mutable.
+  // A ref kept fresh here, read at call time inside that long-lived callback,
+  // is what lets a rebind reach an ALREADY-OPEN terminal tab with no restart
+  // and no xterm teardown/remount (which `[ptyId, kind, keybinds]` as the
+  // effect's own deps would otherwise force on every rebind — exactly the
+  // KAN-23 regression that note guards against, just from a new direction).
+  const keybindsRef = useRef(keybinds);
+  useEffect(() => { keybindsRef.current = keybinds; }, [keybinds]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -126,17 +139,74 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
       // xterm decides on keyCode; where a layout makes those differ the fallout
       // is at worst today's behaviour (App declines, xterm sends its byte).
       //
-      // NO preventDefault, and unlike every arm above that is not an oversight:
-      // there is no browser default to cancel. A ctrl-modified digit produces no
-      // character, and xterm's own _keyPress bails on ctrlKey regardless — the
-      // KAN-58 double-paste came from Chromium's Paste EDITING COMMAND on the
-      // focused textarea, which has no Ctrl+digit analogue. Cancelling here
-      // would not break App's listener (preventDefault does not stop
-      // propagation — stopPropagation does, and this arm exists precisely so
-      // xterm's `cancel` never runs); the point is that the handler which
-      // DECIDES to act is the one that cancels, and with fewer than n spaces App
-      // deliberately declines. paste.mjs §11 asserts both sides of that.
-      if (spaceIndex(e) !== null) return false;
+      // KAN-83: preventDefault is now CONDITIONAL on `!e.ctrlKey`, where the
+      // pre-KAN-83 comment here argued it was never needed at all — that
+      // argument was ctrl-SPECIFIC ("a ctrl-modified digit produces no
+      // character, and xterm's own _keyPress bails on ctrlKey regardless"),
+      // and `mods` is no longer guaranteed to include Ctrl. A rebind to
+      // Shift alone, say, makes Shift+3 a perfectly ordinary '#' on a US
+      // layout, and with App declining (fewer than n spaces) nothing else in
+      // the dispatch would stop that character reaching the hidden textarea.
+      //
+      // UNCONDITIONAL would have been the wrong fix, and shipped one:
+      // paste.mjs §11's "and it is NOT preventDefault-ed: the handler that
+      // declines does not cancel" is a REGRESSION GUARD for the DEFAULT
+      // (Ctrl-only) binding specifically, asserting that Terminal.tsx's arm
+      // never cancels on its own — only whichever handler DECIDES leaves a
+      // preventDefault behind. Calling it unconditionally here breaks that
+      // guard for every rebind that still includes Ctrl, for no benefit: a
+      // ctrl-modified digit has no printable default to cancel regardless of
+      // what else is held (Shift/Alt/Meta), which is precisely the original
+      // argument and still holds with Ctrl in the mix. So the condition
+      // tracks the ORIGINAL reasoning's actual scope — "no Ctrl" is where it
+      // stops applying — not "any rebind".
+      //
+      // Cancelling here does not touch stopPropagation, so App.tsx's bubble-
+      // phase listener still sees the press and still decides for itself
+      // whether to switch — this arm is ONLY about the character, never
+      // about whether the space changes.
+      if (spaceIndex(e, keybindsRef.current.switchUnpinned) !== null) {
+        if (!e.ctrlKey) e.preventDefault();
+        return false;
+      }
+
+      // KAN-82/KAN-83. Ctrl+Shift+1..9 selects a PINNED space by default —
+      // same shape as the arm above, same predicate App.tsx's window listener
+      // switches on, and the same `!e.ctrlKey` reasoning: a rebind that drops
+      // Ctrl (Alt+Shift+1, say) can have a printable default to cancel; one
+      // that keeps it — including the shipped Ctrl+Shift+1..9 default — does
+      // not, and must not pick up a preventDefault it never had before.
+      if (pinnedSpaceIndex(e, keybindsRef.current.switchPinned) !== null) {
+        if (!e.ctrlKey) e.preventDefault();
+        return false;
+      }
+
+      // KAN-82. Ctrl+Tab / Ctrl+Shift+Tab cycle spaces. UNLIKE every arm
+      // above, this DOES preventDefault — the one place that departs from the
+      // module doc's opening rule needs its own explanation, not less of one:
+      // Tab's browser default is a focus move, and xterm's OWN processing
+      // (Keyboard.ts case 9) is what would normally have cancelled that for
+      // us. Measured against the same source map: today, Ctrl+Tab sends '\t'
+      // and calls `cancel(event, true)` (preventDefault AND stopPropagation);
+      // Ctrl+Shift+Tab sends ESC+'[Z' but its branch never sets `result.cancel`,
+      // so NEITHER preventDefault nor stopPropagation happens for it today —
+      // meaning the unfixed build already lets a Ctrl+Shift+Tab bubble to
+      // App's window listener while ALSO leaking a byte to the pty and moving
+      // native focus off the terminal. Returning false here, before xterm's
+      // own keydown handling runs at all, heads off both bytes — which is
+      // exactly why this arm cannot skip preventDefault the way the digit arms
+      // do (now moot — KAN-83 has them calling it too, but for a different
+      // reason; see those arms): nothing else is left to cancel Tab's native
+      // focus jump.
+      //
+      // KAN-83: `next`/`prev` are no longer hardcoded to Tab. A rebind can move
+      // either off Tab entirely, and this arm has to suppress whatever the
+      // CURRENT binding is, not what shipped in KAN-82 — same
+      // `keybindsRef.current` this whole handler reads for the two arms above.
+      if (spaceCycle(e, keybindsRef.current.cycleNext, keybindsRef.current.cyclePrev) !== null) {
+        e.preventDefault();
+        return false;
+      }
       return true;
     });
 

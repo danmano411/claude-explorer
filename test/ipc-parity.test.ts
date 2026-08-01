@@ -133,6 +133,7 @@ const EVENT_CHANNELS = new Set<string>([
   CH.spawnConfirm, // main -> renderer: "an agent wants to start Claude here" (KAN-41)
   // NOT CH.spawnConfirmAnswer: renderer -> main, real ipcMain.on listener in
   // spawnconfirm.handlers.ts, checked like one.
+  CH.claudeState, // main -> renderer: Claude session state, from hooks (KAN-73)
 ])
 
 function apiNameFor(key: string, value: string): string {

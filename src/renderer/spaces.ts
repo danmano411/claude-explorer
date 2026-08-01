@@ -221,6 +221,22 @@ export function setSpaceColor<T extends Spaced>(
 }
 
 /**
+ * KAN-81. Pinned spaces first, unpinned after — a stable PARTITION, not a
+ * sort: nothing here compares two pinned spaces against each other (or two
+ * unpinned ones), so the order the user arranged WITHIN each run survives
+ * untouched. `Array.prototype.filter` preserves relative order, which is the
+ * entire mechanism.
+ *
+ * The one place order matters until KAN-81: today, nothing sorts or draws
+ * `pinned` at all (see `Space.pinned`'s doc) and rows render in raw `spaces`
+ * order. This is the first caller — SpaceMenu's dropdown, and App's Ctrl+Tab
+ * cycling — so it belongs here rather than duplicated at each call site.
+ */
+export function orderSpaces<T extends Spaced>(spaces: readonly T[]): T[] {
+  return [...spaces.filter((s) => s.pinned), ...spaces.filter((s) => !s.pinned)]
+}
+
+/**
  * Removes a space. `closedTabIds` is the membership it owned: those tabs go
  * away with it, and killing their PTYs is the caller's job (see the module
  * doc). Refused, never silently allowed, when it is the only space left.

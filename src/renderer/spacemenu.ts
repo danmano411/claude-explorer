@@ -5,10 +5,58 @@
  * resolved before by TS/Vite trying `.ts` ahead of `.tsx`.
  */
 
-/** "Ctrl+1".."Ctrl+9" for the first nine items (index 0-8); null past that —
- *  there is no tenth accelerator, the menu just lists the space with none. */
-export function acceleratorLabel(index: number): string | null {
-  return index >= 0 && index < 9 ? `Ctrl+${index + 1}` : null
+import type { ClaudeState } from '../shared/types'
+
+/** The minimal shape `spaceNeedsInput` needs — the `Closeable` precedent in
+ *  closeguard.ts. `Tab` (renderer/tabs.ts) satisfies it structurally. */
+export type ClaudeMember = { terminalKind?: 'claude' | 'shell'; ptyId?: string }
+
+/**
+ * KAN-76. Does ANY tab in this space have a Claude session genuinely blocked
+ * on the user right now? Pure and meant to be called AT RENDER, never stored —
+ * see the module doc on `useClaudeState` (renderer/claudestate.ts): a second
+ * place that remembers "this space needs attention" is a second thing that can
+ * disagree with the state signal itself, and disagreeing is exactly the bug
+ * the marker must never reproduce (it has to clear the instant the session
+ * leaves `awaiting-input`, with nobody visiting the tab to notice).
+ *
+ * Keyed off `claudeState`, never `PtyStatus`: a shell tab is never "blocked
+ * awaiting input" in the sense this feature means (there is no permission
+ * dialog for a plain shell), and a Claude tab with no ptyId yet (restored,
+ * never activated) or no entry yet (no hooks — see claudestate.ts) has
+ * nothing to report either, which `.get(undefined)` / `.get(ptyId) ===
+ * 'awaiting-input'` both already refuse without a special case.
+ */
+export function spaceNeedsInput(
+  members: readonly ClaudeMember[],
+  claudeState: ReadonlyMap<string, ClaudeState>,
+): boolean {
+  return members.some(
+    (t) => t.terminalKind === 'claude' && t.ptyId !== undefined && claudeState.get(t.ptyId) === 'awaiting-input',
+  )
+}
+
+/**
+ * "Ctrl+1".."Ctrl+9" for the first nine UNPINNED items, "Ctrl+Shift+1"..
+ * "Ctrl+Shift+9" for the first nine PINNED ones (KAN-82); null past the ninth
+ * of either run — there is no tenth accelerator, the menu just lists the space
+ * with none.
+ *
+ * `index` is GROUP-RELATIVE, not the row's absolute position in the dropdown:
+ * the 1st pinned space and the 1st unpinned space both pass `0`, distinguished
+ * only by `pinned`. Callers get that index for free from `spaces.orderSpaces`
+ * — pinned spaces sort to the front, so a pinned row's position IS its
+ * group-relative index, and an unpinned row's is its position minus however
+ * many pinned rows precede it.
+ *
+ * ponytail: still emits the DEFAULT chord text, so a rebind (KAN-83) leaves
+ * this label stale. Tracked as KAN-95 — the fix is to format from the resolved
+ * binding, and it wants KAN-91's platform symbols in the same formatter rather
+ * than two.
+ */
+export function acceleratorLabel(index: number, pinned?: boolean): string | null {
+  if (index < 0 || index >= 9) return null
+  return pinned ? `Ctrl+Shift+${index + 1}` : `Ctrl+${index + 1}`
 }
 
 /**
