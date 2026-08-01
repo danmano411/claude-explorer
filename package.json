@@ -70,7 +70,29 @@
       "**/node_modules/node-pty/**"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        {
+          "from": "node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe",
+          "to": "rg.exe"
+        }
+      ]
+    },
+    "mac": {
+      "extraResources": [
+        {
+          "from": "node_modules/@vscode/ripgrep-darwin-${arch}/bin/rg",
+          "to": "rg"
+        }
+      ]
+    },
+    "linux": {
+      "extraResources": [
+        {
+          "from": "node_modules/@vscode/ripgrep-linux-${arch}/bin/rg",
+          "to": "rg"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -85,10 +107,6 @@
       {
         "from": "img/icon.png",
         "to": "icon.png"
-      },
-      {
-        "from": "node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe",
-        "to": "rg.exe"
       }
     ]
   }

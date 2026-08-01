@@ -3,16 +3,30 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
+import { isWindows } from '../shared/pathutil'
 
 type Handle = { proc: pty.IPty; agentSpawned?: boolean; sessionId?: string }
 
-// node-pty on Windows does NOT PATH-resolve a bare command name (unlike a shell),
-// so `pty.spawn('claude', …)` throws "File not found". Resolve to an absolute path.
+/**
+ * node-pty on Windows does NOT PATH-resolve a bare command name (unlike a shell),
+ * so `pty.spawn('claude', …)` throws "File not found". Resolve to an absolute path.
+ *
+ * KAN-90: this used to return a bare `claude` off win32 and leave the lookup to
+ * execvp. That escape hatch had never been exercised, and it is wrong on macOS
+ * for the most ordinary install there is. A GUI-launched Electron app inherits
+ * launchd's PATH — `/usr/bin:/bin:/usr/sbin:/sbin` — not the user's shell PATH,
+ * so `~/.local/bin/claude` (the official installer's location), an npm-global
+ * prefix and Homebrew are ALL invisible to execvp and every launch from the Dock
+ * would have failed with ENOENT. The Windows arm already solved exactly this by
+ * scanning; POSIX now scans the same way, differing only in that there are no
+ * executable extensions and three more well-known directories to look in.
+ */
 function resolveClaude(): string {
-  if (process.platform !== 'win32') return 'claude'
-  const exts = ['.exe', '.cmd', '.bat', '']
+  const exts = isWindows ? ['.exe', '.cmd', '.bat', ''] : ['']
   const dirs = (process.env.PATH || '').split(delimiter)
   dirs.push(join(homedir(), '.local', 'bin')) // known Claude Code install location
+  // Not on launchd's PATH, and where a mac actually keeps user-installed CLIs.
+  if (!isWindows) dirs.push('/opt/homebrew/bin', '/usr/local/bin')
   for (const dir of dirs) {
     if (!dir) continue
     for (const ext of exts) {
@@ -24,6 +38,27 @@ function resolveClaude(): string {
 }
 
 const CLAUDE = resolveClaude()
+
+/**
+ * KAN-90. The shell a plain terminal tab runs.
+ *
+ * POSIX has no single answer, and `$SHELL` is the one the user actually chose —
+ * zsh on every macOS since Catalina, bash or fish on Linux. `/bin/bash` is the
+ * fallback rather than `/bin/sh` because the tab is interactive.
+ *
+ * `-l` on macOS ONLY, and it is not cosmetic: a Dock-launched app inherits
+ * launchd's four-entry PATH (see resolveClaude above), so a non-login shell tab
+ * would open with no Homebrew, no npm prefix and no `~/.local/bin` — i.e. the
+ * user could not run the very tool this app exists to launch. A login shell
+ * sources the profile that puts them back. Linux terminal emulators start
+ * non-login interactive shells and a desktop session already exports the user's
+ * PATH, so it is not wanted there.
+ */
+function shellCommand(): { file: string; args: string[] } {
+  if (isWindows) return { file: 'powershell.exe', args: ['-NoLogo'] }
+  const file = process.env.SHELL || '/bin/bash'
+  return { file, args: process.platform === 'darwin' ? ['-l'] : [] }
+}
 
 /**
  * Every caller-influenced value that reaches ARGV is validated here, because
@@ -265,7 +300,8 @@ export class PtyManager {
     if (opts.shell) {
       let proc: pty.IPty
       try {
-        proc = pty.spawn('powershell.exe', ['-NoLogo'], {
+        const sh = shellCommand()
+        proc = pty.spawn(sh.file, sh.args, {
           name: 'xterm-color', cwd: opts.path, cols: 80, rows: 24,
           env: launchEnv(),
         })
@@ -338,6 +374,13 @@ export class PtyManager {
       claudeArgs.push('--settings', agentControl.settingsPath)
     } else if (opts.agentSpawned) claudeArgs.push('--strict-mcp-config')
     // .cmd/.bat shims must run through the command processor; a real .exe launches directly.
+    //
+    // KAN-90: INERT on POSIX rather than missing. resolveClaude() only ever
+    // tries the empty extension off Windows, so CLAUDE cannot end in .cmd/.bat,
+    // this is structurally false, and neither batchCommandLine() nor COMSPEC is
+    // reachable there. Nothing to port: the whole quoting problem those exist
+    // for is cmd.exe's, and a POSIX pty spawn takes an argv array with no shell
+    // between it and the process.
     const isBatch = /\.(cmd|bat)$/i.test(CLAUDE)
     const file = isBatch ? process.env.COMSPEC || 'cmd.exe' : CLAUDE
     const args = isBatch ? batchCommandLine(CLAUDE, claudeArgs) : claudeArgs
@@ -426,7 +469,17 @@ export class PtyManager {
    *
    *  Only resize throws after exit — write() and kill() were both checked. And
    *  this is the manager, not the handler, because mgr.resize has exactly one
-   *  caller: guarding here cannot be routed around later. */
+   *  caller: guarding here cannot be routed around later.
+   *
+   *  KAN-90 — DOES THIS RACE EXIST ON POSIX? The 1000 ms figure does not: it is
+   *  ConPTY's FLUSH_DATA_INTERVAL and nothing on a unix pty is bounded by it.
+   *  The THROW does. node-pty's UnixTerminal.resize() ioctls the master fd and
+   *  raises on a fd that is already closed, and the JS onExit there is likewise
+   *  delivered on a socket close rather than synchronously with the child's
+   *  death — so the window is shorter and differently shaped, not absent, and a
+   *  throw out of this synchronous ipcMain.on would freeze main behind Electron's
+   *  default dialog on any platform. The guard therefore stays unconditional. It
+   *  is the comment that was Windows-specific, not the fix. */
   resize(id: string, cols: number, rows: number) {
     const h = this.handles.get(id)
     if (!h) return

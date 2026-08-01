@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
+import { isWindows } from '../shared/pathutil'
 import { getSettings } from './settings'
 
 // Windows CreateProcess does not PATH-resolve a bare command name, and Node refuses
@@ -8,11 +10,22 @@ import { getSettings } from './settings'
 // pty.ts, so we solve it the same way instead of reaching for shell:true.
 // shell:true pasted the folder into a cmd.exe command line unquoted: a folder named
 // "research & development" ran `development` as a command.
+//
+// KAN-90: the `platform !== 'win32'` escape hatch that used to sit on the first
+// line was the same never-exercised guess resolveClaude() carried, and wrong for
+// the same reason — the default setting is `code`, and VS Code's shell command
+// installs to /usr/local/bin, which is NOT on the PATH a Dock-launched app
+// inherits from launchd. libuv's own search would have found nothing. Scanning
+// costs one existsSync per directory and makes the setting mean the same thing
+// on all three platforms.
+const POSIX_EXTRA_BIN = ['/opt/homebrew/bin', '/usr/local/bin']
 function resolveIde(cmd: string): string {
-  if (process.platform !== 'win32' || isAbsolute(cmd)) return cmd
-  for (const dir of (process.env.PATH || '').split(delimiter)) {
+  if (isAbsolute(cmd)) return cmd
+  const dirs = (process.env.PATH || '').split(delimiter)
+  if (!isWindows) dirs.push(...POSIX_EXTRA_BIN, join(homedir(), '.local', 'bin'))
+  for (const dir of dirs) {
     if (!dir) continue
-    for (const ext of ['.exe', '.cmd', '.bat', '']) {
+    for (const ext of isWindows ? ['.exe', '.cmd', '.bat', ''] : ['']) {
       const full = join(dir, cmd + ext)
       if (existsSync(full)) return full
     }
