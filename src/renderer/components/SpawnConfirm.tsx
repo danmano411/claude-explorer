@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { SpawnConfirmRequest } from '../../shared/types'
+import { isMac } from '../keys'
 
 /**
  * KAN-41. The one prompt standing between a prompt-injected agent and Bash at
@@ -62,8 +63,8 @@ export function SpawnConfirm({
             no second palette, no new class. */}
         <p className="settings-hint">
           You are being asked because Claude has reached the number of sessions it may open on its
-          own. Change it in <b>Settings &rsaquo; Preferences…</b> (Ctrl+,): raise it to be asked
-          less often, or set it to 0 to be asked every time.
+          own. Change it in <b>Settings &rsaquo; Preferences…</b> ({isMac() ? '⌘,' : 'Ctrl+,'}): raise it to
+          be asked less often, or set it to 0 to be asked every time.
         </p>
         <div className="modal-actions">
           <button autoFocus onClick={() => onAnswer(false)}>Deny</button>

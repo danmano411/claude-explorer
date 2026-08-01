@@ -7,7 +7,7 @@ import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, OpError, 
 import { unwrap, type ConfirmRequest } from '../opresult';
 import { gutterMarks, markKey, type GutterMark } from '../diffparse';
 import { IDLE_MS } from '../ptystatus';
-import { isTypingTarget } from '../keys';
+import { isMac, isTypingTarget, primaryMod } from '../keys';
 import { useAppState, type Clipboard } from '../appstate';
 import { NavBar } from './NavBar';
 import { StatusBar } from './StatusBar';
@@ -400,19 +400,23 @@ export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onO
         if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
         if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
       }
-      // Above the `typing` guard on purpose: Ctrl+F must reach the search box
-      // even when a field already has focus, the way every other app behaves.
-      if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); setSearching(true); return; }
+      // Above the `typing` guard on purpose: Ctrl/Cmd+F must reach the search
+      // box even when a field already has focus, the way every other app
+      // behaves. KAN-91: `primaryMod` is Cmd on macOS, Ctrl elsewhere — every
+      // binding in this row swapped from a raw `e.ctrlKey` to this, and
+      // nothing else about the check (still loose: no shift/alt requirement)
+      // changed, so Windows/Linux fire on exactly the same presses as before.
+      if (primaryMod(e) && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); setSearching(true); return; }
       if (typing) return;
       if (e.key === 'Backspace') { e.preventDefault(); nav(winDirname(dir)); return; }
-      if (e.ctrlKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
+      if (primaryMod(e) && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); setSelection({ anchor: 0, indices: new Set(shown.map((_, i) => i)) }); return; }
       if (e.key === 'Escape') { setSelection(emptySelection()); setMenu(null); return; }
-      if (e.ctrlKey && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) setClip({ mode: 'cut', paths: selectedPaths }); return; }
-      if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) setClip({ mode: 'copy', paths: selectedPaths }); return; }
-      if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) { paste(dir); return; }
-      if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); doUndo(); return; }
-      if (e.ctrlKey && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
-      if (e.ctrlKey && e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newFolder(); return; }
+      if (primaryMod(e) && (e.key === 'x' || e.key === 'X')) { if (selectedPaths.length) setClip({ mode: 'cut', paths: selectedPaths }); return; }
+      if (primaryMod(e) && (e.key === 'c' || e.key === 'C')) { if (selectedPaths.length) setClip({ mode: 'copy', paths: selectedPaths }); return; }
+      if (primaryMod(e) && (e.key === 'v' || e.key === 'V')) { paste(dir); return; }
+      if (primaryMod(e) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); doUndo(); return; }
+      if (primaryMod(e) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); doRedo(); return; }
+      if (primaryMod(e) && e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newFolder(); return; }
       if (e.key === 'F2') { if (selectedPaths.length === 1) { const p = selectedPaths[0]; setRenaming({ path: p, value: winBasename(p) }); } return; }
       if (e.key === 'Delete') {
         e.preventDefault();
@@ -576,7 +580,7 @@ export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onO
       {confirmDel && (
         <ConfirmDialog
           request={{
-            reason: `Delete ${confirmDel.length} item(s)? They can be restored with Ctrl+Z or from the Recycle Bin.`,
+            reason: `Delete ${confirmDel.length} item(s)? They can be restored with ${isMac() ? 'Cmd+Z' : 'Ctrl+Z'} or from the Recycle Bin.`,
             confirmLabel: 'Delete',
             confirm: doDelete,
           }}

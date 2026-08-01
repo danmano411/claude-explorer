@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AGENT_FREE_SESSION_CHOICES, DEFAULT_AGENT_FREE_SESSIONS } from '../../shared/types'
 import {
-  DEFAULT_SPACE_KEYBINDS, findSpaceBindingConflict, knownAppShortcut, resolveSpaceKeybinds,
+  DEFAULT_SPACE_KEYBINDS, findSpaceBindingConflict, formatMods, knownAppShortcut, resolveSpaceKeybinds,
   type KeyBinding, type Mods, type SpaceAction, type SpaceKeybinds,
 } from '../keys'
 
@@ -14,8 +14,13 @@ const ACTION_LABEL: Record<SpaceAction, string> = {
 
 const CYCLE_ACTIONS: SpaceAction[] = ['cycleNext', 'cyclePrev']
 
-const formatMods = (m: Mods): string =>
-  [m.ctrl && 'Ctrl', m.shift && 'Shift', m.alt && 'Alt', m.meta && 'Meta'].filter(Boolean).join('+')
+// KAN-91: this used to be a SECOND, hand-written copy of keys.ts's own
+// `formatMods` (same four literals, same order) — exactly the drift risk
+// `formatMods`'s own doc warns about, and the reason this settings panel
+// would have kept printing "Ctrl+Shift" on a Mac even after every other
+// accelerator label in the app switched to ⌘/⇧. Importing the shared one
+// fixes both: no second implementation to fall out of sync, and this panel's
+// keybind display now renders Apple's symbols on macOS for free.
 
 /** `e.key` for a letter is already lower-case unless Shift was held; upper-
  *  casing single characters here (not multi-char names like "Tab") keeps the

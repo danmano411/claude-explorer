@@ -58,8 +58,19 @@ export function isTextBox(target: EventTarget | null): boolean {
  * This is also the primitive KAN-83 (customizable keybinds) and KAN-91 (Cmd on
  * macOS) build on: a binding becomes DATA — this shape — instead of a
  * hand-written boolean chain, which is what makes both of those additive
- * rather than a rewrite. `meta` is carried today even though nothing yet binds
- * it, precisely so KAN-91 has somewhere to put Cmd without touching this type.
+ * rather than a rewrite. `meta` was carried from the start even before
+ * anything bound it, precisely so KAN-91 would have somewhere to put Cmd
+ * without touching this type — see `primaryMod`/`primaryMods` below, which is
+ * that ticket's actual seam.
+ *
+ * KAN-91's answer for what a STORED `{ ctrl: true }` means on macOS: exactly
+ * what it says, the physical Ctrl key, on every platform, never aliased to
+ * Cmd. `modsMatch` compares every field exactly as written — there is no
+ * platform branch inside it at all — so a settings.json (or workspace.json)
+ * carried over from Windows keeps meaning literal Ctrl on a Mac, unchanged.
+ * Only the SHIPPED DEFAULT differs by platform (`primaryMods`,
+ * `DEFAULT_SPACE_KEYBINDS`): an untouched install gets Cmd on macOS; a
+ * binding the user actually typed keeps meaning whatever they pressed.
  */
 export interface Mods {
   ctrl?: boolean
@@ -69,18 +80,83 @@ export interface Mods {
 }
 
 /**
+ * KAN-91. THE primitive this ticket introduces: "is the platform's primary
+ * accelerator modifier down" — Cmd on macOS, Ctrl everywhere else. Read fresh
+ * on every call (`process.platform` at call time, like main/external.ts's
+ * `openExternalTerminal`) rather than cached at module load: there is no
+ * per-call cost worth avoiding here, and it means every function below is
+ * exercisable in a test with nothing more than the existing
+ * `Object.defineProperty(process, 'platform', …)` trick — no `vi.resetModules`
+ * dance, unlike `DEFAULT_SPACE_KEYBINDS` below (a real module-level constant,
+ * which does need it).
+ *
+ * Deliberately NOT "ctrl OR meta" anywhere in this module — that is the exact
+ * trap the ticket names: it would make Cmd+1 AND Ctrl+1 both switch spaces on
+ * a Mac, and Ctrl is a genuinely distinct modifier there that the TERMINAL
+ * owns (Ctrl+C, Ctrl+D). Every caller below picks exactly one of the two,
+ * decided once, here.
+ */
+export function isMac(): boolean {
+  return process.platform === 'darwin'
+}
+
+/**
+ * `e.ctrlKey` on Windows/Linux, `e.metaKey` on macOS — a straight swap-in for
+ * every raw `e.ctrlKey` check that used to assume Ctrl was the only
+ * accelerator modifier anyone would press. Deliberately as LOOSE as the
+ * `e.ctrlKey` checks it replaces (it says nothing about Shift/Alt/whichever-
+ * other-modifier being down or up) so swapping it in changes NOTHING about
+ * which chords match beyond "which physical key is the accelerator" — no
+ * Windows behaviour moves by taking this seam. FileBrowser's copy/cut/paste/
+ * undo/redo/select-all/find/new-folder row, Terminal's paste and Ctrl+Enter
+ * newline, and GridPicker's move-pane arrow all read this instead of
+ * `e.ctrlKey` directly now.
+ */
+export function primaryMod(e: { ctrlKey: boolean; metaKey: boolean }): boolean {
+  return isMac() ? e.metaKey : e.ctrlKey
+}
+
+/**
+ * The EXACT-match counterpart to `primaryMod`, for the one caller
+ * (App.tsx's Ctrl+Shift+G grid picker) that hand-checks all four modifiers
+ * rather than asking one loose boolean — building a `Mods` for `modsMatch`
+ * to compare against needs a platform-correct base to add `shift` onto.
+ * `{ meta: true, ...extra }` on macOS, `{ ctrl: true, ...extra }` elsewhere.
+ *
+ * Also what `DEFAULT_SPACE_KEYBINDS` below builds `switchUnpinned`/
+ * `switchPinned` from, so "the platform's primary modifier" is spelled in
+ * exactly one place for both the loose and the exact callers.
+ */
+export function primaryMods(extra?: Partial<Mods>): Mods {
+  return isMac() ? { meta: true, ...extra } : { ctrl: true, ...extra }
+}
+
+/**
  * KAN-95. The text a menu shows for a `Mods` — "Ctrl+Shift" for
  * `{ ctrl: true, shift: true }`, "" for none (never actually emitted: every
  * space action requires at least one modifier). Fixed order (Ctrl, Shift,
  * Alt, Meta) so the same binding never prints two different ways.
  *
- * The seam KAN-91 (macOS `Cmd`) plugs into: swap these four literals for
- * platform ones (⌘/⇧/⌥/⌃, `meta` becoming Cmd) behind a `process.platform`
- * check, and every caller — today just `acceleratorLabel` in spacemenu.ts —
- * renders correctly with no change on its end, because it formats from
- * `Mods`, never from a hand-written chord string.
+ * KAN-91: on macOS this renders Apple's own symbols (⌃⌥⇧⌘) in Apple's own
+ * canonical display order (Control, Option, Shift, Command — the order every
+ * macOS menu itself uses), rather than the Ctrl/Shift/Alt/Meta text and order
+ * Windows/Linux keep unchanged. Still joined with "+": `acceleratorLabel`
+ * (spacemenu.ts) appends its digit as `${formatMods(mods)}+${index + 1}`, and
+ * that template is the one thing this ticket was told not to have to touch —
+ * so "⌘+1" ships instead of the pixel-perfect "⌘1" Apple's own HIG would
+ * write. ponytail: a real per-platform accelerator-label template (no "+"
+ * before a trailing digit on macOS) is a cosmetic upgrade, not a correctness
+ * one; revisit if a Mac user actually notices.
  */
 export function formatMods(mods: Mods): string {
+  if (isMac()) {
+    const parts: string[] = []
+    if (mods.ctrl) parts.push('⌃')
+    if (mods.alt) parts.push('⌥')
+    if (mods.shift) parts.push('⇧')
+    if (mods.meta) parts.push('⌘')
+    return parts.join('+')
+  }
   const parts: string[] = []
   if (mods.ctrl) parts.push('Ctrl')
   if (mods.shift) parts.push('Shift')
@@ -90,8 +166,12 @@ export function formatMods(mods: Mods): string {
 }
 
 /** Every modifier `mods` doesn't name must be up, not merely "don't care" —
- *  that asymmetry is the whole reason a shared helper exists at all. */
-function modsMatch(e: KeyboardEvent, mods: Mods): boolean {
+ *  that asymmetry is the whole reason a shared helper exists at all.
+ *
+ *  KAN-91: exported (was module-private) so App.tsx's grid-picker shortcut
+ *  can match an EXACT chord built from `primaryMods` instead of hand-rolling
+ *  its own four-modifier check the way it did before this ticket. */
+export function modsMatch(e: KeyboardEvent, mods: Mods): boolean {
   return (
     e.ctrlKey === !!mods.ctrl &&
     e.shiftKey === !!mods.shift &&
@@ -142,14 +222,26 @@ export interface SpaceKeybinds {
 /** Today's hardcoded shortcuts, restated as the defaults KAN-83's Settings
  *  field falls back to when a value is absent or fails validation — the
  *  exact chords `spaceIndex`/`pinnedSpaceIndex`/`spaceCycle` matched before
- *  this ticket, so an untouched settings.json changes nothing.
+ *  KAN-83, so an untouched settings.json changes nothing.
  *
  *  KAN-95: `spacemenu.ts`'s `acceleratorLabel` now formats from the resolved
  *  binding (via `formatMods` above) rather than reading these as literals, so
- *  a rebind no longer leaves the dropdown label stale. */
+ *  a rebind no longer leaves the dropdown label stale.
+ *
+ *  KAN-91: `switchUnpinned`/`switchPinned` are built from `primaryMods` —
+ *  Cmd+1..9 / Cmd+Shift+1..9 on a fresh macOS install, unchanged Ctrl+1..9 /
+ *  Ctrl+Shift+1..9 everywhere else — matching how Chrome/Safari themselves
+ *  switch to tab N on each platform.
+ *
+ *  `cycleNext`/`cyclePrev` deliberately do NOT follow the same swap and stay
+ *  Ctrl+Tab / Ctrl+Shift+Tab on macOS too: Cmd+Tab is the OS's own app
+ *  switcher, resolved before any window's JS ever sees the keystroke, so
+ *  defaulting to it would ship a shortcut that is silently dead on every Mac.
+ *  This is the same reason Chrome and Safari both keep Ctrl+Tab for in-app
+ *  tab cycling on macOS instead of Cmd+Tab. */
 export const DEFAULT_SPACE_KEYBINDS: SpaceKeybinds = {
-  switchUnpinned: { ctrl: true },
-  switchPinned: { ctrl: true, shift: true },
+  switchUnpinned: primaryMods(),
+  switchPinned: primaryMods({ shift: true }),
   cycleNext: { mods: { ctrl: true }, key: 'Tab' },
   cyclePrev: { mods: { ctrl: true, shift: true }, key: 'Tab' },
 }
@@ -237,15 +329,37 @@ export function findSpaceBindingConflict(
  * while those two win at the OS/Electron layer first. Out of scope for the
  * same reason OS/terminal collisions are (see the module's Settings-modal
  * caller): undetectable and unfixable from here.
+ *
+ * KAN-91: all six chords are built from `primaryMods` now, not the literal
+ * `{ ctrl: true }` this list hardcoded before this ticket — every one of the
+ * six files that actually OWNS a chord (menu.ts's `CmdOrCtrl+T`/`CmdOrCtrl+W`,
+ * App.tsx's grid picker, FileBrowser's search/new-folder) switched to Cmd on
+ * macOS elsewhere in this same ticket, and a list restating them by hand in
+ * literal Ctrl would go stale on a Mac the moment it did: warning a mac user
+ * that their Ctrl+Shift+G rebind collides with the grid picker when Cmd+
+ * Shift+G is the one that actually fires there now, and MISSING the real
+ * collision if they typed Cmd+Shift+G instead.
  */
 export function knownAppShortcut(binding: KeyBinding): string | null {
   const KNOWN: { mods: Mods; key: string; label: string }[] = [
-    { mods: { ctrl: true }, key: 't', label: 'New Tab (Ctrl+T)' },
-    { mods: { ctrl: true }, key: 'w', label: 'Close Tab (Ctrl+W)' },
-    { mods: { ctrl: true, shift: true }, key: 'g', label: 'the split grid picker (Ctrl+Shift+G)' },
-    { mods: { ctrl: true, shift: true }, key: 'd', label: 'Toggle Developer Mode (Ctrl+Shift+D)' },
-    { mods: { ctrl: true }, key: 'f', label: 'Search (Ctrl+F)' },
-    { mods: { ctrl: true, shift: true }, key: 'n', label: 'New Folder (Ctrl+Shift+N)' },
+    { mods: primaryMods(), key: 't', label: `New Tab (${formatMods(primaryMods())}+T)` },
+    { mods: primaryMods(), key: 'w', label: `Close Tab (${formatMods(primaryMods())}+W)` },
+    {
+      mods: primaryMods({ shift: true }),
+      key: 'g',
+      label: `the split grid picker (${formatMods(primaryMods({ shift: true }))}+G)`,
+    },
+    {
+      mods: primaryMods({ shift: true }),
+      key: 'd',
+      label: `Toggle Developer Mode (${formatMods(primaryMods({ shift: true }))}+D)`,
+    },
+    { mods: primaryMods(), key: 'f', label: `Search (${formatMods(primaryMods())}+F)` },
+    {
+      mods: primaryMods({ shift: true }),
+      key: 'n',
+      label: `New Folder (${formatMods(primaryMods({ shift: true }))}+N)`,
+    },
   ]
   const hit = KNOWN.find((k) => modsEqual(k.mods, binding.mods) && k.key === binding.key.toLowerCase())
   return hit?.label ?? null

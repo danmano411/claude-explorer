@@ -29,8 +29,8 @@ import type {
   ClaudeState, ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
 import {
-  DEFAULT_SPACE_KEYBINDS, isTextBox, isTypingTarget, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
-  type SpaceKeybinds,
+  DEFAULT_SPACE_KEYBINDS, isTextBox, isTypingTarget, modsMatch, pinnedSpaceIndex, primaryMods, resolveSpaceKeybinds,
+  spaceCycle, spaceIndex, type SpaceKeybinds,
 } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { useClaudeState } from './claudestate';
@@ -2122,9 +2122,16 @@ export function App() {
   // this must not. Capture at window is the first thing in the event path, so
   // xterm's own textarea listener never runs and no ^G reaches the pty —
   // preventDefault alone would be too late.
+  //
+  // KAN-91: Cmd+Shift+G on macOS instead of Ctrl+Shift+G — matching Chrome's
+  // own Cmd+Shift+G ("Find previous") vs Ctrl+Shift+G on Windows, a real
+  // precedent for this exact swap in a cross-platform app. `modsMatch` against
+  // `primaryMods({ shift: true })` reproduces the old hand-rolled four-modifier
+  // check exactly (require the accelerator + Shift, reject the other two)
+  // instead of adding a second, easy-to-desync condition beside it.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (!modsMatch(e, primaryMods({ shift: true }))) return;
       if (e.key.toLowerCase() !== 'g') return;
       if (isTextBox(e.target)) return; // rename / address / search boxes only
       e.preventDefault();
