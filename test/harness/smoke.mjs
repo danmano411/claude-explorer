@@ -28,14 +28,27 @@ const printConsoleErrors = (errors) => {
 };
 
 try {
-  const { win, close, consoleErrors } = await launchApp({ timeout: TIMEOUT });
-  // launchApp() already waited for `.app` (throws on failure, caught below).
-  // The other half of the assertion: something actually mounted under the
-  // static `<div id="root">` in index.html, not just that a `.app` element
-  // matched somewhere.
-  const rootChildren = await win.evaluate(() => document.querySelector('#root')?.children.length ?? 0);
+  const { close, consoleErrors } = await launchApp({ timeout: TIMEOUT });
+  // launchApp() already waited for `.app` (it throws on failure, caught below),
+  // so reaching this line IS the assertion — React mounted App.tsx's root
+  // element, which is the half KAN-96 broke.
   check('.app appeared', true);
-  check('#root has child nodes', rootChildren > 0, `${rootChildren} children`);
+
+  // The second assertion has to be INDEPENDENT of the first or it is decorative.
+  // "#root has child nodes" was the obvious candidate and is worthless here:
+  // `.app` is App.tsx's own root element (App.tsx:2243) and React mounts it
+  // INTO `#root`, so `#root.children.length > 0` is structurally guaranteed the
+  // moment `.app` matches — it cannot fail while the check above passes. That is
+  // exactly the "assert something structurally guaranteed" trap in CLAUDE.md.
+  //
+  // Uncaught renderer errors are genuinely independent: the app can mount and
+  // still be throwing — a missing preload binding, a component swallowed by an
+  // error boundary, a rejected IPC promise. None of those move `.app`, and all
+  // of them are the same class of defect KAN-96 belonged to (renderer-only, so
+  // vitest in node cannot see them). Demonstrated red separately from `.app`,
+  // by throwing asynchronously from main.tsx after mount.
+  check('no uncaught renderer errors', consoleErrors.length === 0,
+    consoleErrors.length ? `${consoleErrors.length} captured` : 'none');
   if (results.some((r) => !r.pass)) printConsoleErrors(consoleErrors);
   await close();
 } catch (err) {
