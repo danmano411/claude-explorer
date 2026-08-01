@@ -6,11 +6,17 @@
 //   1. SELECTIVITY. A files tab closes on one click with no dialog at all. This
 //      is the control the whole ticket hangs on — a guard that fires on every
 //      close is worse than no guard, because it is clicked through by habit.
-//   2. A LIVE SHELL tab prompts, and Cancel leaves the PROCESS running, not
-//      merely the tab on screen. Proved with a heartbeat file the shell appends
-//      to: a killed pty stops writing, and nothing in the renderer can fake
-//      bytes landing on disk. Confirm then closes it AND stops the heartbeat —
-//      so "still alive after Cancel" cannot be a close that silently no-opped.
+//   2. A SHELL RUNNING A SILENT CHILD prompts, and Cancel leaves the PROCESS
+//      running, not merely the tab on screen. Proved with a heartbeat file the
+//      child appends to: a killed pty stops writing, and nothing in the renderer
+//      can fake bytes landing on disk. Confirm then closes it AND stops the
+//      heartbeat — so "still alive after Cancel" cannot be a close that silently
+//      no-opped.
+//  2b. A SHELL AT AN IDLE PROMPT closes with NO dialog (KAN-100), on a pty the
+//      liveness probe says is alive — so "no dialog" is the guard deciding, not
+//      a tab that never got a process. Together with 2 that is the whole of
+//      KAN-100: two shells built the same way, opposite answers, decided only by
+//      whether a child is running in the console.
 //   3. A LIVE CLAUDE tab prompts, with the Claude wording, and Cancel leaves
 //      its pty alive and its xterm INSTANCE untouched (the probe is planted on
 //      the element: ConPTY repaints its whole buffer on resize, so surviving
@@ -40,6 +46,21 @@
 //     probe reading ALIVE and DEAD on the very shell whose heartbeat says the
 //     same thing, which is what earns it the right to answer for the Claude
 //     pty in section 3 (a Claude session has no heartbeat to offer).
+//
+// WHY EVERY "BUSY SHELL" HERE IS AN EXTERNAL `node` CHILD AND NOT A POWERSHELL
+// LOOP (KAN-100). The signal behind the shell arm is ConPTY's console process
+// list, so an EXTERNAL process is the whole of what it can see. Measured
+// directly against a live PowerShell pty: `Start-Sleep -Seconds 8` and a
+// `while($true){ Add-Content …; Start-Sleep … }` cmdlet loop — which is what
+// this file's heartbeat used to be — both report NOT BUSY, because a cmdlet
+// runs inside powershell.exe and attaches nothing new to the console. That is a
+// known, deliberate ceiling (see the ponytail note in src/main/pty.ts), and it
+// is why the instrument had to change: a heartbeat written by a cmdlet would
+// have made "a live shell prompts" pass for the wrong reason on the old build
+// and fail on the new one. Every child below is `node -e`, which is external,
+// and every one of them is SILENT — it writes to a FILE and prints nothing —
+// because a child that produces no output at all is exactly the case a
+// byte-traffic heuristic gets backwards and the one KAN-100 has to get right.
 //
 // Exactly ONE real Claude spawn, and it never has to finish starting: the pty
 // is alive from the moment node-pty returns, which is all sections 3 needs.
@@ -152,6 +173,27 @@ const clickDanger = async (win) => {
   await win.waitForTimeout(600);
 };
 
+/** The JS for a child that is SILENT on screen and visible only on disk. Never
+ *  `echo`: a terminal echoes what you TYPE, so anything the command line
+ *  contains is on screen before the command runs — the marker has to be
+ *  produced by the child itself for its presence to mean anything. */
+const posix = (p) => p.replace(/\\/g, '/');
+const heartbeatJs = (file) =>
+  `const fs=require('fs');setInterval(()=>fs.appendFileSync('${posix(file)}','tick'),300)`;
+const markThenSleepJs = (file) =>
+  `require('fs').writeFileSync('${posix(file)}','up');setTimeout(()=>{},600000)`;
+
+/** Start a silent external child in the CURRENT terminal and wait until it has
+ *  proved it is running by writing `mark`. Returns whether it did — folded into
+ *  a PRE-STATE by every caller, so a child that never started shows up as a
+ *  named failure instead of quietly making the next assertion vacuous. */
+async function startSilentChild(win, mark) {
+  fs.rmSync(mark, { force: true });
+  await runInTerminal(win, `node -e "${markThenSleepJs(mark)}"`);
+  for (let i = 0; i < 40 && !fs.existsSync(mark); i++) await win.waitForTimeout(250);
+  return fs.existsSync(mark);
+}
+
 async function runInTerminal(win, line) {
   await win.locator('.pane:not([hidden]) .xterm-screen').click();
   await win.waitForTimeout(200);
@@ -232,7 +274,7 @@ console.log('\n1. a files tab closes with no dialog');
 // ---------------------------------------------------------------------------
 // 2. A live SHELL: prompt, Cancel keeps the process, Continue kills it.
 // ---------------------------------------------------------------------------
-console.log('\n2. a live shell tab — the dialog, and the process behind it');
+console.log('\n2. a shell running a SILENT child — the dialog, and the process behind it');
 let shellId = null;
 {
   await tabMenu(win, 0, 'Open Terminal');
@@ -240,13 +282,16 @@ let shellId = null;
   await win.waitForTimeout(1500);
   await win.evaluate(() => { document.querySelector('.pane:not([hidden]) .xterm').dataset.ceProbe = 'shell'; });
 
-  // The heartbeat is the only witness to a process nobody is looking at.
-  await runInTerminal(win,
-    `while($true){ Add-Content -Path '${BEAT.replace(/\\/g, '/')}' -Value 'tick'; Start-Sleep -Milliseconds 300 }`);
+  // The heartbeat is the only witness to a process nobody is looking at — and
+  // since KAN-100 it is also the child that makes this shell BUSY at all. An
+  // external `node`, not a cmdlet loop: see the header note on why that
+  // distinction is the difference between this section passing for the right
+  // reason and passing for the wrong one.
+  await runInTerminal(win, `node -e "${heartbeatJs(BEAT)}"`);
   await win.waitForTimeout(2500);
   const b0 = beats();
   await win.waitForTimeout(1200);
-  check('PRE-STATE: the shell is genuinely running (its heartbeat grows)',
+  check('PRE-STATE: the shell is genuinely running something (its heartbeat grows)',
     b0 > 0 && beats() > b0, `${b0} → ${beats()} bytes`);
 
   shellId = (await ptyIds())[0] ?? null;
@@ -255,7 +300,11 @@ let shellId = null;
   const beforeTabs = await tabCount(win);
   await closeX(win, 1);
   await settleModal(win);
-  check('closing a LIVE shell tab raises a confirm', (await modals(win)) === 1, `${await modals(win)}`);
+  // KAN-100's other half. The child prints NOTHING, so on pty bytes this shell
+  // is indistinguishable from one sitting at an empty prompt — and 2b closes
+  // exactly that with no dialog at all. Whatever decides between them cannot be
+  // byte traffic.
+  check('closing a shell running a SILENT child raises a confirm', (await modals(win)) === 1, `${await modals(win)}`);
   check('…naming the live terminal, not a generic "are you sure"',
     /terminal is still running/.test(await modalText(win)), await modalText(win));
   check('…and nothing has closed while the dialog is up',
@@ -289,6 +338,56 @@ let shellId = null;
   const deadBytes = await ptyProbe(shellId);
   check('the resize probe reads DEAD for the same id — so it discriminates',
     deadBytes === 0, `${deadBytes} bytes back from a resize`);
+}
+
+// ---------------------------------------------------------------------------
+// 2b. KAN-100: a shell at an IDLE PROMPT closes with no dialog.
+//
+// `closeRisk` measured a shell's risk as "a pty exists and has not exited",
+// which is true from spawn until exit — so every shell close in the app was
+// confirmed, which is precisely the click-through training closeguard.ts's own
+// doctrine exists to prevent. This is the same tab section 2 builds, by the
+// same route, differing only in that nothing is running in it.
+//
+// THE PRE-STATE IS LOAD-BEARING. "No dialog" is also what a tab with no process
+// at all looks like, and a broken spawn would satisfy this section for entirely
+// the wrong reason — so the pty is proved ALIVE with the resize probe section 2
+// calibrated against the heartbeat, immediately before the close.
+// ---------------------------------------------------------------------------
+console.log('\n2b. a shell at an idle prompt closes with NO dialog (KAN-100)');
+{
+  const known = new Set(await ptyIds());
+  await tabMenu(win, 0, 'Open Terminal');
+  await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
+  await win.waitForTimeout(3000);   // let PowerShell reach its prompt
+
+  const idleId = (await ptyIds()).find((id) => !known.has(id)) ?? null;
+  const aliveBytes = idleId ? await ptyProbe(idleId) : 0;
+  check('PRE-STATE: this shell has a LIVE pty — so a missing dialog is the guard, not a dead tab',
+    !!idleId && aliveBytes > 0, `id=${idleId}, ${aliveBytes} bytes back from a resize`);
+
+  const beforeTabs = await tabCount(win);
+  await closeX(win, 1);
+  await settleModal(win);
+  check('closing a shell AT AN IDLE PROMPT raises NO confirm',
+    (await modals(win)) === 0, `${await modals(win)} dialog(s): "${await modalText(win)}"`);
+  check('…and it closed on that one click', (await tabCount(win)) === beforeTabs - 1,
+    `${beforeTabs} → ${await tabCount(win)}`);
+  check('…and its pty really is gone, so the silent close was a close',
+    (idleId ? await ptyProbe(idleId) : 1) === 0);
+
+  // RECOVERY, for the reason stated in the `soft` comment above: on a build
+  // where this section fails, it fails by leaving a MODAL up — and a
+  // `.modal-backdrop` swallows every subsequent click, so section 3 would die on
+  // an escaping Playwright timeout and report one stack trace instead of the
+  // remaining fifty assertions. Put the app back into the state section 3
+  // expects (one files tab, no dialog) whichever way this section went.
+  if (await modals(win)) {
+    await clickCancel(win);
+    await closeX(win, 1);
+    await settleModal(win);
+    await clickDanger(win);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,10 +497,15 @@ console.log('\n4. a pinned tab refuses to close');
 // ---------------------------------------------------------------------------
 console.log("\n5. Close group's tabs — one dialog for the whole group");
 {
+  // KAN-100: each shell needs something actually RUNNING in it, or the group
+  // close is all-idle and correctly raises no dialog at all — which would leave
+  // this section asserting nothing about asking once.
+  const started = [];
   for (let i = 0; i < 2; i++) {
     await tabMenu(win, 0, 'Open Terminal');
     await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
-    await win.waitForTimeout(1200);
+    await win.waitForTimeout(2500);
+    started.push(await startSilentChild(win, `${BEAT}.g${i}`));
   }
   await renameTab(win, 2, 'S1');
   await renameTab(win, 3, 'S2');
@@ -410,8 +514,9 @@ console.log("\n5. Close group's tabs — one dialog for the whole group");
   await tabMenu(win, 3, /^Add to /);                  // S2
   const before = await tabCount(win);
   const grouped = await win.evaluate(() => document.querySelectorAll('.tabgroup .tab').length);
-  check('PRE-STATE: a 3-tab group, two of them live shells', before === 4 && grouped === 3,
-    `${before} tabs, ${grouped} in the group`);
+  check('PRE-STATE: a 3-tab group, two of them shells with a silent child running',
+    before === 4 && grouped === 3 && started.every(Boolean),
+    `${before} tabs, ${grouped} in the group, children started=${JSON.stringify(started)}`);
 
   await groupMenu(win, "Close group's tabs");
   await settleModal(win);
@@ -549,17 +654,20 @@ console.log('\n7. after a restart');
   {
     await tabMenu(win, 0, 'Open Terminal');
     await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
-    await win.waitForTimeout(1500);
+    await win.waitForTimeout(2500);
+    // KAN-100: this section needs the close to RAISE the confirm, so the shell
+    // has to be running something. Silent, external — see the header note.
+    const ran = await startSilentChild(win, `${BEAT}.s8`);
     await createSpace(win, 'Two');   // lands ON Two
     await toSpace(1);
     const before = await shape();
-    check('PRE-STATE: space 1 shows a files tab, a live shell, and a pane',
-      before.strip === 2 && before.panes === 1 && before.active === 1 && before.space === 'Space',
-      JSON.stringify(before));
+    check('PRE-STATE: space 1 shows a files tab, a busy shell, and a pane',
+      before.strip === 2 && before.panes === 1 && before.active === 1 && before.space === 'Space' && ran,
+      `${JSON.stringify(before)} child=${ran}`);
 
     await closeX(win, 1);
     await settleModal(win);
-    check('PRE-STATE: closing the live shell raised the confirm', (await modals(win)) === 1,
+    check('PRE-STATE: closing the busy shell raised the confirm', (await modals(win)) === 1,
       JSON.stringify(await shape()));
 
     await win.keyboard.press('Control+2');   // focus is the modal's Cancel button
@@ -592,23 +700,43 @@ console.log('\n7. after a restart');
     await win.waitForTimeout(700);
     await tabMenu(win, 0, 'Open Terminal');
     await win.waitForSelector('.pane:not([hidden]) .xterm', { timeout: 20_000 }).catch(() => {});
-    await win.waitForTimeout(1500);
+    await win.waitForTimeout(3000);   // let PowerShell reach its prompt
     await tabMenu(win, 0, 'Pin tab');
     const pre = await shape();
-    check('PRE-STATE: «Two» holds 2 tabs, one pinned and one a live shell',
+    check('PRE-STATE: «Two» holds 2 tabs, one pinned and one a shell at an idle prompt',
       pre.space === 'Two' && pre.strip === 2
       && (await win.locator('.tab.pinned').count()) === 1,
       `${JSON.stringify(pre)} pinned=${await win.locator('.tab.pinned').count()}`);
 
+    // KAN-100 reaches the SPACE DELETE too, and that is not incidental:
+    // deleteSpaceReason consumes the very same CloseRisk[] as the close confirm,
+    // so a fix that lived at the close call site instead of in closeRisk would
+    // leave this sentence calling an idle prompt "a live terminal".
     await openSpaceMenu(win);
     await softClick(win.locator('.spacemenu-item', { hasText: /^Delete$/ }));
     await settleModal(win);
-    const said = await modalText(win);
-    check('the delete confirm still counts the tabs and the live work',
-      /^Delete «Two» and close its 2 tabs\? 1 is a live terminal, and that work is not saved anywhere\./
-        .test(said), said);
-    check('…AND admits it will close the pinned tab too',
-      /1 is pinned — deleting the space closes it anyway\./.test(said), said);
+    const idle = await modalText(win);
+    check('the delete confirm does NOT call an idle shell live work (KAN-100)',
+      /^Delete «Two» and close its 2 tabs\? 1 is pinned/.test(idle), idle);
+    check('…while still admitting it will close the pinned tab',
+      /1 is pinned — deleting the space closes it anyway\./.test(idle), idle);
+
+    // POSITIVE CONTROL. Without this, "no live clause" is equally satisfied by a
+    // sentence that lost the ability to say it at all. Same space, same tabs —
+    // only a running child is added.
+    await clickCancel(win);
+    await softClick(win.locator('.tab:not(.add)').nth(1));
+    await win.waitForTimeout(400);
+    const ran = await startSilentChild(win, `${BEAT}.s9`);
+    await openSpaceMenu(win);
+    await softClick(win.locator('.spacemenu-item', { hasText: /^Delete$/ }));
+    await settleModal(win);
+    const busy = await modalText(win);
+    check('POSITIVE CONTROL: with a silent child running, the live clause comes back',
+      ran && /^Delete «Two» and close its 2 tabs\? 1 is a live terminal, and that work is not saved anywhere\./
+        .test(busy), `child=${ran} ${busy}`);
+    check('…and the pinned clause is still there alongside it',
+      /1 is pinned — deleting the space closes it anyway\./.test(busy), busy);
 
     await clickDanger(win);
     await win.waitForTimeout(800);
@@ -623,6 +751,7 @@ console.log('\n7. after a restart');
 }
 
 fs.rmSync(BEAT, { force: true });
+for (const suffix of ['.g0', '.g1', '.s8', '.s9']) fs.rmSync(`${BEAT}${suffix}`, { force: true });
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) console.log('failing:', failed.map((f) => f.name).join('; '));

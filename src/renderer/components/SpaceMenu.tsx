@@ -63,8 +63,12 @@ export interface SpaceMenuProps {
    *  live-work risk of each, and how many are PINNED — a space delete closes
    *  those too, and the sentence has to admit it. App owns the join because
    *  `status` is keyed by ptyId, not by tab id; this component only renders the
-   *  answer. */
-  tabsOf: (spaceId: string) => { risks: CloseRisk[]; pinnedCount: number }
+   *  answer.
+   *
+   *  ASYNC since KAN-100: a shell's "is it running something" signal is an IPC
+   *  round trip (`pty:busy`), so this is asked ONCE — when Delete is clicked —
+   *  and the answer is held for the life of the dialog. */
+  tabsOf: (spaceId: string) => Promise<{ risks: CloseRisk[]; pinnedCount: number }>
   /** Drop a dragged tab / group onto a space row (KAN-66) — the gesture people
    *  reach for before they find the context menu. The SAME App handlers the
    *  strip's "Move Tab to ▸" calls, so the confirm rule, the source-pane
@@ -102,10 +106,16 @@ export function SpaceMenu({
   const [renameDraft, setRenameDraft] = useState('')
   const [adding, setAdding] = useState(false)
   const [addDraft, setAddDraft] = useState('')
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  /** The space whose delete confirm is open, WITH the risk snapshot `tabsOf`
+   *  answered with — KAN-100 made that answer async (one `pty:busy` probe), so
+   *  it is taken once at click time rather than re-derived on every render. The
+   *  space itself is still re-resolved below, so a rename or a delete underneath
+   *  the modal is still reflected. */
+  const [confirmDelete, setConfirmDelete] =
+    useState<{ id: string; risks: CloseRisk[]; pinnedCount: number } | null>(null)
   // KAN-85: the space whose custom-color dialog is open, or null. Kept as an
   // id, not a boolean, so `active` (which can change under an open dropdown
-  // exactly like `confirmDeleteId` above) is re-resolved on every render
+  // exactly like `confirmDelete` above) is re-resolved on every render
   // rather than captured stale at the moment "Custom…" was clicked.
   const [customColorId, setCustomColorId] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -444,7 +454,11 @@ export function SpaceMenu({
                 <button
                   ref={(el) => registerItem(el)}
                   className="spacemenu-item"
-                  onClick={() => { setConfirmDeleteId(active.id); close() }}
+                  onClick={() => {
+                    const id = active.id
+                    void tabsOf(id).then((t) => setConfirmDelete({ id, ...t }))
+                    close()
+                  }}
                 >
                   Delete
                 </button>
@@ -459,14 +473,14 @@ export function SpaceMenu({
           deleted or renamed underneath this modal is reflected in it — and a
           space that has gone entirely renders nothing at all, rather than
           leaving a dialog naming something that no longer exists. */}
-      {confirmDeleteId && (() => {
-        const target = uniqueSpaces.find((s) => s.id === confirmDeleteId)
+      {confirmDelete && (() => {
+        const target = uniqueSpaces.find((s) => s.id === confirmDelete.id)
         if (!target) return null
-        const { risks, pinnedCount } = tabsOf(target.id)
         return (
           <ConfirmDialog
             request={{
-              reason: deleteSpaceReason(target.name, target.tabIds.length, risks, pinnedCount),
+              reason: deleteSpaceReason(
+                target.name, target.tabIds.length, confirmDelete.risks, confirmDelete.pinnedCount),
               confirmLabel: 'Delete',
               confirm: () => {
                 // Re-check: the menu item that opens this modal is gated on
@@ -477,7 +491,7 @@ export function SpaceMenu({
                 if (canDeleteSpace(uniqueSpaces.length, target.pinned)) onDelete(target.id)
               },
             }}
-            onClose={() => setConfirmDeleteId(null)}
+            onClose={() => setConfirmDelete(null)}
           />
         )
       })()}

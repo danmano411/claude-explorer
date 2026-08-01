@@ -74,4 +74,8 @@ export function registerPtyHandlers(getWindow: () => BrowserWindow | null) {
   ipcMain.on(CH.ptyWrite, (_e, id: string, data: string) => mgr.write(id, data));
   ipcMain.on(CH.ptyResize, (_e, id: string, cols: number, rows: number) => mgr.resize(id, cols, rows));
   ipcMain.on(CH.ptyKill, (_e, id: string) => mgr.kill(id));
+  // KAN-100. The one QUERY on a pty: the close guard asking, once per close
+  // decision, which of a batch of shells is running something. `handle`, not
+  // `on` — the renderer waits for the answer before it decides whether to ask.
+  ipcMain.handle(CH.ptyBusy, (_e, ids: string[]) => mgr.busy(Array.isArray(ids) ? ids : []));
 }
