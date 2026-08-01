@@ -93,10 +93,18 @@ export function App() {
    *  close confirm and a move confirm silently overwrite each other. */
   const [pendingMove, setPendingMove] = useState<ConfirmRequest | null>(null);
   const status = usePtyStatus();
-  // KAN-73/KAN-74/KAN-76: the ONE Claude-session-state map, shared by the
-  // dot (TabBar.tsx) and the cross-space markers (SpaceMenu.tsx) below —
-  // see the module doc in renderer/claudestate.ts for why this is a single
-  // hook rather than each consumer keeping its own subscription.
+  // KAN-73/74/75/76: the ONE Claude-session-state map, shared by the dot
+  // (TabBar.tsx), the cross-space markers (SpaceMenu.tsx) and the close guard
+  // (`closeRisk`, below). See renderer/claudestate.ts for why this is a single
+  // hook rather than a subscription per consumer: two subscriptions would NOT
+  // have conflicted in git, they would have silently disagreed about `pty:exit`
+  // — the only route to 'stopped', since a dead process cannot POST its own
+  // death, and the one thing a second hand-written copy is most likely to omit.
+  //
+  // Keyed by ptyId like `status`, and the same absence rule: a ptyId missing
+  // here is UNKNOWN, never "idle". That is precisely what lets `closeRisk` keep
+  // today's behaviour for every session with no hook signal — an agentSpawned
+  // worker, a session this app did not launch, or agentControl: false.
   const claudeState = useClaudeState();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
@@ -814,7 +822,8 @@ export function App() {
     const rest = resolved.filter((t) => !t.pinned);
     const doomed = rest.map((t) => t.id);
     if (doomed.length) {
-      const reason = mode === 'now' ? null : closeReason(rest.map((t) => closeRisk(t, status)));
+      const reason = mode === 'now' ? null
+        : closeReason(rest.map((t) => closeRisk(t, status, claudeState)));
       // The common case — files, viewers, a finished Claude tab, a dead shell —
       // is byte-for-byte what it was: one click, no modal, nothing awaited.
       if (reason === null) closeNow(doomed);
@@ -1960,7 +1969,7 @@ export function App() {
       tabsOf={(spaceId): { risks: CloseRisk[]; pinnedCount: number } => {
         const members = sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs);
         return {
-          risks: members.map((t) => closeRisk(t, status)),
+          risks: members.map((t) => closeRisk(t, status, claudeState)),
           pinnedCount: members.filter((t) => t.pinned).length,
         };
       }}
