@@ -21,6 +21,7 @@ import { registerControlHandlers } from './control.handlers'
 import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
 import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
 import { setMcpInjection, stripInheritedAppSecrets } from './pty'
+import { hookSettings } from './claudestate'
 import { getSettings } from './settings'
 import { flushAll, sweep, takePendingTrashWarn } from './trash'
 import { parseCliArgs, resolveCliIntent, type CliTarget } from './cli'
@@ -159,7 +160,21 @@ async function applyAgentControl(): Promise<void> {
         },
       }),
     )
-    setMcpInjection({ configPath, token })
+    // KAN-73. The session-state hooks, written beside the MCP config and for
+    // the same reasons: rewritten every run because listen(0) picks a new port
+    // every run, and holding the LITERAL `${CLAUDE_EXPLORER_MCP_TOKEN}` in its
+    // Authorization header so the real token never touches disk. Passed to
+    // Claude Code as `claude --settings <path>` — a path, never inline JSON,
+    // see pty.ts:163-208 for the cmd.exe quoting rule that would otherwise stop
+    // Claude launching at all.
+    //
+    // Written BEFORE setMcpInjection, so the object pty.ts spawns from can
+    // never name a settings file that does not exist: a throw here lands in the
+    // catch below and leaves agent control off entirely, exactly as a failed
+    // MCP config write already did.
+    const settingsPath = join(app.getPath('userData'), 'claude-hooks.json')
+    writeFileSync(settingsPath, JSON.stringify(hookSettings(port)))
+    setMcpInjection({ configPath, token, settingsPath })
   } catch (err) {
     console.error('agent control disabled:', err)
   }
