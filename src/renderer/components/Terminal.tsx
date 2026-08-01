@@ -139,29 +139,47 @@ export function Terminal({
       // xterm decides on keyCode; where a layout makes those differ the fallout
       // is at worst today's behaviour (App declines, xterm sends its byte).
       //
-      // KAN-83: NOW calls preventDefault, where the pre-KAN-83 comment here
-      // used to argue it was unnecessary — that argument was ctrl-SPECIFIC ("a
-      // ctrl-modified digit produces no character, and xterm's own _keyPress
-      // bails on ctrlKey regardless"), and `mods` is no longer guaranteed to be
-      // Ctrl. A rebind to Shift alone, say, makes Shift+3 a perfectly ordinary
-      // '#' on a US layout — ctrlKey is false, so xterm's OWN keyPress bail-out
-      // no longer applies either — and with App declining (fewer than n spaces,
-      // the case paste.mjs §11 exercises for the default binding) nothing else
-      // in the dispatch would stop that character reaching the hidden textarea.
+      // KAN-83: preventDefault is now CONDITIONAL on `!e.ctrlKey`, where the
+      // pre-KAN-83 comment here argued it was never needed at all — that
+      // argument was ctrl-SPECIFIC ("a ctrl-modified digit produces no
+      // character, and xterm's own _keyPress bails on ctrlKey regardless"),
+      // and `mods` is no longer guaranteed to include Ctrl. A rebind to
+      // Shift alone, say, makes Shift+3 a perfectly ordinary '#' on a US
+      // layout, and with App declining (fewer than n spaces) nothing else in
+      // the dispatch would stop that character reaching the hidden textarea.
+      //
+      // UNCONDITIONAL would have been the wrong fix, and shipped one:
+      // paste.mjs §11's "and it is NOT preventDefault-ed: the handler that
+      // declines does not cancel" is a REGRESSION GUARD for the DEFAULT
+      // (Ctrl-only) binding specifically, asserting that Terminal.tsx's arm
+      // never cancels on its own — only whichever handler DECIDES leaves a
+      // preventDefault behind. Calling it unconditionally here breaks that
+      // guard for every rebind that still includes Ctrl, for no benefit: a
+      // ctrl-modified digit has no printable default to cancel regardless of
+      // what else is held (Shift/Alt/Meta), which is precisely the original
+      // argument and still holds with Ctrl in the mix. So the condition
+      // tracks the ORIGINAL reasoning's actual scope — "no Ctrl" is where it
+      // stops applying — not "any rebind".
+      //
       // Cancelling here does not touch stopPropagation, so App.tsx's bubble-
       // phase listener still sees the press and still decides for itself
-      // whether to switch — this arm is ONLY about the character, never about
-      // whether the space changes.
-      if (spaceIndex(e, keybindsRef.current.switchUnpinned) !== null) { e.preventDefault(); return false; }
+      // whether to switch — this arm is ONLY about the character, never
+      // about whether the space changes.
+      if (spaceIndex(e, keybindsRef.current.switchUnpinned) !== null) {
+        if (!e.ctrlKey) e.preventDefault();
+        return false;
+      }
 
       // KAN-82/KAN-83. Ctrl+Shift+1..9 selects a PINNED space by default —
       // same shape as the arm above, same predicate App.tsx's window listener
-      // switches on, and the same KAN-83 reasoning for now calling
-      // preventDefault: the pre-KAN-83 argument (Shift already held, so xterm's
-      // ctrl-digit branch requires `!ev.shiftKey` and never fires) said nothing
-      // about a rebind that drops Shift for, say, Alt+1 instead — a chord this
-      // arm must now cancel on the same grounds as the one above.
-      if (pinnedSpaceIndex(e, keybindsRef.current.switchPinned) !== null) { e.preventDefault(); return false; }
+      // switches on, and the same `!e.ctrlKey` reasoning: a rebind that drops
+      // Ctrl (Alt+Shift+1, say) can have a printable default to cancel; one
+      // that keeps it — including the shipped Ctrl+Shift+1..9 default — does
+      // not, and must not pick up a preventDefault it never had before.
+      if (pinnedSpaceIndex(e, keybindsRef.current.switchPinned) !== null) {
+        if (!e.ctrlKey) e.preventDefault();
+        return false;
+      }
 
       // KAN-82. Ctrl+Tab / Ctrl+Shift+Tab cycle spaces. UNLIKE every arm
       // above, this DOES preventDefault — the one place that departs from the
