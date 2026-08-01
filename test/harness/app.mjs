@@ -83,7 +83,22 @@ export async function launchApp({
     timeout,
   });
   const win = await app.firstWindow({ timeout });
-  await win.waitForSelector('.app', { timeout });
+
+  // Renderer console errors, captured unconditionally from here — BEFORE the
+  // `.app` wait, not after — because KAN-96's ReferenceError fired at module
+  // evaluation time (before React ever mounted) and the only prior signal was
+  // a silent timeout. Attached this early, a caller whose `.app` wait fails
+  // gets the message that actually explains why via `err.consoleErrors`.
+  const consoleErrors = [];
+  win.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  win.on('pageerror', (e) => consoleErrors.push(e.stack ?? e.message));
+
+  try {
+    await win.waitForSelector('.app', { timeout });
+  } catch (e) {
+    e.consoleErrors = consoleErrors;
+    throw e;
+  }
 
   // NOT app.close(): that hangs forever against our `will-quit` preventDefault
   // (index.ts flushes staged deletes before exiting). Closing the window takes
@@ -97,7 +112,7 @@ export async function launchApp({
     });
   };
 
-  return { app, win, close };
+  return { app, win, close, consoleErrors };
 }
 
 if (process.argv[1]?.endsWith('app.mjs')) {
