@@ -17,7 +17,7 @@ export function registerTrashHandlers() {
       opts?: { permanent?: boolean; confirm?: string },
     ): Promise<OpResult<TrashRecord[]>> => {
       const op = opts?.permanent ? 'permanentDelete' : 'delete'
-      const v = gate(op, paths, getSettings().mode, opts?.confirm)
+      const v = await gate(op, paths, getSettings().mode, opts?.confirm)
       if (v) return blocked(v)
       try {
         if (opts?.permanent) {
@@ -49,7 +49,7 @@ export function registerTrashHandlers() {
       const paths = records.flatMap((r) =>
         classify(r.staged) === 'trash' ? [r.original] : [r.original, r.staged],
       )
-      const v = gate('move', paths, getSettings().mode, confirm)
+      const v = await gate('move', paths, getSettings().mode, confirm)
       if (v) return blocked(v)
       try {
         await restoreAndUntrack(records)
