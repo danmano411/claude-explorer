@@ -66,6 +66,15 @@ export interface SpaceMenuProps {
    *  cleanup and the focus re-pick cannot drift between the two routes. */
   onMoveTab: (tabId: string, spaceId: string) => void
   onMoveGroup: (groupId: string, spaceId: string) => void
+  /**
+   * KAN-76. Does THIS space have a Claude session blocked awaiting input,
+   * right now? App owns the join (`spaceNeedsInput` in renderer/spacemenu.ts)
+   * for the same reason `tabsOf` above does: `claudeState` is keyed by ptyId,
+   * not by space, and this component only renders the answer. Called for
+   * every space on every render — pure and cheap, and the only way the
+   * dropdown can tell rows apart without a stored, driftable flag per space.
+   */
+  needsInput: (spaceId: string) => boolean
 }
 
 /** Is this drag something a space row can accept? `getData` is blocked during
@@ -74,7 +83,7 @@ const movable = (t: DataTransfer) => t.types.includes(TAB_MIME) || t.types.inclu
 
 export function SpaceMenu({
   spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, tabsOf,
-  onMoveTab, onMoveGroup,
+  onMoveTab, onMoveGroup, needsInput,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -101,6 +110,17 @@ export function SpaceMenu({
   // render loop below.
   const ordered = orderSpaces(uniqueSpaces)
   const pinnedCount = ordered.filter((s) => s.pinned).length
+
+  // KAN-76. "Other" spaces only, both here and on the per-row marker below —
+  // the active space's own blocked tab already marks ITSELF (TabBar.tsx's
+  // `.needs-input`), which is visible without opening this menu at all, so
+  // repeating the marker on the space you are already looking at would only
+  // ever say something you can already see. Recomputed on every render, from
+  // `needsInput` — nothing here is stored.
+  //
+  // Over `uniqueSpaces` rather than `ordered` on purpose: this is an "is there
+  // any" question, so the pinned/unpinned partition has no bearing on it.
+  const otherNeedsInput = uniqueSpaces.some((s) => s.id !== activeSpaceId && needsInput(s.id))
 
   const close = () => {
     setOpen(false)
@@ -237,6 +257,10 @@ export function SpaceMenu({
         title={active?.name}
       >
         <span className="spacemenu-name">{active?.name ?? 'Space'}</span> ▾
+        {/* KAN-76: some OTHER space has a session blocked awaiting input —
+            the whole point of this marker is that it is visible without
+            opening the dropdown at all. */}
+        {otherNeedsInput && <span className="spacemenu-flag" aria-hidden />}
       </button>
 
       {open && (
@@ -301,6 +325,13 @@ export function SpaceMenu({
                       >
                         <span className="spacemenu-check">{s.id === activeSpaceId ? '✓' : ''}</span>
                         <span className="spacemenu-item-name" title={s.name}>{s.name}</span>
+                        {/* KAN-76: which space, specifically — the chip above
+                            can only say "somewhere". Active space excluded,
+                            same reasoning as `otherNeedsInput`. Placed before
+                            the pin so the transient "needs you" signal sits
+                            next to the name, and the pin (a durable property
+                            of the space) stays adjacent to the accelerator. */}
+                        {s.id !== activeSpaceId && needsInput(s.id) && <span className="spacemenu-flag" aria-hidden />}
                         {/* KAN-81's marker. Aria-hidden: `active`'s "✓" and the
                             title attribute already carry the accessible name;
                             this is a purely visual echo of `.pinned`. */}

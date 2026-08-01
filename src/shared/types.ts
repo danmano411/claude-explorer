@@ -121,6 +121,33 @@ export type GitStatusResult =
 
 export type PtyStatus = 'running' | 'waiting' | 'stopped'
 
+/**
+ * KAN-73. What a Claude session is actually DOING, as reported by Claude Code's
+ * own hooks — not inferred from pty traffic.
+ *
+ * `PtyStatus` above stays exactly as it is and keeps serving shell tabs, where
+ * "bytes are moving" genuinely does mean "something is running". Two types
+ * because there are two questions: bytes cannot tell "needs your permission"
+ * from "finished its turn" from "thinking quietly", since all three are silence
+ * and a keystroke echo is indistinguishable from output. Collapsing them is
+ * what produced this release's dot bugs.
+ *
+ * ABSENCE FROM THE MAP MEANS UNKNOWN, and unknown must stay representable:
+ * there is no optimistic default anywhere downstream (KAN-74 deletes
+ * `?? 'running'`). Plenty of real sessions never report at all — one the user
+ * typed `claude` into inside a shell tab, one launched while `agentControl` was
+ * off, one whose own settings set `disableAllHooks` or that was started
+ * `--bare`. Those degrade to `PtyStatus` and render honest-unknown; none of
+ * them may show a state they never earned.
+ *
+ * 'stopped' is in the union but NEVER arrives on `CH.claudeState`, and that is
+ * structural rather than an omission: a dead process cannot POST its own death.
+ * It is derived in the renderer from the `pty:exit` event that already exists,
+ * which is also the only signal available for the hookless sessions above. See
+ * the CH.claudeState comment in ipc.ts.
+ */
+export type ClaudeState = 'working' | 'awaiting-input' | 'idle' | 'stopped'
+
 // --- M3 search -------------------------------------------------------------
 
 /**

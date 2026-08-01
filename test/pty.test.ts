@@ -228,6 +228,12 @@ describe('the claude.cmd command line', () => {
   // only the metacharacter one can tell a correct rule from a lax one.
   const SPACED = 'C:\\Users\\First Last\\AppData\\Roaming\\Claude Explorer\\mcp-agent-control.json'
   const AMPED = 'C:\\Users\\Dan&Sam\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  // KAN-73's --settings path. The same userData directory as the config beside
+  // it, because that is where index.ts writes it — which means the account name
+  // puts the SAME hostile character in both, and the tail now carries six
+  // quotes where the comment in pty.ts only had to survive four.
+  const SPACED_HOOKS = 'C:\\Users\\First Last\\AppData\\Roaming\\Claude Explorer\\claude-hooks.json'
+  const AMPED_HOOKS = 'C:\\Users\\Dan&Sam\\AppData\\Roaming\\claude-explorer\\claude-hooks.json'
   afterEach(() => { EXE.setMcpInjection(null); CMD.setMcpInjection(null) })
 
   const line = () => spawned[0].args as string
@@ -246,30 +252,39 @@ describe('the claude.cmd command line', () => {
     expect(line().endsWith('"')).toBe(true)
   })
 
-  it('quotes a --mcp-config path containing a space, so claude sees one argument', () => {
-    CMD.setMcpInjection({ configPath: SPACED, token: 't' })
+  it('quotes both injected paths when they contain a space, so claude sees one argument each', () => {
+    CMD.setMcpInjection({ configPath: SPACED, token: 't', settingsPath: SPACED_HOOKS })
     new CMD.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
     expect(line()).toContain(`"${SPACED}"`)
-    expect(claudeArgv()).toEqual(['--resume', UUID, '--mcp-config', SPACED])
+    expect(line()).toContain(`"${SPACED_HOOKS}"`)
+    expect(claudeArgv()).toEqual([
+      '--resume', UUID, '--mcp-config', SPACED, '--settings', SPACED_HOOKS,
+    ])
   })
 
   it('leaves cmd.exe no `&` to read as a second command', () => {
     // node-pty's own argsToCommandLine quotes only on a space/tab, so a
     // "let node-pty do the quoting" regression loses exactly this path: cmd
     // truncates the line at the & and runs the remainder as a command.
-    CMD.setMcpInjection({ configPath: AMPED, token: 't' })
+    CMD.setMcpInjection({ configPath: AMPED, token: 't', settingsPath: AMPED_HOOKS })
     new CMD.PtyManager().spawn({ path: 'C:\\repo', resumeId: UUID }, noop, noop)
     expect(line()).toContain(`"${AMPED}"`)
+    expect(line()).toContain(`"${AMPED_HOOKS}"`)
     expect(unquotedTail(line())).not.toMatch(/[&|^<>]/)
-    expect(claudeArgv()).toEqual(['--resume', UUID, '--mcp-config', AMPED])
+    expect(claudeArgv()).toEqual([
+      '--resume', UUID, '--mcp-config', AMPED, '--settings', AMPED_HOOKS,
+    ])
   })
 
   it('asks for exactly the argv the .exe branch asks for', () => {
-    for (const m of [EXE, CMD]) m.setMcpInjection({ configPath: SPACED, token: 't' })
+    for (const m of [EXE, CMD])
+      m.setMcpInjection({ configPath: SPACED, token: 't', settingsPath: SPACED_HOOKS })
     new EXE.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID }, noop, noop)
     new CMD.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID }, noop, noop)
     expect(claudeArgv(spawned[1])).toEqual(claudeArgv(spawned[0]))
-    expect(claudeArgv(spawned[0])).toEqual(['--session-id', UUID, '--mcp-config', SPACED])
+    expect(claudeArgv(spawned[0])).toEqual([
+      '--session-id', UUID, '--mcp-config', SPACED, '--settings', SPACED_HOOKS,
+    ])
   })
 
   it('runs the shim through COMSPEC and passes claude nothing extra of its own', () => {
@@ -289,11 +304,12 @@ describe('the claude.cmd command line', () => {
  */
 describe.each(BRANCHES)('KAN-41 recursion guard ($kind)', ({ mod }) => {
   const CONFIG = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  const HOOKS = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\claude-hooks.json'
   const TOKEN = 'SECRET-BEARER-TOKEN-abc123'
   afterEach(() => mod.setMcpInjection(null))
 
   it('gives an agentSpawned session --strict-mcp-config and neither --mcp-config nor the token', () => {
-    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN })
+    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN, settingsPath: HOOKS })
     new mod.PtyManager().spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
     const argv = claudeArgv()
     expect(argv).toContain('--strict-mcp-config')
@@ -306,12 +322,27 @@ describe.each(BRANCHES)('KAN-41 recursion guard ($kind)', ({ mod }) => {
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBeUndefined()
   })
 
+  // KAN-73's security decision, asserted rather than described. The hook's
+  // Authorization header is `Bearer ${CLAUDE_EXPLORER_MCP_TOKEN}`, so a worker
+  // that gets --settings and works is a worker that got the token back — and
+  // the token alone reaches /mcp, which is the whole surface the guard above
+  // withholds. So the flag and the path must BOTH be absent, and the argv the
+  // worker actually gets must be the same one it got before this ticket.
+  it('gives an agentSpawned session no --settings hook either — it would need the token back', () => {
+    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN, settingsPath: HOOKS })
+    new mod.PtyManager().spawn({ path: 'C:\\repo', sessionId: UUID, agentSpawned: true }, noop, noop)
+    expect(claudeArgv()).toEqual(['--session-id', UUID, '--strict-mcp-config'])
+    expect(JSON.stringify(spawned[0].opts.env)).not.toContain(TOKEN)
+  })
+
   it('still gives a normal (non-agent) spawn --mcp-config and the token, and no --strict-mcp-config', () => {
-    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN })
+    mod.setMcpInjection({ configPath: CONFIG, token: TOKEN, settingsPath: HOOKS })
     new mod.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
     const argv = claudeArgv()
     expect(argv).toContain('--mcp-config')
     expect(argv).toContain(CONFIG)
+    expect(argv).toContain('--settings')
+    expect(argv).toContain(HOOKS)
     expect(argv).not.toContain('--strict-mcp-config')
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBe(TOKEN)
   })
@@ -367,6 +398,7 @@ describe('KAN-67: launchEnv strips this app’s own session identity', () => {
   const STALE_TOKEN = 'STALE-INHERITED-TOKEN-xyz'
   const STALE_PTY_ID = 'stale-inherited-pty-id'
   const CONFIG = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  const HOOKS = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\claude-hooks.json'
   const REAL_TOKEN = 'REAL-BEARER-TOKEN-abc123'
 
   beforeEach(() => {
@@ -386,14 +418,14 @@ describe('KAN-67: launchEnv strips this app’s own session identity', () => {
   })
 
   it('an agentSpawned session from a nested launch still has no token', () => {
-    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN })
+    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN, settingsPath: HOOKS })
     new EXE.PtyManager().spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBeUndefined()
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBeUndefined()
   })
 
   it('a normal (non-agent) session from a nested launch still receives ITS OWN token, not the stale inherited one', () => {
-    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN })
+    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN, settingsPath: HOOKS })
     const id = new EXE.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBe(REAL_TOKEN)
     expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).not.toBe(STALE_TOKEN)
