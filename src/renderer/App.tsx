@@ -27,7 +27,10 @@ import type { ConfirmRequest } from './opresult';
 import type {
   ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
-import { isTextBox, pinnedSpaceIndex, spaceCycle, spaceIndex } from './keys';
+import {
+  DEFAULT_SPACE_KEYBINDS, isTextBox, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
+  type SpaceKeybinds,
+} from './keys';
 import { usePtyStatus } from './ptystatus';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
@@ -72,6 +75,22 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  // KAN-83. The resolved (all four fields present) space keybinds, cached here
+  // rather than re-read per keystroke — `settingsGet` is async and a keydown
+  // handler has to decide synchronously, before xterm's own capture-phase
+  // handling runs (see Terminal.tsx). Fetched on mount and again whenever the
+  // Settings modal closes (`refreshKeybinds` below), which is what makes a
+  // rebind take effect with no restart (KAN-83 acceptance #1) — the modal
+  // itself is the only writer, and `settingsSet` has already resolved by the
+  // time `onClose` fires. Passed down to every `Terminal` as a prop so both
+  // halves (this file's window listeners, Terminal.tsx's
+  // `attachCustomKeyEventHandler`) read the SAME value; see that file for how
+  // it stays live without re-running the effect that creates the xterm
+  // instance.
+  const [keybinds, setKeybinds] = useState<SpaceKeybinds>(DEFAULT_SPACE_KEYBINDS);
+  const refreshKeybinds = () =>
+    void window.api.settingsGet().then((s) => setKeybinds(resolveSpaceKeybinds(s.spaceKeybinds)));
+  useEffect(() => { refreshKeybinds(); }, []);
   /** KAN-41: the outstanding "an agent wants to start Claude in <path>" prompt.
    *  A single nullable, not a queue — main allows exactly one outstanding
    *  confirmation app-wide, so a second one arriving is a bug in main, not a
@@ -1389,10 +1408,16 @@ export function App() {
   // false before that cancel, which both withholds the byte and lets the press
   // through to us; this half performs the switch, because only App knows how
   // many spaces exist IN EACH GROUP.
+  //
+  // KAN-83: `keybinds.switchUnpinned`/`.switchPinned` are now passed in rather
+  // than hardcoded, and are therefore in the dependency array — cheap here
+  // (just re-attaching a window listener, not recreating an xterm instance
+  // the way Terminal.tsx's equivalent would be) so a rebind takes effect on
+  // the very next keystroke with no restart.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const unpinned = spaceIndex(e);
-      const pinned = unpinned === null ? pinnedSpaceIndex(e) : null;
+      const unpinned = spaceIndex(e, keybinds.switchUnpinned);
+      const pinned = unpinned === null ? pinnedSpaceIndex(e, keybinds.switchPinned) : null;
       if (unpinned === null && pinned === null) return;
       if (isTextBox(e.target)) return; // our own inputs only; a terminal is not one
       const pool = pinned !== null ? spaces.filter((s) => s.pinned) : spaces.filter((s) => !s.pinned);
@@ -1403,7 +1428,7 @@ export function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [spaces, activeSpaceId]);
+  }, [spaces, activeSpaceId, keybinds]);
 
   // Ctrl+Tab / Ctrl+Shift+Tab cycle to the next/previous space in DISPLAY
   // order (KAN-82) — the same pinned-run-then-unpinned-run order
@@ -1423,9 +1448,11 @@ export function App() {
   // press to keep off the pty and off the DOM's own focus order. See
   // Terminal.tsx's arm and keys.ts's `spaceCycle` doc for why this one, unlike
   // the digits, cannot leave preventDefault to "only when something changes".
+  // KAN-83: `keybinds.cycleNext`/`.cyclePrev`, same reasoning as the digit
+  // effect above.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const dir = spaceCycle(e);
+      const dir = spaceCycle(e, keybinds.cycleNext, keybinds.cyclePrev);
       if (dir === null) return;
       if (isTextBox(e.target)) return;
       e.preventDefault();
@@ -1437,7 +1464,7 @@ export function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [spaces, activeSpaceId]);
+  }, [spaces, activeSpaceId, keybinds]);
 
   /**
    * Everything a `.pane` element needs. The click-to-focus handler is split-only:
@@ -2082,7 +2109,7 @@ export function App() {
         {tabs.map((t) =>
           t.view === 'terminal' && t.ptyId ? (
             <div key={t.id} {...paneProps(t)} hidden={!visibleIds.has(t.id)}>
-              <Terminal ptyId={t.ptyId} kind={t.terminalKind} />
+              <Terminal ptyId={t.ptyId} kind={t.terminalKind} keybinds={keybinds} />
             </div>
           ) : null,
         )}
@@ -2155,7 +2182,14 @@ export function App() {
           onClose={() => setPicker(false)}
         />
       )}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        // KAN-83: closing the modal — Save or Cancel alike — re-reads settings
+        // so a keybind change takes effect immediately. Re-fetching on Cancel
+        // too is deliberate: it is a no-op read, and distinguishing the two
+        // outcomes here would only duplicate SettingsModal's own knowledge of
+        // whether it actually wrote anything.
+        <SettingsModal onClose={() => { setShowSettings(false); refreshKeybinds(); }} />
+      )}
       {pendingClose && (
         <ConfirmDialog request={pendingClose} onClose={() => setPendingClose(null)} />
       )}
