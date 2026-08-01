@@ -407,6 +407,101 @@ const emit = (prefix) => `Write-Host ('${prefix}-'+$t)`;
   fs.rmSync(beat, { force: true });
 }
 
+// ===========================================================================
+// Run 4 — KAN-81: pinned spaces separate into their own run in the dropdown,
+// with a marker and a separator; unpinning restores original relative order.
+// ===========================================================================
+{
+  const profile = path.join(os.tmpdir(), `claude-explorer-spaces-pin-${process.pid}`);
+  fs.rmSync(profile, { recursive: true, force: true });
+  const { win, close } = await launchApp({ userDataDir: profile });
+  await win.waitForSelector('.entry');
+  await win.waitForTimeout(500);
+
+  await createSpace(win, 'Beta');
+  await createSpace(win, 'Gamma');
+  // Creation order is Space, Beta, Gamma. Pinning the MIDDLE one — not the
+  // one already at the front — is the arrangement the ticket itself calls
+  // out: with a single pinned space already at index 0, "pinned sorts first"
+  // would be trivially true even against raw, unsorted order. Here sorted
+  // (Beta, Space, Gamma) and unsorted (Space, Beta, Gamma) genuinely differ.
+  await switchSpaceViaMenu(win, 'Beta');
+  await openSpaceMenu(win);
+  await win.locator('.spacemenu-item', { hasText: /^Pin space$/ }).click();
+  await win.waitForTimeout(300);
+
+  const rows = () => win.evaluate(() => {
+    // `.spacemenu-item` is also the class the New/Rename/Pin/Delete action
+    // buttons use below the separator — a pre-existing overlap this harness
+    // has to filter out, not something KAN-81 introduced. Only a SPACE ROW
+    // carries `.spacemenu-item-name`, so that is the scope.
+    const spaceRows = [...document.querySelectorAll('.spacemenu-item')].filter((b) =>
+      b.querySelector('.spacemenu-item-name'));
+    return {
+      names: spaceRows.map((b) => b.querySelector('.spacemenu-item-name').textContent.trim()),
+      pinnedClass: spaceRows.map((b) => b.classList.contains('pinned')),
+      accels: spaceRows.map((b) => b.querySelector('.spacemenu-accel')?.textContent.trim() ?? ''),
+      marks: spaceRows.map((b) => !!b.querySelector('.spacemenu-pin')),
+      // The KAN-81 seam is an `<li role="separator">` INSIDE the space-rows
+      // list — deliberately distinct from the pre-existing `<div class=
+      // "spacemenu-sep">` between that list and the New/Rename/Delete section,
+      // which this selector does not match.
+      seps: document.querySelectorAll('.spacemenu-list li.spacemenu-sep').length,
+    };
+  });
+
+  await openSpaceMenu(win);
+  let r = await rows();
+  check('pinning the MIDDLE space (Beta) sorts it to the front; Space and Gamma keep THEIR relative order',
+    r.names.join('|') === 'Beta|Space|Gamma', r.names.join(' | '));
+  check('exactly the pinned row carries the .pinned class and its marker',
+    r.pinnedClass.join('|') === 'true|false|false' && r.marks.join('|') === 'true|false|false',
+    `classes ${r.pinnedClass.join(',')} — markers ${r.marks.join(',')}`);
+  check('accelerators are GROUP-RELATIVE: the pinned row gets Ctrl+Shift+1; the unpinned keep Ctrl+1/Ctrl+2',
+    r.accels.join('|') === 'Ctrl+Shift+1|Ctrl+1|Ctrl+2', r.accels.join(' | '));
+  check('exactly one separator appears, between the pinned run and the unpinned run',
+    r.seps === 1, String(r.seps));
+  await win.keyboard.press('Escape');
+
+  await openSpaceMenu(win);
+  await win.locator('.spacemenu-item', { hasText: /^Unpin space$/ }).click();
+  await win.waitForTimeout(300);
+  await openSpaceMenu(win);
+  r = await rows();
+  // RED-FIRST NOTE (`git checkout f4fd0ec -- src/`, rebuild, rerun): the four
+  // checks above this line (order, marker, accelerators, separator-appears)
+  // go red on unmodified main, where nothing sorts or draws `pinned` at all.
+  // The two below, and the "every space pinned" pair further down, pass on
+  // BOTH builds — labelled REGRESSION GUARD, same convention as paste.mjs —
+  // because "no separator" and "order preserved" are also true of a build
+  // that never inserts a separator or reorders anything in the first place.
+  // They still earn their place paired with the assertions above that DO
+  // distinguish the builds.
+  check('unpinning returns the space to the unpinned run in its ORIGINAL relative position  [REGRESSION GUARD]',
+    r.names.join('|') === 'Space|Beta|Gamma', r.names.join(' | '));
+  check('and the separator is gone — no pinned spaces left, no stray line  [REGRESSION GUARD]',
+    r.seps === 0, String(r.seps));
+  await win.keyboard.press('Escape');
+
+  // Every space pinned: still no stray separator, and order untouched.
+  for (const name of ['Space', 'Beta', 'Gamma']) {
+    await switchSpaceViaMenu(win, name);
+    await openSpaceMenu(win);
+    await win.locator('.spacemenu-item', { hasText: /^Pin space$/ }).click();
+    await win.waitForTimeout(300);
+  }
+  await openSpaceMenu(win);
+  r = await rows();
+  check('every space pinned: still no stray separator  [REGRESSION GUARD]',
+    r.seps === 0, String(r.seps));
+  check('every space pinned: order preserved, nothing scrambled  [REGRESSION GUARD]',
+    r.names.join('|') === 'Space|Beta|Gamma', r.names.join(' | '));
+  await win.keyboard.press('Escape');
+
+  await win.waitForTimeout(500);
+  await close();
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) console.log('failing:', failed.map((f) => f.name).join('; '));

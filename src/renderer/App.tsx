@@ -19,7 +19,7 @@ import {
   renameGroup, reorderWithGroups, setCollapsed, setPinned,
 } from '../shared/groups';
 import {
-  addTabToSpace, createSpace, deleteSpace, removeTabFromSpace, renameSpace,
+  addTabToSpace, createSpace, deleteSpace, orderSpaces, removeTabFromSpace, renameSpace,
   reorderInSpace, setActiveTab, setSpacePinned, switchSpace,
 } from './spaces';
 import { closeReason, closeRisk, moveTabReason, type CloseRisk } from './closeguard';
@@ -27,7 +27,7 @@ import type { ConfirmRequest } from './opresult';
 import type {
   ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
-import { isTextBox, spaceIndex } from './keys';
+import { isTextBox, pinnedSpaceIndex, spaceCycle, spaceIndex } from './keys';
 import { usePtyStatus } from './ptystatus';
 import { useClaudeState } from './claudestate';
 import { spaceNeedsInput } from './spacemenu';
@@ -1373,7 +1373,11 @@ export function App() {
     moveToSpace(owner.tabIds.filter((id) => byId.get(id)?.groupId === groupId), spaceId, false);
   };
 
-  // Ctrl+1..9 selects the nth space.
+  // Ctrl+1..9 selects the nth UNPINNED space; Ctrl+Shift+1..9 the nth PINNED
+  // one (KAN-82). Both group-relative, matching the accelerator labels
+  // SpaceMenu renders via `acceleratorLabel` — "Ctrl+3" is always the 3rd
+  // unpinned space, never the 3rd space overall, so a pinned space sliding in
+  // ahead of it in the dropdown never changes what the digit means.
   //
   // KAN-59: this used to be gated by `isTypingTarget`, which made it dead
   // whenever a terminal had focus — xterm's focus sink is a hidden
@@ -1384,13 +1388,14 @@ export function App() {
   // used it for exactly this distinction since KAN-56). Not a widened
   // `isTypingTarget`: that one is tag-based on purpose, and an xterm exception
   // by class name is a list to forget to update. The address bar / search box /
-  // rename inputs keep declining Ctrl+1..9 exactly as before — a rename in
+  // rename inputs keep declining these shortcuts exactly as before — a rename in
   // flight when the space changes out from under it is a state nobody asked for
   // — while a terminal, which is a <textarea> and not one of ours, no longer
   // does.
   //
   // The other half of the fix is in Terminal.tsx, and BOTH are needed — measured
-  // by breaking each one on its own (test/harness/paste.mjs §11 catches either).
+  // by breaking each one on its own (test/harness/paste.mjs §11 catches either,
+  // for the unpinned digits it already covered before KAN-82).
   // xterm registers its keydown listener on that textarea, i.e. at the TARGET
   // phase, strictly before this bubble-phase window listener, and for the six
   // digits that produce a control code it finishes in `cancel(event, true)` —
@@ -1399,16 +1404,52 @@ export function App() {
   // never arrives here and nothing switches at all. Terminal.tsx's arm returns
   // false before that cancel, which both withholds the byte and lets the press
   // through to us; this half performs the switch, because only App knows how
-  // many spaces there are.
+  // many spaces exist IN EACH GROUP.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const i = spaceIndex(e);
-      if (i === null) return;
+      const unpinned = spaceIndex(e);
+      const pinned = unpinned === null ? pinnedSpaceIndex(e) : null;
+      if (unpinned === null && pinned === null) return;
       if (isTextBox(e.target)) return; // our own inputs only; a terminal is not one
-      const target = spaces[i];
-      if (!target) return; // fewer than n spaces: leave the key alone
+      const pool = pinned !== null ? spaces.filter((s) => s.pinned) : spaces.filter((s) => !s.pinned);
+      const target = pool[pinned !== null ? pinned : unpinned!];
+      if (!target) return; // fewer than n spaces IN THAT GROUP: leave the key alone
       e.preventDefault();
       switchToSpace(target.id);
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [spaces, activeSpaceId]);
+
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle to the next/previous space in DISPLAY
+  // order (KAN-82) — the same pinned-run-then-unpinned-run order
+  // `orderSpaces` gives SpaceMenu's dropdown, so "next" here always matches
+  // "next" visually. Wraps at both ends, matching the alt-tab feel the ticket
+  // describes.
+  //
+  // NOT Ctrl+Left/Right: those are word-jump inside Claude Code's own input,
+  // and claiming them globally the way Ctrl+1..9 is claimed would permanently
+  // break word-by-word cursor movement in every terminal tab. Tab has no such
+  // conflict in a shell or in Claude Code.
+  //
+  // Same two-halves shape as the digit shortcuts above (KAN-59), with the same
+  // `isTextBox` guard — but this ALSO calls preventDefault unconditionally
+  // (not only once a target is found): Tab's browser default is a focus move,
+  // and with zero or one space there is nothing to switch to but still a
+  // press to keep off the pty and off the DOM's own focus order. See
+  // Terminal.tsx's arm and keys.ts's `spaceCycle` doc for why this one, unlike
+  // the digits, cannot leave preventDefault to "only when something changes".
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const dir = spaceCycle(e);
+      if (dir === null) return;
+      if (isTextBox(e.target)) return;
+      e.preventDefault();
+      const ordered = orderSpaces(spaces);
+      if (ordered.length === 0) return;
+      const from = ordered.findIndex((s) => s.id === activeSpaceId);
+      const next = ordered[((from === -1 ? 0 : from) + dir + ordered.length) % ordered.length];
+      switchToSpace(next.id);
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);

@@ -36,10 +36,27 @@ export function spaceNeedsInput(
   )
 }
 
-/** "Ctrl+1".."Ctrl+9" for the first nine items (index 0-8); null past that —
- *  there is no tenth accelerator, the menu just lists the space with none. */
-export function acceleratorLabel(index: number): string | null {
-  return index >= 0 && index < 9 ? `Ctrl+${index + 1}` : null
+/**
+ * "Ctrl+1".."Ctrl+9" for the first nine UNPINNED items, "Ctrl+Shift+1"..
+ * "Ctrl+Shift+9" for the first nine PINNED ones (KAN-82); null past the ninth
+ * of either run — there is no tenth accelerator, the menu just lists the space
+ * with none.
+ *
+ * `index` is GROUP-RELATIVE, not the row's absolute position in the dropdown:
+ * the 1st pinned space and the 1st unpinned space both pass `0`, distinguished
+ * only by `pinned`. Callers get that index for free from `spaces.orderSpaces`
+ * — pinned spaces sort to the front, so a pinned row's position IS its
+ * group-relative index, and an unpinned row's is its position minus however
+ * many pinned rows precede it.
+ *
+ * ponytail: still emits the DEFAULT chord text, so a rebind (KAN-83) leaves
+ * this label stale. Tracked as KAN-95 — the fix is to format from the resolved
+ * binding, and it wants KAN-91's platform symbols in the same formatter rather
+ * than two.
+ */
+export function acceleratorLabel(index: number, pinned?: boolean): string | null {
+  if (index < 0 || index >= 9) return null
+  return pinned ? `Ctrl+Shift+${index + 1}` : `Ctrl+${index + 1}`
 }
 
 /**

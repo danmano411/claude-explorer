@@ -287,6 +287,14 @@ body {
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* ===== Pinned spaces (KAN-81) =====
+   A subtle left rule in the clay accent — same colour `.spacemenu-item.active`
+   already uses for text, so a pinned+active row reads as one family rather
+   than two competing highlights fighting for attention. */
+.spacemenu-item.pinned { border-left: 2px solid var(--clay); padding-left: 12px; }
+
+.spacemenu-pin { flex: none; font-size: 11px; opacity: 0.8; }
+
 .spacemenu-accel {
   flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft);
 }

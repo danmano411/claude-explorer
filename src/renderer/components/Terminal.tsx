@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { spaceIndex } from '../keys';
+import { pinnedSpaceIndex, spaceCycle, spaceIndex } from '../keys';
 
 /** Quiet time after which a moving size is treated as finished. */
 const SETTLE_MS = 120;
@@ -137,6 +137,36 @@ export function Terminal({ ptyId, kind }: { ptyId: string; kind?: 'claude' | 'sh
       // DECIDES to act is the one that cancels, and with fewer than n spaces App
       // deliberately declines. paste.mjs §11 asserts both sides of that.
       if (spaceIndex(e) !== null) return false;
+
+      // KAN-82. Ctrl+Shift+1..9 selects a PINNED space — same shape as the
+      // arm above, one predicate that App.tsx's window listener switches on
+      // too, and the same absence of preventDefault for the analogous reason:
+      // read out of the same source map (common/input/Keyboard.ts), the
+      // default arm's ctrl-digit branch requires `!ev.shiftKey`, so with Shift
+      // also held xterm's own processing already falls through to
+      // `result.key = undefined` and sends nothing at all today. This arm is
+      // therefore a structural guarantee — the SAME predicate the app acts on
+      // is also the one that keeps xterm from ever getting a chance to act —
+      // rather than a fix for an observed leak; it stays correct even if
+      // xterm's mapping ever grows a Ctrl+Shift+digit case of its own.
+      if (pinnedSpaceIndex(e) !== null) return false;
+
+      // KAN-82. Ctrl+Tab / Ctrl+Shift+Tab cycle spaces. UNLIKE every arm
+      // above, this DOES preventDefault — the one place that departs from the
+      // module doc's opening rule needs its own explanation, not less of one:
+      // Tab's browser default is a focus move, and xterm's OWN processing
+      // (Keyboard.ts case 9) is what would normally have cancelled that for
+      // us. Measured against the same source map: today, Ctrl+Tab sends '\t'
+      // and calls `cancel(event, true)` (preventDefault AND stopPropagation);
+      // Ctrl+Shift+Tab sends ESC+'[Z' but its branch never sets `result.cancel`,
+      // so NEITHER preventDefault nor stopPropagation happens for it today —
+      // meaning the unfixed build already lets a Ctrl+Shift+Tab bubble to
+      // App's window listener while ALSO leaking a byte to the pty and moving
+      // native focus off the terminal. Returning false here, before xterm's
+      // own keydown handling runs at all, heads off both bytes — which is
+      // exactly why this arm cannot skip preventDefault the way the digit arms
+      // do: nothing else is left to cancel Tab's native focus jump.
+      if (spaceCycle(e) !== null) { e.preventDefault(); return false; }
       return true;
     });
 
