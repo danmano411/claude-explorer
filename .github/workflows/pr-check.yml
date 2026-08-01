@@ -15,7 +15,19 @@ concurrency:
 jobs:
   test:
     name: Type-check & test
-    runs-on: ubuntu-latest
+    # windows-latest, NOT ubuntu-latest, and this is not a cost oversight:
+    # the suite cannot pass on POSIX today. src/main/cli.ts imports `resolve`
+    # from 'node:path' — the PLATFORM-DEFAULT implementation — while
+    # cli.test.ts asserts Windows-shaped output ('C:\base\sub\dir'). On Linux
+    # path.posix.resolve treats 'C:\base' as one relative segment and prefixes
+    # cwd, so those assertions fail. Same class of problem across the fixtures
+    # that feed real Windows paths to platform-default path code.
+    #
+    # Moving this to ubuntu-latest (cheaper, faster) is correct ONLY after
+    # KAN-89 lands the cross-platform path abstraction and KAN-90 the POSIX
+    # branches. Until then a Linux runner would make this required check fail
+    # on every PR, which is worse than useless — it trains people to ignore it.
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
