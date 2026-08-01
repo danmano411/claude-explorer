@@ -79,11 +79,13 @@ const openClaudeSessionDescription = (free: number): string =>
   'OPEN, against a number the user sets in Claude Explorer under Settings > ' +
   `Preferences…, currently ${free}. ` +
   (free === 0
-    ? 'It is 0, so this tool asks EVERY TIME. '
+    ? 'It is 0, so this tool ASKS EVERY TIME. Nothing you have open, and nothing that ' +
+      'has since exited, changes that: no count makes a session free here, and no tab ' +
+      'is ever closed on your behalf to make room. '
     : `While fewer than ${free} are open, this call starts the session immediately and ` +
       'returns {"started":true} — no token, no prompt, nothing for the user to answer. ' +
-      `Once ${free} are open, it asks: `) +
-  'call it with `path` alone and it returns ' +
+      `Once ${free} are open, it asks. `) +
+  'WHEN IT ASKS, it takes two calls: call it with `path` alone and it returns ' +
   '{"needsConfirm":true,"token":…,"path":…,"expiresAt":…} while Claude Explorer asks ' +
   'the user to Allow or Deny that exact folder. Then call it AGAIN with the same ' +
   '`path` and that `token`. If that call returns needsConfirm again, the user has not ' +
@@ -96,15 +98,22 @@ const openClaudeSessionDescription = (free: number): string =>
   'refusal tells you how many seconds. Do not retry to wait it out — only ask again ' +
   'if the user themselves asks you to. ' +
   'The new session has NO Claude Explorer tools: it cannot open tabs or start ' +
-  'further sessions. A session counts for as long as its TAB stays open in Claude ' +
-  'Explorer — including one restored from before Claude Explorer last restarted that ' +
-  'has not been reactivated yet. The process ending does not free the slot by itself, ' +
-  'but you do not have to close those tabs: when a new session would otherwise need ' +
-  'the user to be asked, Claude Explorer first closes the tabs THIS TOOL opened whose ' +
-  'Claude process has already exited, and if that brings the count back under the ' +
-  'number your session starts with no prompt after all. Tabs whose session is still ' +
-  'running, and every tab the user opened themselves, are never closed for you — ' +
-  'close_tab is the only way those go. ' +
+  'further sessions. ' +
+  // Only when there IS a count. At 0 the guard never reaps (spawnguard.ts skips
+  // it: no count there can produce room) and nothing is ever free, so every
+  // sentence below would be a promise the code does not keep — which is the
+  // description/behaviour equivalence this ticket exists to close.
+  (free === 0
+    ? ''
+    : 'A session counts for as long as its TAB stays open in Claude ' +
+      'Explorer — including one restored from before Claude Explorer last restarted that ' +
+      'has not been reactivated yet. The process ending does not free the slot by itself, ' +
+      'but you do not have to close those tabs: when a new session would otherwise need ' +
+      'the user to be asked, Claude Explorer first closes the tabs THIS TOOL opened whose ' +
+      'Claude process has already exited, and if that brings the count back under the ' +
+      'number your session starts with no prompt after all. Tabs whose session is still ' +
+      'running, and every tab the user opened themselves, are never closed for you — ' +
+      'close_tab is the only way those go. ') +
   'If Claude Code has never run in that folder, the new tab will show ' +
   'Claude\'s "do you trust this folder" prompt until the user answers it. Call ' +
   'list_tabs to find the tab that was created.'
@@ -138,6 +147,18 @@ let port = 0
  * Closed through the ordinary control op, so trash/undo/persist behave exactly
  * as they do for any other close and the renderer's pinned refusal still
  * stands. A close that refuses is simply not counted as room freed.
+ *
+ * ponytail: THE ALLOWANCE IS THEREFORE CONCURRENT, NOT A LIFETIME BUDGET, and
+ * that is a consequence of the reap rather than an oversight. A session that
+ * exits hands its free slot straight back, so an agent whose sessions die
+ * quickly can start them without ever reaching a human — the number bounds how
+ * many exist AT ONCE, not how many may be started. The ticket's own rule ("it
+ * throttles, it never blocks") means what bounds total process creation is the
+ * human watching tabs appear, plus DENY_COOLDOWN_MS once one is denied.
+ * Ceiling: no rate limit. Add one (spawns per minute — not a refusal at a
+ * count) if a runaway agent ever makes it concrete, and say "N CONCURRENT,
+ * recycled automatically" wherever the number is described to a user, because
+ * "N sessions" reads as a lifetime budget and is not one.
  */
 async function reapDeadAgentTabs(): Promise<number | null> {
   const rows = await control({ op: 'listTabs' }).catch(() => null)

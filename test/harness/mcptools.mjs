@@ -270,6 +270,14 @@ async function tool(name, args = {}) {
 const json = (t) => { try { return JSON.parse(t.text); } catch { return null; } };
 const tabs = async () => json(await tool('list_tabs')) ?? [];
 
+/** The open_claude_session description a MODEL actually receives, read off the
+ *  live server — so it is the text mcp.ts built from THIS profile's allowance,
+ *  never a string the harness re-derived. */
+const spawnToolDescription = async () => {
+  const r = await rpc({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/list', params: {} });
+  return (r.result?.tools ?? []).find((t) => t.name === 'open_claude_session')?.description ?? '';
+};
+
 // --- the window -------------------------------------------------------------
 
 const VIS = '.pane:not([hidden]) ';
@@ -366,6 +374,22 @@ let VIEWER_SCHEMA = null;
   const props = Object.keys(VIEWER_SCHEMA?.properties ?? {});
   check('open_viewer_tab advertises `path` and has no `mode` property at all',
     JSON.stringify(props) === '["path"]', props.join(', ') || JSON.stringify(VIEWER_SCHEMA));
+
+  // KAN-64. The description is the ONLY thing a model reads about this server,
+  // and "the description and the enforced behaviour say the same thing in both
+  // directions" is this ticket's stated bar. THIS PROFILE RUNS AT 0, where
+  // spawnguard.ts skips the reap outright (`if (allowance() > 0)`) and no count
+  // can ever produce a free start — so a text promising either is a lie told to
+  // the one reader who cannot check it. §11 asserts the other direction at 8.
+  const desc0 = await spawnToolDescription();
+  check('open_claude_session\'s description carries this profile\'s allowance of 0',
+    /currently 0\./.test(desc0) && /ASKS EVERY TIME/i.test(desc0),
+    desc0.replace(/\s+/g, ' ').slice(0, 200) || 'no description');
+  check('and at 0 it promises neither a silent start nor the reap, because 0 does neither',
+    desc0.length > 0 && !/starts the session immediately/i.test(desc0)
+      && !/closes the tabs THIS TOOL opened/.test(desc0)
+      && !/no prompt after all/i.test(desc0),
+    desc0.replace(/\s+/g, ' ').slice(-260) || 'no description');
 }
 
 // === 2. bad input is a typed error, never an exception =======================
@@ -994,6 +1018,16 @@ console.log('\n11 — restored agent tabs count, and are never reaped');
   check('run 1: a user-launched session yields this run\'s own token',
     /^[0-9a-f]{64}$/.test(TOKEN), TOKEN ? 'ok' : 'no dump');
 
+  // The other direction of §1's pair. Same tool, same reader, a profile whose
+  // allowance is 8 — so here the free start and the reap are real and the text
+  // has to say so, naming 8 and not some hardcoded number.
+  const desc8 = await spawnToolDescription();
+  check('run 1: at an allowance of 8 the description names 8, the silent start and the reap',
+    /currently 8\./.test(desc8)
+      && /fewer than 8 are open, this call starts the session immediately/i.test(desc8)
+      && /closes the tabs THIS TOOL opened whose Claude process has already exited/.test(desc8),
+    desc8.replace(/\s+/g, ' ').slice(-280) || 'no description');
+
   const answerIn = async (w, allow) => {
     await w.waitForSelector('.spawn-modal', { timeout: 15_000 });
     await w.locator(`.spawn-modal .modal-actions button${allow ? '.primary' : ':not(.primary)'}`).click();
@@ -1283,6 +1317,51 @@ console.log('\n12 — the reap');
   check('and their terminals really left the window',
     terms === after.filter((t) => t.view === 'terminal').length,
     `${terms} .xterm elements for ${after.filter((t) => t.view === 'terminal').length} terminal tabs`);
+
+  // --- close_tab hands the slot back AT ONCE, so nothing else dies for it ---
+  //
+  // PR #49's other half, and the only thing left that can measure it. main
+  // counts agent tabs off the PERSISTED workspace document (a restored tab has
+  // no live pty to count instead), and App.tsx writes that document immediately
+  // when the tab count DROPS rather than on its 400 ms debounce. Debounced, a
+  // spawn arriving inside that window reads the old, too-high count, concludes
+  // it is at the allowance — and reaps, spending a dead tab the user is still
+  // looking at on a slot close_tab had already handed back.
+  //
+  // The spawn is free either way (the reap would make room too). What differs is
+  // whether anything had to DIE for it, which is the ticket's own rule: a dead
+  // agent tab stays on screen as the record of what happened until its slot is
+  // GENUINELY wanted — and here it is not wanted, because close_tab freed one.
+  const SIXTH = mkdir(path.join(WORK, 'reap-sixth'));     // agent, closed by the tool
+  const SEVENTH = mkdir(path.join(WORK, 'reap-seventh')); // agent, killed -> dead
+  const EIGHTH = mkdir(path.join(WORK, 'reap-eighth'));   // the one that needs room
+  let filled = 0;
+  for (const d of [SIXTH, SEVENTH]) {
+    const r = await tool('open_claude_session', { path: d });
+    if (!r.isError && json(r)?.started === true) filled++;
+    else console.log(`    (${path.basename(d)}: ${r.text.slice(0, 120)})`);
+  }
+  await waitFor(() => [SIXTH, SEVENTH].every((d) => dumpsFor(d).length > 0) || null, 20_000);
+  killSession(SEVENTH);
+  const seventhDead = await waitFor(async () => {
+    const row = (await tabs()).find((t) => t.cwd.toLowerCase() === SEVENTH.toLowerCase());
+    return row?.status === 'stopped' ? row : null;
+  }, 30_000);
+  check('back at the allowance of 4: three agent sessions alive and one dead',
+    filled === 2 && !!seventhDead, `${filled}/2 opened, seventh: ${seventhDead?.status}`);
+
+  const sixthRow = (await tabs()).find((t) => t.cwd.toLowerCase() === SIXTH.toLowerCase());
+  await tool('close_tab', { tabId: sixthRow?.id ?? 'none' });
+  // Comfortably after the immediate write and comfortably inside the 400 ms
+  // debounce it replaced, so this measures WHICH write happened, not a race.
+  await run3.win.waitForTimeout(150);
+  const eighth = await tool('open_claude_session', { path: EIGHTH });
+  check('a session asked for right after close_tab is free, on the slot close_tab freed',
+    !eighth.isError && json(eighth)?.started === true, eighth.text.slice(0, 200));
+  const afterEighth = await tabs();
+  check('and the dead agent tab was NOT spent on it — close_tab had already made the room',
+    afterEighth.some((t) => t.cwd.toLowerCase() === SEVENTH.toLowerCase()),
+    afterEighth.map((t) => t.title).join(', '));
 
   await run3.close();
 }
