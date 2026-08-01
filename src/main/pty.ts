@@ -1,11 +1,23 @@
 import * as pty from 'node-pty'
+import { fork, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { join, delimiter } from 'node:path'
+import { join, delimiter, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { isWindows } from '../shared/pathutil'
 
-type Handle = { proc: pty.IPty; agentSpawned?: boolean; sessionId?: string }
+type Handle = {
+  proc: pty.IPty
+  agentSpawned?: boolean
+  sessionId?: string
+  /** KAN-100. The shell this pty runs, for a plain terminal tab; absent for a
+   *  Claude session. Presence is what makes `busy()` answer at all — the
+   *  question "is a foreground command running" is only asked of shell tabs, and
+   *  the POSIX arm needs the shell's own name to compare the foreground one
+   *  against. A Claude pty therefore answers UNKNOWN by construction rather than
+   *  by a caller remembering not to ask. */
+  shellFile?: string
+}
 
 /**
  * node-pty on Windows does NOT PATH-resolve a bare command name (unlike a shell),
@@ -254,6 +266,125 @@ function batchCommandLine(shim: string, args: string[]): string {
   return `/c ""${shim}"${tail ? ` ${tail}` : ''}"`
 }
 
+/**
+ * KAN-100. IS A FOREGROUND COMMAND RUNNING IN THIS SHELL?
+ *
+ * ConPTY answers this exactly, and node-pty already ships the whole mechanism:
+ * `GetConsoleProcessList` returns every process attached to the pty's console,
+ * and `conpty_console_list_agent.js` is the tiny forked helper that reads it
+ * (node-pty calls it itself at kill time — see WindowsPtyAgent#_getConsoleProcessList).
+ * It has to be a SEPARATE process because a process can be attached to only one
+ * console, so main cannot enumerate our pty's console from inside itself.
+ *
+ * TWO PIDS COME OUT OF THE LIST BEFORE THE ANSWER DOES:
+ *  - the AGENT'S OWN, because attaching to the console to enumerate it puts the
+ *    agent in the list. It is the pid that changes on every call. Filtered by
+ *    identity (`agent.pid`) rather than by "discount one" — we forked it, so we
+ *    know it exactly, and a count-based rule quietly becomes wrong the first
+ *    time the list has an extra member for any other reason.
+ *  - the SHELL'S own, filtered by the caller below.
+ * Anything still standing is a child the shell is running. Measured at a live
+ * PowerShell pty: `[agent, shell]` at an idle prompt, `[agent, child, shell]`
+ * while `node -e "setTimeout(()=>{},9000)"` runs — i.e. correct for a child
+ * that produces NO OUTPUT AT ALL, which is the case a byte-traffic heuristic
+ * gets exactly backwards. ~90 ms per query.
+ *
+ * ponytail: an EXTERNAL process is the whole signal, so a long-running
+ * *in-process* shell builtin is invisible — `Start-Sleep -Seconds 600` and a
+ * pure-cmdlet `while($true){ Add-Content … }` loop both measured `busy=false`,
+ * and such a tab closes with no prompt. Deliberate: the doctrine at the top of
+ * closeguard.ts protects unrecoverable WORK, and the work people actually lose
+ * is an external program (`npm run dev`, a build, ssh, a container). Ceiling: no
+ * public Win32 call reports "the shell is blocked reading its console input",
+ * so lifting this needs a different instrument entirely (injecting a prompt
+ * marker into the shell's profile, say) rather than a better filter here.
+ */
+const BUSY_TIMEOUT_MS = 1000
+
+/** Resolved lazily and once: `require.resolve` walks the filesystem, and in a
+ *  packaged build this path lands inside app.asar.unpacked (node-pty is in
+ *  `asarUnpack`). Not at module load, because pty.ts is imported by unit tests
+ *  that mock node-pty away and must not need the real package on disk. */
+let agentPath: string | null | undefined
+function consoleListAgent(): string | null {
+  if (agentPath === undefined) {
+    try {
+      agentPath = require.resolve('node-pty/lib/conpty_console_list_agent.js')
+    } catch {
+      agentPath = null // no agent, no answer — UNKNOWN, which warns
+    }
+  }
+  return agentPath
+}
+
+/** The console's attached processes, minus the agent that had to attach to read
+ *  them, or undefined if the question could not be answered inside the bound. */
+function consoleProcessList(shellPid: number): Promise<number[] | undefined> {
+  const agentFile = consoleListAgent()
+  if (!agentFile) return Promise.resolve(undefined)
+  return new Promise((resolve) => {
+    let agent: ChildProcess
+    try {
+      // Electron's own `fork` already runs the child as Node, but saying so
+      // explicitly costs nothing and keeps this correct when pty.ts is exercised
+      // outside Electron.
+      agent = fork(agentFile, [String(shellPid)], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      })
+    } catch {
+      resolve(undefined)
+      return
+    }
+    let settled = false
+    const done = (v: number[] | undefined) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      // Only when we gave up: on the happy path the agent has already called
+      // process.exit(0) itself.
+      if (v === undefined) { try { agent.kill() } catch { /* already gone */ } }
+      resolve(v)
+    }
+    // BOUNDED, and a timeout degrades to UNKNOWN rather than to "not busy" —
+    // the close path must never block indefinitely, and must never go quiet
+    // because a probe was slow.
+    const timer = setTimeout(() => done(undefined), BUSY_TIMEOUT_MS)
+    agent.on('message', (m: { consoleProcessList?: number[] }) =>
+      done(Array.isArray(m?.consoleProcessList)
+        ? m.consoleProcessList.filter((p) => p !== agent.pid)
+        : undefined))
+    agent.on('error', () => done(undefined))
+    // Fires after 'message' on the happy path, where `settled` already swallows
+    // it; on its own it means the agent died without answering.
+    agent.on('exit', () => done(undefined))
+  })
+}
+
+/**
+ * KAN-100's POSIX arm. node-pty's public `IPty.process` already reports the
+ * FOREGROUND process (`tcgetpgrp` behind it), so the whole question is whether
+ * that differs from the shell we launched — synchronous, no fork, no bound
+ * needed. Same semantics as the Windows arm and the same UNKNOWN-on-doubt rule.
+ *
+ * UNEXERCISED. This cannot run on Windows and CI is windows-latest, so it has
+ * never executed against a real pty; it is written from node-pty's contract
+ * (unixTerminal.js: `pty.process(fd, pty) || this._file`). The leading `-` strip
+ * is for a login shell reporting itself as `-zsh`, which is what `-l` on darwin
+ * would produce if the name came from argv[0] rather than from the process's
+ * comm.
+ */
+function posixBusy(h: Handle): boolean | undefined {
+  let fg: string
+  try {
+    fg = h.proc.process
+  } catch {
+    return undefined
+  }
+  if (!fg || !h.shellFile) return undefined
+  const name = (s: string) => basename(s).replace(/^-/, '')
+  return name(fg) !== name(h.shellFile)
+}
+
 export class PtyManager {
   private handles = new Map<string, Handle>()
   /**
@@ -299,8 +430,8 @@ export class PtyManager {
     // Plain interactive shell tab (feature 5) — no Claude.
     if (opts.shell) {
       let proc: pty.IPty
+      const sh = shellCommand()
       try {
-        const sh = shellCommand()
         proc = pty.spawn(sh.file, sh.args, {
           name: 'xterm-color', cwd: opts.path, cols: 80, rows: 24,
           env: launchEnv(),
@@ -312,7 +443,9 @@ export class PtyManager {
       }
       proc.onData((d) => onData(id, d))
       proc.onExit(({ exitCode }) => { onExit(id, exitCode); this.handles.delete(id) })
-      this.handles.set(id, { proc })
+      // `shellFile` is KAN-100's marker: recorded here and nowhere else, so only
+      // a shell tab can ever be answered for. See the Handle type.
+      this.handles.set(id, { proc, shellFile: sh.file })
       return id
     }
 
@@ -445,6 +578,36 @@ export class PtyManager {
    *  tab is never counted. */
   agentSessions(): number {
     return [...this.handles.values()].filter((h) => h.agentSpawned).length
+  }
+
+  /**
+   * KAN-100. Which of these SHELL ptys are running a foreground command right
+   * now. See the long comment above `BUSY_TIMEOUT_MS` for the signal itself.
+   *
+   * BATCHED because the caller's question is batched: closing a group of eight
+   * shells is one close decision, so it is one call and eight probes in
+   * PARALLEL — bounding the whole batch at BUSY_TIMEOUT_MS rather than eight
+   * times that behind a modal the user is waiting for.
+   *
+   * OMISSION IS THE UNKNOWN ANSWER, and it is the only one this returns for a
+   * question it cannot settle: no handle (a dead or invented id), not a shell (a
+   * Claude pty — its signal is claude:state, which is better, and the two stay
+   * independent by design), or a probe that timed out. The renderer's absence
+   * rule then warns, which is the safe direction; a `false` here would silently
+   * kill whatever was running.
+   */
+  async busy(ids: readonly string[]): Promise<Record<string, boolean>> {
+    const out: Record<string, boolean> = {}
+    await Promise.all(ids.map(async (id) => {
+      const h = this.handles.get(id)
+      if (!h?.shellFile) return
+      const b = isWindows
+        ? await consoleProcessList(h.proc.pid).then((list) =>
+          list?.some((p) => p !== h.proc.pid))
+        : posixBusy(h)
+      if (b !== undefined) out[id] = b
+    }))
+    return out
   }
 
   write(id: string, data: string) {

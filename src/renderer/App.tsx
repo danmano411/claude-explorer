@@ -51,6 +51,12 @@ import { LONE_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } fro
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
+/** KAN-100. "Nothing is known about any shell" — an EMPTY map, never a map of
+ *  falses, because absence is what `closeRisk` reads as unknown-and-therefore-
+ *  at-risk. Shared so a probe that was skipped and a probe that failed are
+ *  literally the same value rather than two spellings that could drift. */
+const NO_BUSY: ReadonlyMap<string, boolean> = new Map();
+
 /** `tabId`'s pane, addressed the way every gridlayout op wants it. */
 const keyOfTab = (layout: GridLayout, tabId: string | undefined | null): CellKey | null => {
   const c = tabId ? cellOf(layout, tabId) : null;
@@ -871,6 +877,32 @@ export function App() {
   };
 
   /**
+   * KAN-100. The ptyIds in `ts` worth asking main about: live SHELL ptys only.
+   *
+   * The filter is not an optimisation, it is the contract — `pty:busy` answers
+   * for shell tabs and nothing else, so a Claude tab, a files tab, a restored
+   * terminal with no pty and one whose process has exited are all excluded here
+   * rather than being sent and silently omitted from the reply. Whatever is not
+   * asked about is absent from the map, which `closeRisk` already reads
+   * correctly: a Claude tab falls to `claudeState`, a dead pty to `status`.
+   */
+  const shellPtyIds = (ts: readonly Tab[]): string[] =>
+    ts.filter((t) => t.view === 'terminal' && t.terminalKind === 'shell'
+      && t.ptyId && status.get(t.ptyId) !== 'stopped')
+      .map((t) => t.ptyId!);
+
+  /** KAN-100. ONE round trip for the whole batch. A rejected invoke degrades to
+   *  UNKNOWN — i.e. to the pre-KAN-100 warning — never to "nothing is running",
+   *  which would silently kill whatever was. */
+  const probeBusy = async (ids: readonly string[]): Promise<ReadonlyMap<string, boolean>> => {
+    try {
+      return new Map(Object.entries(await window.api.ptyBusy(ids)));
+    } catch {
+      return NO_BUSY;
+    }
+  };
+
+  /**
    * THE CHOKEPOINT. Every close anything can ask for goes through here — the
    * strip's `×`, the tab context menu, "Close group's tabs", File ▸ Close Tab /
    * Ctrl+W, and the control channel — which is what makes the two guards below
@@ -884,6 +916,13 @@ export function App() {
    * special case.
    *
    * `mode: 'now'` skips the CONFIRM only — never the pinned refusal.
+   *
+   * STILL SYNCHRONOUS in what it returns. KAN-100's shell probe is an IPC round
+   * trip, so the risk ASSESSMENT is now async — but the refusal is not: pinning
+   * is decided here, from state already in hand, and the control channel
+   * (`requestClose([id], 'now')`) reads the returned ids to answer a caller that
+   * is waiting. Returning a promise would have made every caller await a
+   * question none of them asks.
    */
   const requestClose = (ids: readonly string[], mode: 'ask' | 'now' = 'ask'): string[] => {
     const byId = new Map(committed.current.tabs.map((t) => [t.id, t] as const));
@@ -905,20 +944,28 @@ export function App() {
     const refused = resolved.filter((t) => t.pinned);
     const rest = resolved.filter((t) => !t.pinned);
     const doomed = rest.map((t) => t.id);
-    if (doomed.length) {
-      const reason = mode === 'now' ? null
-        : closeReason(rest.map((t) => closeRisk(t, status, claudeState)));
-      // The common case — files, viewers, a finished Claude tab, a dead shell —
-      // is byte-for-byte what it was: one click, no modal, nothing awaited.
-      if (reason === null) closeNow(doomed);
-      else setPendingClose({
-        reason,
-        confirmLabel: doomed.length > 1 ? 'Close tabs' : 'Close tab',
-        // Cancel abandons the WHOLE batch, including the members that carried
-        // no risk: a half-completed group close the user just declined is a
-        // worse end state than either, and re-issuing it costs one right-click.
-        confirm: () => closeNow(doomed),
-      });
+    if (doomed.length && mode === 'now') closeNow(doomed);
+    else if (doomed.length) {
+      const decide = (busy: ReadonlyMap<string, boolean>) => {
+        const reason = closeReason(rest.map((t) => closeRisk(t, status, claudeState, busy)));
+        // The common case — files, viewers, a finished Claude tab, a dead shell,
+        // and since KAN-100 a shell at an idle prompt — is one click, no modal.
+        if (reason === null) closeNow(doomed);
+        else setPendingClose({
+          reason,
+          confirmLabel: doomed.length > 1 ? 'Close tabs' : 'Close tab',
+          // Cancel abandons the WHOLE batch, including the members that carried
+          // no risk: a half-completed group close the user just declined is a
+          // worse end state than either, and re-issuing it costs one right-click.
+          confirm: () => closeNow(doomed),
+        });
+      };
+      // KAN-100. ONE probe for the whole batch, and only when the batch actually
+      // contains a live shell — so closing files, viewers and Claude tabs stays
+      // byte-for-byte what it was, synchronous and with no IPC at all.
+      const ids = shellPtyIds(rest);
+      if (ids.length) void probeBusy(ids).then(decide);
+      else decide(NO_BUSY);
     }
     return refused.map((t) => t.id);
   };
@@ -2209,10 +2256,17 @@ export function App() {
       // App owns the join because `status` is keyed by ptyId, not by tab id —
       // SpaceMenu only renders the answer. Every member of the space, not just
       // the visible ones: deleting it closes all of them.
-      tabsOf={(spaceId): { risks: CloseRisk[]; pinnedCount: number } => {
+      // KAN-100 made this ASYNC, for the one reason `requestClose` is: a shell's
+      // busy signal is an IPC round trip. SpaceMenu asks once, when Delete is
+      // clicked, and holds the answer for the life of that dialog — the same
+      // one-probe-per-decision shape as a close, and the same reason the sentence
+      // can otherwise call an idle prompt "a live terminal".
+      tabsOf={async (spaceId): Promise<{ risks: CloseRisk[]; pinnedCount: number }> => {
         const members = sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs);
+        const ids = shellPtyIds(members);
+        const busy = ids.length ? await probeBusy(ids) : NO_BUSY;
         return {
-          risks: members.map((t) => closeRisk(t, status, claudeState)),
+          risks: members.map((t) => closeRisk(t, status, claudeState, busy)),
           pinnedCount: members.filter((t) => t.pinned).length,
         };
       }}

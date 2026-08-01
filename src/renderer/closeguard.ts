@@ -15,7 +15,10 @@
  *                             the instance)
  *   Claude, idle/stopped    → nothing; the transcript is on disk and Open
  *                             Recent reopens the conversation
- *   shell                   → nothing about a shell is written anywhere, ever
+ *   shell, running something→ that command dies with the tab
+ *   shell, at a prompt      → nothing; nothing about a shell is written
+ *                             anywhere, ever, and an empty prompt has nothing
+ *                             running to lose
  *   files / viewer          → nothing to kill
  *
  * Closing the last tab of a PANE also destroys that pane's rectangle (KAN-56).
@@ -31,6 +34,19 @@
  * either way, on purpose: the transcript is the recoverable artifact, and
  * confirming a close to protect a RENDERING of it is exactly the click-through
  * training this file exists to avoid.
+ *
+ * KAN-100. A shell had the same defect KAN-75 fixed for Claude, one rung worse:
+ * its only signal was "a pty exists and has not exited", which is true from
+ * spawn until exit — so EVERY shell close was confirmed, forever, which is
+ * precisely the click-through training stated above. Shells now get their own
+ * real signal (`busy`, from ConPTY's console process list / POSIX tcgetpgrp —
+ * see main/pty.ts), and an idle prompt joins the "nothing" rows.
+ *
+ * The two signals stay SEPARATE on purpose. A Claude tab is decided by
+ * `claudeState` and a shell by `busy`; neither is consulted for the other. They
+ * measure different things (a turn in flight vs. a child process), and folding
+ * them into one "is it busy" would make each arm answer for a question it cannot
+ * see — a Claude session mid-turn spawns no child, and a shell reports no hook.
  */
 
 import type { ClaudeState, PtyStatus, TabView } from '../shared/types'
@@ -71,15 +87,30 @@ export type Closeable = {
  * Only an explicit 'idle' clears the risk; 'working' and 'awaiting-input' both
  * still mean a turn is in flight, and 'stopped' never arrives on this channel
  * at all (see claudestate.ts) — that arm is handled above, off `status`.
+ *
+ * `busy` (KAN-100) is the SHELL's equivalent of `claudeState`, down to the
+ * absence rule: is a foreground command running in that pty right now? Only an
+ * explicit `false` — main looked and there is nothing but the shell itself —
+ * clears the risk. Missing is UNKNOWN and still warns, which covers a pty main
+ * has no handle for, a probe that timed out, and every caller that does not pass
+ * the map at all (the default keeps the pre-KAN-100 behaviour).
+ *
+ * DELIBERATELY NOT ASKED OF `status`. A shell that is merely quiet is not idle:
+ * `usePtyStatus`'s 'waiting' is a 700 ms silence timer over pty bytes, and a
+ * silent long-running process — a build past its startup logs, a held ssh
+ * session — is exactly the thing worth protecting and exactly the thing bytes
+ * get wrong. That is the mistake KAN-73 removed from the Claude arm; this map
+ * is a real signal, not a re-derivation of the same bytes.
  */
 export function closeRisk(
   t: Closeable,
   status: ReadonlyMap<string, PtyStatus>,
   claudeState: ReadonlyMap<string, ClaudeState> = new Map(),
+  busy: ReadonlyMap<string, boolean> = new Map(),
 ): CloseRisk {
   if (t.view !== 'terminal' || !t.ptyId) return 'none'
   if (status.get(t.ptyId) === 'stopped') return 'none'
-  if (t.terminalKind === 'shell') return 'shell'
+  if (t.terminalKind === 'shell') return busy.get(t.ptyId) === false ? 'none' : 'shell'
   return claudeState.get(t.ptyId) === 'idle' ? 'none' : 'claude'
 }
 

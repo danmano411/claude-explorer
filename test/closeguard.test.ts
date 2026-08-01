@@ -105,6 +105,87 @@ describe('closeRisk: an idle Claude session is not "still running" (KAN-75)', ()
   })
 })
 
+// KAN-100. A shell had the SAME defect KAN-75 fixed for Claude, one rung worse:
+// its only signal was "a pty exists and has not exited", which is true from
+// spawn until exit — so every shell close was confirmed, forever. `busy`
+// (ConPTY's console process list on Windows, tcgetpgrp on POSIX — see
+// main/pty.ts) is the real signal, and it is deliberately NOT derived from pty
+// bytes: a silent long-running child reads as quiet and must still warn.
+describe('closeRisk: a shell at an idle prompt is not "still running" (KAN-100)', () => {
+  const busyMap = (entries: Array<[string, boolean]> = []) => new Map(entries)
+  const claudeMap = (entries: Array<[string, ClaudeState]> = []) => new Map(entries)
+  // 'waiting' throughout: an idle prompt and a silent child are INDISTINGUISHABLE
+  // on `status`, so pinning it here is what makes each case below about `busy`
+  // and nothing else.
+  const status = statusMap([['p1', 'waiting']])
+
+  it('clears a shell main says is running nothing', () => {
+    expect(closeRisk(terminal('shell', 'p1'), status, undefined, busyMap([['p1', false]]))).toBe('none')
+  })
+
+  it('STILL FLAGS a shell running a command, including a silent one', () => {
+    // The case a byte-based rule gets backwards, and the one worth protecting:
+    // identical `status`, opposite answer, decided only by `busy`.
+    expect(closeRisk(terminal('shell', 'p1'), status, undefined, busyMap([['p1', true]]))).toBe('shell')
+  })
+
+  it('ABSENCE IS UNKNOWN AND WARNS — never an optimistic "nothing is running"', () => {
+    // A pty main has no handle for, a probe that timed out, and a caller that
+    // passes no map at all: all three keep the pre-KAN-100 behaviour, because
+    // the other default silently kills whatever was running.
+    expect(closeRisk(terminal('shell', 'p1'), status, undefined, busyMap())).toBe('shell')
+    expect(closeRisk(terminal('shell', 'p1'), status, undefined, busyMap([['p2', false]]))).toBe('shell')
+    expect(closeRisk(terminal('shell', 'p1'), status)).toBe('shell')
+  })
+
+  it('a stopped shell is still cleared by `status` before `busy` is consulted', () => {
+    // `busy: true` for a pty that has exited would be a stale answer; the exit
+    // is the stronger fact and is checked first.
+    expect(closeRisk(terminal('shell', 'p1'), statusMap([['p1', 'stopped']]), undefined, busyMap([['p1', true]])))
+      .toBe('none')
+  })
+
+  it('a restored shell with no ptyId still never prompts, busy map notwithstanding', () => {
+    expect(closeRisk(terminal('shell'), statusMap(), undefined, busyMap([['p1', true]]))).toBe('none')
+  })
+
+  it('CLAUDE TABS ARE UNTOUCHED — `busy` never answers for one', () => {
+    // The two signals stay independent by design: a Claude session mid-turn
+    // spawns no child, so `busy: false` must not clear it, and a finished one is
+    // cleared by claudeState alone.
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap([['p1', 'working']]), busyMap([['p1', false]])))
+      .toBe('claude')
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap(), busyMap([['p1', false]]))).toBe('claude')
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap([['p1', 'idle']]), busyMap([['p1', true]])))
+      .toBe('none')
+  })
+
+  it('a batch of only idle shells needs no confirm at all', () => {
+    const risks: CloseRisk[] = ['p1', 'p2'].map((p) =>
+      closeRisk(terminal('shell', p), statusMap([[p, 'waiting']]), undefined, busyMap([[p, false]])))
+    expect(risks).toEqual(['none', 'none'])
+    expect(closeReason(risks)).toBeNull()
+  })
+
+  // The same proof KAN-75 left for its own arm: deleteSpaceReason consumes the
+  // same CloseRisk[], so the fix living in closeRisk (not at a call site) is
+  // what stops the space-delete sentence calling an idle prompt a live terminal.
+  it('a space full of idle shells gets the pre-KAN-57 wording, not a live clause', () => {
+    const risks: CloseRisk[] = ['p1', 'p2'].map((p) =>
+      closeRisk(terminal('shell', p), statusMap([[p, 'waiting']]), undefined, busyMap([[p, false]])))
+    expect(deleteSpaceReason('Research', 2, risks, 0)).toBe('Delete «Research» and close its 2 tabs?')
+  })
+
+  it('…and one busy shell in that space brings the live clause back', () => {
+    const risks: CloseRisk[] = [
+      closeRisk(terminal('shell', 'p1'), statusMap([['p1', 'waiting']]), undefined, busyMap([['p1', false]])),
+      closeRisk(terminal('shell', 'p2'), statusMap([['p2', 'waiting']]), undefined, busyMap([['p2', true]])),
+    ]
+    expect(deleteSpaceReason('Research', 2, risks, 0))
+      .toBe('Delete «Research» and close its 2 tabs? 1 is a live terminal, and that work is not saved anywhere.')
+  })
+})
+
 describe('closeReason', () => {
   it('returns null for an empty batch or an all-safe batch — no modal at all', () => {
     expect(closeReason([])).toBeNull()

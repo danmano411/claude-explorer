@@ -29,6 +29,30 @@ export const CH = {
   ptyWrite: 'pty:write',
   ptyResize: 'pty:resize',
   ptyKill: 'pty:kill',
+  // --- KAN-100: is a foreground command running in these SHELL ptys right now?
+  // The close guard's missing signal. Claude tabs got a real one in KAN-73
+  // (hook-reported ClaudeState); a shell never had one, so `closeRisk` measured
+  // risk as "a pty exists and has not exited" — true for the whole life of the
+  // tab — and every shell close was confirmed. Confirming every close is the
+  // failure mode closeguard.ts exists to prevent.
+  //
+  // ON DEMAND, not an event, and that is the point: this is asked ONCE per close
+  // decision, for the whole batch, and never otherwise. A pty:data-style
+  // broadcast would put a forked process behind every keystroke, and a polled
+  // one would burn a process every interval for a question nobody asked. It is
+  // also why it is not folded into pty:data — inferring session state from byte
+  // traffic is exactly the mistake KAN-73 removed (a silent `npm run dev` reads
+  // as idle on bytes, and that is the one case worth protecting).
+  //
+  // TAKES A LIST, returns a record keyed by ptyId. One round trip closes a
+  // group of eight shells; a per-tab channel would fork eight agents in series
+  // behind a modal the user is waiting for.
+  //
+  // ABSENCE MEANS UNKNOWN — the same rule as pty:exit-derived status and
+  // claude:state. A ptyId missing from the answer (unknown id, dead pty, a
+  // Claude tab, the probe timing out) is NOT "idle": the renderer must warn.
+  // Defaulting the other way silently kills processes.
+  ptyBusy: 'pty:busy',
   ptyData: 'pty:data', // main -> renderer event
   ptyExit: 'pty:exit', // main -> renderer event
   // --- v2 file operations ---
@@ -171,6 +195,15 @@ export interface Api {
   ptyWrite(ptyId: string, data: string): void
   ptyResize(ptyId: string, cols: number, rows: number): void
   ptyKill(ptyId: string): void
+  /** KAN-100. Which of these SHELL ptys are running a foreground command right
+   *  now — the close guard's one question about a shell.
+   *
+   *  A ptyId is present in the answer only when main could actually decide.
+   *  Missing means UNKNOWN and the caller must treat it as at-risk: an id main
+   *  has no handle for, a Claude pty (their signal is claude:state, which is
+   *  better), a probe that timed out, or a platform arm that could not answer.
+   *  See the CH.ptyBusy comment for why absence is never optimistic. */
+  ptyBusy(ptyIds: readonly string[]): Promise<Record<string, boolean>>
   onPtyData(cb: (ptyId: string, data: string) => void): () => void // returns unsubscribe
   onPtyExit(cb: (ptyId: string, code: number) => void): () => void
   // --- v2 file operations ---

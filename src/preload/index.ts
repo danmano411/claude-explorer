@@ -16,6 +16,8 @@ const api: Api = {
   ptyWrite: (id, d) => ipcRenderer.send(CH.ptyWrite, id, d),
   ptyResize: (id, c, r) => ipcRenderer.send(CH.ptyResize, id, c, r),
   ptyKill: (id) => ipcRenderer.send(CH.ptyKill, id),
+  // KAN-100. `invoke`, not `send`: the close decision waits on the answer.
+  ptyBusy: (ids) => ipcRenderer.invoke(CH.ptyBusy, ids),
   onPtyData: (cb) => {
     const h = (_e: unknown, id: string, d: string) => cb(id, d);
     ipcRenderer.on(CH.ptyData, h);
