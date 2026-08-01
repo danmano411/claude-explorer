@@ -29,7 +29,7 @@ import type {
   ClaudeState, ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
 import {
-  DEFAULT_SPACE_KEYBINDS, isTextBox, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
+  DEFAULT_SPACE_KEYBINDS, isTextBox, isTypingTarget, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
   type SpaceKeybinds,
 } from './keys';
 import { usePtyStatus } from './ptystatus';
@@ -37,6 +37,7 @@ import { useClaudeState } from './claudestate';
 import { spaceNeedsInput } from './spacemenu';
 import { enteredAwaitingInput, needsNotifSetup, notifyIfEnteredAwaitingInput, shouldToast, showToast } from './notify';
 import { attentionNeeded } from './attention';
+import { isTypingActive, shouldAutoSwitch } from './autoswitch';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
@@ -153,6 +154,23 @@ export function App() {
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('blur', onBlur);
     };
+  }, []);
+  // KAN-80. The last time any keystroke landed anywhere in the app, INCLUDING
+  // inside a terminal's xterm textarea — which is why this is a CAPTURE-phase
+  // listener rather than one more entry among the bubble-phase `keydown`
+  // listeners further down: xterm's own handler runs at the target phase and,
+  // for the handful of chords it fully owns (Ctrl+1..9 etc — see keys.ts),
+  // calls stopPropagation before those would ever reach a bubble-phase
+  // listener on `window`. Capture runs first regardless, so this sees every
+  // keystroke no matter what consumes it afterwards. A ref, not state: this
+  // exists purely for the auto-switch effect below to read a timestamp off,
+  // and re-rendering the whole app on every keystroke to keep it "live" would
+  // be the exact kind of churn `usePtyStatus`/`useClaudeState` already refuse.
+  const lastInputAt = useRef(0);
+  useEffect(() => {
+    const onKeyDown = () => { lastInputAt.current = Date.now(); };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, []);
   // KAN-78. The one thing main needs to drive the taskbar overlay/flash — not
   // every claudeState transition, just the current answer to "does anything
@@ -1295,8 +1313,9 @@ export function App() {
   };
 
   /**
-   * KAN-77/79. Chime + toast on a transition INTO 'awaiting-input' — the same
-   * trigger, gated separately (notifySound / notifyDesktop), fired off
+   * KAN-77/79/80. Chime + toast + auto-switch on a transition INTO
+   * 'awaiting-input' — the SAME trigger for all three, gated separately
+   * (notifySound / notifyDesktop / autoSwitchOnInput), fired off
    * `claudeState` (renderer/claudestate.ts's single source of truth, per its
    * own module doc — the dot, the cross-space markers and this all read ONE
    * map rather than each keeping a second one that can silently disagree).
@@ -1308,24 +1327,51 @@ export function App() {
    *
    * `tabVisible` is approximated as "this is the globally active tab" —
    * ponytail: a tab visible in a non-focused SPLIT PANE of the active space
-   * (not `active` itself) still toasts under this rule. A real fix needs
+   * (not `active` itself) still toasts (and still counts as the auto-switch
+   * "already blocked, on screen" case) under this rule. A real fix needs
    * gridPlacement's own notion of "on screen", which nothing else in this
-   * effect touches; revisit if a split-view user reports a toast for
-   * something already on their own screen.
+   * effect touches; revisit if a split-view user reports a toast — or an
+   * auto-switch away from something already on their own screen.
+   *
+   * `settingsGet()` is fetched ONCE for the whole batch rather than once per
+   * transitioning ptyId (KAN-77/79's original shape): KAN-80 needs every
+   * candidate in one pass judged against the exact same settings AND the
+   * exact same `typingActive` reading, and awaiting a promise per ptyId would
+   * let their resolution order (not iteration order) decide which one "wins"
+   * — precisely backwards from "prefer the FIRST blocked session".
+   *
+   * `effectiveActiveState` starts as whatever ClaudeState the tab actually on
+   * screen has RIGHT NOW, and is updated in-place the instant this pass
+   * decides to switch. That is the whole mechanism behind "at most once, and
+   * prefer the first": `shouldAutoSwitch`'s own suppression #3 (never switch
+   * away from a blocked session) already refuses every subsequent candidate
+   * once `effectiveActiveState` reads 'awaiting-input' — which needs help
+   * from exactly one line here, because `jumpToTab` below only takes effect
+   * on React's NEXT render. Without it, two sessions transitioning in the
+   * same synchronous pass would both see the OLD (pre-switch) active state as
+   * eligible, and the LAST one processed would silently win instead of the
+   * first.
    */
   const prevClaudeState = useRef<ReadonlyMap<string, ClaudeState>>(new Map());
   useEffect(() => {
     const prev = prevClaudeState.current;
     prevClaudeState.current = claudeState;
     if (prev === claudeState) return;
+    const entered: Array<[string, ClaudeState]> = [];
     for (const [ptyId, state] of claudeState) {
-      if (!enteredAwaitingInput(prev.get(ptyId), state)) continue;
-      const tab = tabs.find((t) => t.ptyId === ptyId);
-      if (!tab) continue;
-      const space = spaces.find((s) => s.tabIds.includes(tab.id));
-      const appFocused = document.hasFocus();
-      const tabVisible = space?.id === activeSpaceId && tab.id === active;
-      void window.api.settingsGet().then((s) => {
+      if (enteredAwaitingInput(prev.get(ptyId), state)) entered.push([ptyId, state]);
+    }
+    if (!entered.length) return;
+    void window.api.settingsGet().then((s) => {
+      const activePtyId = tabs.find((t) => t.id === active)?.ptyId;
+      let effectiveActiveState = activePtyId ? claudeState.get(activePtyId) : undefined;
+      const typingActive = isTypingActive(isTypingTarget(document.activeElement), lastInputAt.current, Date.now());
+      for (const [ptyId, state] of entered) {
+        const tab = tabs.find((t) => t.ptyId === ptyId);
+        if (!tab) continue;
+        const space = spaces.find((sp) => sp.tabIds.includes(tab.id));
+        const appFocused = document.hasFocus();
+        const tabVisible = space?.id === activeSpaceId && tab.id === active;
         notifyIfEnteredAwaitingInput(prev.get(ptyId), state, !s.notifySound);
         if (shouldToast({ notifyDesktop: s.notifyDesktop, appFocused, tabVisible })) {
           showToast({
@@ -1337,8 +1383,20 @@ export function App() {
             },
           });
         }
-      });
-    }
+        // Reuses `jumpToTab` — the same "bring this specific tab into view,
+        // switching space if needed" path KAN-79's toast click already uses,
+        // itself built on `goToSpace` the way `switchToSpace` is. No second
+        // switch path.
+        if (space && shouldAutoSwitch(
+          { prev: prev.get(ptyId), next: state },
+          s,
+          { typingActive, activeState: effectiveActiveState },
+        )) {
+          effectiveActiveState = state;
+          jumpToTab(space.id, tab.id);
+        }
+      }
+    });
   }, [claudeState, tabs, spaces, activeSpaceId, active, jumpToTab]);
 
   // KAN-45 integration review #5: `spaces` (this render's closure) is used
