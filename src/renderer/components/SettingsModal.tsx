@@ -80,7 +80,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setKeybindMsg('Hold at least one modifier key (Ctrl, Shift, or Alt) as well.')
         return
       }
-      const mods: Mods = { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }
+      // Sparse — only the modifiers actually held — matching every other
+      // `Mods` value in this codebase (`DEFAULT_SPACE_KEYBINDS`'s `{ ctrl:
+      // true }`, never `{ ctrl: true, shift: false, alt: false, meta: false
+      // }`). `modsMatch`/`modsEqual` treat absent the same as `false` either
+      // way, so this is a storage-shape nicety, not a correctness fix.
+      const mods: Mods = {}
+      if (e.ctrlKey) mods.ctrl = true
+      if (e.shiftKey) mods.shift = true
+      if (e.altKey) mods.alt = true
+      if (e.metaKey) mods.meta = true
       const isCycle = CYCLE_ACTIONS.includes(recording)
       if (!isCycle && !/^Digit[1-9]$/.test(e.code)) {
         setKeybindMsg('Press a number key (1-9) together with your modifier — the digit itself always picks the space.')

@@ -390,6 +390,13 @@ body {
 .modal {
   background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 4px 4px 0 var(--line);
   padding: 20px 22px; max-width: 380px; font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  /* KAN-83: the Keybinds section is the first thing to make Settings tall
+     enough to matter — without this, the window growing no taller than the
+     content pushed Save/Cancel below the fold with no way to reach them.
+     `max-height`, not a fixed one, so every OTHER modal (delete confirm,
+     spawn confirm) that already fits keeps its exact current size. */
+  max-height: 85vh;
+  overflow-y: auto;
 }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .modal-actions button {
