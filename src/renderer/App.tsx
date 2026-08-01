@@ -2084,6 +2084,10 @@ export function App() {
       // membership and the ptyId-keyed state map to join them.
       needsInput={(spaceId) =>
         spaceNeedsInput(sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs), claudeState)}
+      // KAN-95: the same resolved keybinds `spaceIndex`/`pinnedSpaceIndex`
+      // switch on below, so the dropdown's accelerator labels can never name
+      // a chord other than the one that actually fires.
+      keybinds={keybinds}
     />
   );
 

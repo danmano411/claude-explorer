@@ -1,85 +1,95 @@
-# Claude Explorer
+<p align="center">
+  <img src="img/icon.png" alt="" width="128" height="128">
+</p>
+
+<h1 align="center">Claude Explorer</h1>
+
+<p align="center">
+  A Windows file manager built around one thing: launching
+  <a href="https://claude.com/claude-code">Claude Code</a> from any folder in one click —
+  and keeping every session you start somewhere you can actually see it.
+</p>
+
+---
+
+## What it is, and why it exists
+
+If you live in Claude Code, you spend a surprising amount of your day `cd`-ing into a project and typing `claude`. Then doing it again in another terminal for another project. Then losing track of which window was which.
+
+Claude Explorer collapses that. It browses your filesystem like File Explorer does — rename, copy, move, delete, undo — but every folder row has an arrow that opens a Claude Code session in that directory, inside the app, in a tab.
+
+The interesting part is what happens once you have several. Sessions live in **spaces**: separate, named workspaces you switch between, each remembering its own tabs and layout. One space per project — and the app tells you when a session in a space you *aren't* looking at is waiting on you. That is the whole design goal: running several Claude sessions at once without any of them quietly stalling on a permission prompt you never saw.
+
+Editing stays in Claude. The file viewer is read-only on purpose — this app's job is to *supervise* the AI doing the editing (browse, launch, watch, review the diff), not to be a worse version of two tools you already have.
 
 ## Quickstart
 
-Two ways to run Claude Explorer as a desktop app on Windows. Either way you need [Claude Code](https://claude.com/claude-code) installed and on your `PATH` — Claude Explorer launches your existing `claude` CLI, it doesn't bundle one.
+Requires [Claude Code](https://claude.com/claude-code) on your `PATH`. Claude Explorer launches your existing `claude` CLI; it does not bundle one.
 
-**Option A — Installer (from a Release)**
+**Option A — Installer**
 1. Download the latest `Claude Explorer Setup x.y.z.exe` from the [Releases page](https://github.com/danmano411/claude-explorer/releases).
-2. Run it. It creates a Desktop shortcut and a Start Menu entry; right-click the app → **Pin to taskbar** to pin it.
-3. Running a newer installer later upgrades in place — your recent folders and settings are kept.
+2. Run it. You get a Desktop shortcut and a Start Menu entry; right-click the app → **Pin to taskbar** to pin it.
+3. Running a newer installer later upgrades in place, keeping your recent folders, settings and workspace.
 
 **Option B — Build from source**
 ```bash
 git clone https://github.com/danmano411/claude-explorer.git
 cd claude-explorer
 npm install
-npm run package          # builds dist/Claude Explorer Setup x.y.z.exe
+npm run package          # → dist/Claude Explorer Setup x.y.z.exe
 ```
-Then run the installer in `dist/`. (For live development instead of a packaged app, use `npm run dev`.)
-
----
-
-A Windows desktop file manager built for one thing: **launching [Claude Code](https://claude.com/claude-code) from any folder in a single click.** It works like File Explorer — browse, rename, copy, move, delete — but every folder has a shortcut straight into a Claude Code session running in an embedded terminal.
-
-![Retro Claude aesthetic — warm paper, clay accents, serif chrome](img/icon.png)
-
-## Why
-
-If you live in Claude Code, you spend a lot of time `cd`-ing into project folders and typing `claude`. Claude Explorer collapses that into browsing to a folder and clicking an arrow. Sessions run *inside* the app, in tabs, so you can have several projects open at once and resume past conversations without touching a terminal.
+Then run the installer in `dist/`. For live development instead, `npm run dev`.
 
 ## Features
 
-- **One-click launch** — an orange arrow on every folder row opens Claude Code in that directory, in an embedded terminal (xterm + a real PTY).
-- **Browser-style tabs** — each tab is independently a file view *or* a Claude terminal. Reorder them by dragging; closing a tab focuses the most recent one (never a blank screen).
-- **Open Recent** — recent folders plus resumable Claude sessions, parsed straight from `~/.claude/projects`. Start fresh or resume an existing conversation; prune entries you don't want.
-- **Full file management** — rename, copy, cut, paste, delete (to the Recycle Bin), new folder/file. Right-click menu, `Ctrl+C/X/V`, `F2`, `Del`, and full `Ctrl+Z` / `Ctrl+Y` undo/redo (delete included).
-- **Drag and drop** — within a folder, into subfolders, and across tabs. Windows move/copy conventions (same drive = move, cross-drive = copy, `Ctrl` = copy, `Shift` = move, right-drag = menu). Multiselect with `Shift`/`Ctrl`.
-- **Read-only viewer and diff** — open any file in a tab with syntax highlighting, see a Git status letter on every row, and open a coloured unified diff to answer "what did Claude just change?". See [Viewing files](#viewing-files).
-- **Navigation** — back / forward / refresh and an editable address bar.
-- **Retro Claude look** — warm paper, clay accents, serif chrome, mono data.
+**Spaces.** Named workspaces you switch between with `Ctrl+1..9`, each with its own tabs, layout and remembered active tab. Pin the ones you always want — they separate to the top of the list and take `Ctrl+Shift+1..9` — give each a soft background colour so you can tell at a glance which project you are in, and cycle with `Ctrl+Tab`. Every one of those keybinds is rebindable in Settings.
 
-## Viewing files
+**It tells you when Claude needs you.** Sessions report what they are actually doing — working, waiting on your permission, finished — read from Claude Code's own hooks rather than guessed from terminal output. A session blocked in another space marks its tab, its space, and the spaces menu, so it cannot sit there unnoticed. The markers are always on; a sound (off by default) and a desktop notification (asked on first run) are yours to opt into.
 
-Claude Explorer is a cockpit for supervising an AI that edits your files, so it can show you those files — and, more to the point, show you what changed.
+**One click from any folder.** An arrow on every folder row opens Claude Code there. Or start from the CLI (`claude-explorer --open <path>`), or straight from a Windows Explorer context menu.
 
-- **Read-only viewer.** Double-click any file to open it in its own tab (a first-class tab, not a split pane, so it reorders, renames and closes like every other tab). Syntax highlighting comes from [Shiki](https://shiki.style), the same TextMate grammars VS Code uses, in a Solarized theme picked to sit inside the Retro Claude palette. Grammars load on demand, so opening a `.json` file never pays for the TypeScript grammar. Files over ~200k characters render as plain text rather than freezing the UI; binary files and files over 5 MB say so in a sentence and offer **Open in default app**.
-- **Git status gutter.** In a Git repository, every row in the listing carries git's own letter — `M` modified, `A` added, `D` deleted, `U` untracked, `R` renamed, `·` for a folder that merely contains changes. Files Claude *deleted* still get a ghost row, struck through, because "Claude removed this" is exactly the change you most want to notice. The gutter refreshes when the terminal next door goes quiet, so it keeps up with a session that is editing while you watch. A folder that isn't a repo simply has no gutter — that's a normal state, not an error.
-- **Diff view — "what did Claude just change?"** Right-click a changed file → **Show changes** (or double-click a ghost row) to open a unified diff in its own tab: additions and deletions coloured, a `+n / −n` summary, and real file line numbers taken from the `@@` headers — the number you type back into Claude, not a position within the diff. Diffs are Git-only; there is no snapshot subsystem for non-Git folders.
+**Open Recent.** Recent folders *and* resumable Claude sessions, read straight from `~/.claude/projects`. Pick up an old conversation without remembering a session id or touching a terminal.
 
-**Editing stays in Claude.** The viewer is read-only by design, and that is a product decision rather than a gap waiting to be filled. This app's job is to *supervise* the AI doing the editing — browse, launch, watch, review the diff. Adding a text editor would make it a worse version of two tools that already exist. If you want to change a file, ask Claude in the terminal tab that's already open on that folder.
+**Four kinds of tab, one window.** A tab is independently a folder listing, a read-only file viewer, a Claude session, or a plain shell. Group them into tab folders, split the window into a grid of panes, pin the ones you never want to lose. It all comes back on restart.
+
+**See what Claude changed.** In a git repo every row carries git's own status letter, deleted files leave a struck-through ghost row, and **Show changes** opens a coloured unified diff with real file line numbers — the number you type back into Claude, not a position within the diff. The gutter refreshes when the terminal next door goes quiet, so it keeps up with a session that is editing while you watch.
+
+**Search.** Bundled ripgrep across both filenames and file contents — honouring `.gitignore` in Explorer mode, searching everything in Developer mode.
+
+**Let Claude drive the app.** A loopback-only MCP server gives sessions four tools: list tabs, close a tab, open a file in the viewer, open a new Claude session. See [Agent control](#agent-control).
+
+**Safety, in two modes.** Explorer mode hides system noise and refuses to mutate system paths at all; Developer mode unlocks that behind a typed confirmation. Deletes stage to a same-drive trash first, so `Ctrl+Z` genuinely undoes them.
+
+And the ordinary things work: drag and drop with Windows move/copy conventions, multiselect, tab colours and reordering, back/forward/refresh, an editable address bar, full undo/redo.
+
+## Agent control
+
+Claude sessions this app launches receive an `--mcp-config` pointing at a loopback HTTP server on an ephemeral port, authenticated with a bearer token minted per app run that never touches disk. The server binds to `127.0.0.1` only, and the token is the whole authentication — an unauthenticated local process gets a 401.
+
+Four tools, deliberately: `list_tabs`, `close_tab`, `open_viewer_tab`, `open_claude_session`. A session spawned *by* an agent receives neither the tools nor the token, so fan-out cannot compound. `open_claude_session` has a free allowance (default 8 concurrent) past which it asks you — it throttles, it never refuses outright. One switch in Settings takes the entire surface away.
 
 ## Safety
 
-Claude Explorer has two modes, toggled from the status bar (the current mode is always visible there):
-
 - **Explorer mode** (default) — behaves like File Explorer. Hidden files and Windows noise (`.git`, `$Recycle.Bin`, `System Volume Information`, …) stay out of the listing, and anything that would mutate a **system path** is refused outright with a plain-English reason.
-- **Developer mode** — unlocks the risky half:
-  - hidden files and dotfiles appear in the listing, dimmed;
-  - mutating a system path is allowed, but only behind a **typed confirmation** — you have to type the word `CONFIRM`;
-  - `Shift+Del` performs a **permanent delete** that skips the trash and cannot be undone with `Ctrl+Z` (also typed-confirmed). In Explorer mode this shortcut is refused.
+- **Developer mode** — hidden files and dotfiles appear, dimmed; mutating a system path is allowed behind a typed `CONFIRM`; `Shift+Del` performs a permanent delete that skips the trash and cannot be undone.
 
-**Protected by default.** `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, and drive roots (`C:\`, `D:\`, …) are system paths — the rule matches the folder *and everything beneath it*, so `C:\Windows\System32\drivers` is protected too. The app's own `.claude-explorer-trash` staging folder is off-limits in **both** modes, because changing it would break pending undo. Browsing is never restricted; only mutation is.
+`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData` and drive roots are system paths, and the rule matches the folder *and everything beneath it*. The app's own trash staging folder is off-limits in **both** modes, because changing it would break pending undo. Browsing is never restricted; only mutation is.
 
 Every decision is made in the main process, not the UI, so no call site can forget to ask. This is a guardrail against mis-drags and mistaken deletes — yours or an AI's — not a security sandbox: the app runs a real shell for you on request.
 
 ## Updating
 
-**Installed from a release:** Claude Explorer checks GitHub Releases when it starts. When a new version is available it downloads in the background and asks you to restart — click **Restart now** and you're updated. (Choosing **Later** applies it the next time you quit.) No manual downloads needed.
+**Installed from a release:** Claude Explorer checks GitHub Releases on start, downloads new versions in the background, and offers to restart.
 
-**Built from source:** auto-update is disabled for local builds (they aren't tied to the release feed). To update:
+**Built from source:** auto-update is off, since local builds are not tied to the release feed. `git pull && npm install && npm run package`, then run the freshly built installer.
 
-```bash
-git pull
-npm install
-npm run package
-```
+## Platform support
 
-Then run the freshly built installer in `dist/` — it upgrades in place.
+Windows today. macOS and Linux builds are in progress — the blocker is not the interface but a layer of genuinely Windows-shaped assumptions underneath it: drive letters, the Recycle Bin handoff, and how the `claude` binary gets resolved.
 
 ## Tech stack
 
-Electron + electron-vite · React + TypeScript · [node-pty](https://github.com/microsoft/node-pty) (embedded terminal) · [@xterm/xterm](https://xtermjs.org/) · Vitest. Packaged with electron-builder (NSIS).
+Electron + electron-vite · React + TypeScript · [node-pty](https://github.com/microsoft/node-pty) · [@xterm/xterm](https://xtermjs.org/) · [Shiki](https://shiki.style) for syntax highlighting · bundled [ripgrep](https://github.com/BurntSushi/ripgrep) · Vitest + Playwright. Packaged with electron-builder (NSIS).
 
 ## License
 
