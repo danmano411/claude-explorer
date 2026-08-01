@@ -119,6 +119,23 @@ const sentTo = async (ptyId, from) => (await allWrites()).slice(from).filter((m)
 const visiblePty = () => win.evaluate(() =>
   [...document.querySelectorAll('[data-pty]')].find((el) => !el.closest('.pane[hidden]'))?.dataset.pty);
 
+/**
+ * Click through the current space's tab strip until the terminal ON SCREEN is
+ * the one asked for. By PTY and not by index: this file's tab count has grown
+ * twice, and each time a hardcoded index silently pointed at the wrong terminal
+ * — every `sentTo(...)` then reads 0 bytes on the fixed AND the unfixed build,
+ * which is a vacuously-true assertion that proves nothing (measured; see §16).
+ */
+async function selectTabByPty(ptyId, label) {
+  const n = await win.locator('.tab:not(.add)').count();
+  for (let i = 0; i < n; i++) {
+    await win.locator('.tab:not(.add)').nth(i).click();
+    await win.waitForTimeout(150);
+    if ((await visiblePty()) === ptyId) return;
+  }
+  throw new Error(`paste.mjs: could not find the ${label} tab in this space`);
+}
+
 const setClip = (t) => app.evaluate(({ clipboard }, t) => clipboard.writeText(t), t);
 const screen = () => win.$eval(`${VIS}.xterm-rows`, (el) => el.textContent);
 
@@ -809,15 +826,7 @@ console.log('\n16. KAN-82: Ctrl+Shift+1..9 (pinned) and Ctrl+Tab/Ctrl+Shift+Tab 
   // view — a vacuously-true assertion that proves nothing. Select the shell
   // tab by its PTY, not a hardcoded index this file's growing tab count would
   // silently invalidate again.)
-  async function selectShellTab() {
-    const n = await win.locator('.tab:not(.add)').count();
-    for (let i = 0; i < n; i++) {
-      await win.locator('.tab:not(.add)').nth(i).click();
-      await win.waitForTimeout(150);
-      if ((await visiblePty()) === shellPty) return;
-    }
-    throw new Error('KAN-82 §16: could not find the shell tab in Space');
-  }
+  const selectShellTab = () => selectTabByPty(shellPty, 'shell');
 
   // Pin Beta. Display order (spaces.orderSpaces: pinned run, then unpinned,
   // each run in its original relative order) becomes Beta, Space, Gamma —
@@ -973,6 +982,102 @@ console.log('\n16. KAN-82: Ctrl+Shift+1..9 (pinned) and Ctrl+Tab/Ctrl+Shift+Tab 
     check('and this press was preventDefault-ed too  [REGRESSION GUARD]',
       keys.some((k) => k.key === 'Tab' && k.prevented), JSON.stringify(keys));
   }
+}
+
+// ===========================================================================
+console.log('\n17. KAN-99: ONE right-click in a Claude tab pastes the clipboard ONCE');
+// ===========================================================================
+{
+  // SCREEN TEXT, and this is the ONE place in this file where that is the right
+  // instrument rather than the trap the header warns about. Read that header's
+  // "the ONE place their count differs is the message stream" and note that it is
+  // false for this bug: the second paste is performed by the CHILD PROCESS.
+  //
+  // The mechanism, measured end to end. Claude Code v2.1.220 sends
+  // `?9001h ?1004h ?25l ?25h ?2004h ?2031h ?1049h ?1000h ?1002h ?1003h ?1006h` —
+  // any-event mouse tracking plus SGR encoding, and note the tracking modes come
+  // only AFTER `?1049h`, which is why a short probe misses them. xterm therefore
+  // forwards our right-click to the pty as an SGR button-2 press/release, and
+  // Claude Code answers it by reading the Windows clipboard ITSELF — the same
+  // OpenClipboard/GetClipboardData path KAN-60 relies on for images. That paste
+  // never crosses `pty:write`, so every byte assertion in §5/§9/§13 stays green
+  // while the user watches the text arrive twice. §5 and §9 are exactly why this
+  // shipped: they measure the right thing for the tickets they were written for.
+  //
+  // Proven independently by writing ONLY the two mouse bytes through
+  // `window.api.ptyWrite`, with no DOM contextmenu event in play at all: nobody
+  // sent the marker as text, and Claude echoed it once anyway. The four writes
+  // one real right-click produces on the unfixed build are the ?1003h motion
+  // report, the button-2 press, the button-2 release, and our own single
+  // correctly-bracketed paste — all four correct, and the screen still wrong.
+  //
+  // The marker is never TYPED, so "a terminal echoes what you type" does not
+  // apply: a paste is the only way it can reach the screen. Escape first because
+  // §13/§14 left their own markers in Claude's input box and its border glyphs
+  // sit between wrapped rows — a short marker on a short line cannot be split.
+  if (!claudePty) skip('KAN-99: one right-click in a Claude tab pastes exactly once', 'no Claude tab was opened');
+  else {
+    await switchSpaceViaMenu('Space');
+    await selectTabByPty(claudePty, 'Claude');
+    await focusTerm();
+    await win.keyboard.press('Escape');            // Claude Code clears its input
+    await win.waitForTimeout(1200);
+
+    const MARK = `CERC${RUN}`;
+    await setClip(MARK);
+    await focusTerm();                             // also drops any selection
+    const count = async () => [...(await screen()).matchAll(new RegExp(MARK, 'g'))].length;
+    const before = await count();
+    check('KAN-99: the marker is not on Claude\'s screen before the right-click',
+      before === 0, `${before}x ${MARK} already on screen`);
+    await win.locator(`${VIS}.xterm-screen`).click({ button: 'right' });
+    await win.waitForTimeout(2500);
+    const after = await count();
+    check('KAN-99: one right-click puts the clipboard on Claude\'s screen exactly ONCE',
+      after === 1,
+      `${after}x ${MARK} on screen; the unfixed build shows 2 — ours plus Claude Code's own`);
+  }
+}
+
+// ===========================================================================
+console.log('\n18. KAN-99: under mouse tracking, our paste stands down — shell tab');
+// ===========================================================================
+{
+  // The cheap half of §17's claim, and the Claude-version-independent one: §17
+  // needs a real Claude session and would go quiet the day Claude Code changes
+  // which DECSETs it sends, while this drives the modes itself. Same seam §9
+  // uses to arm bracketed paste — the app's real `pty:data` broadcast, carrying
+  // the bytes a tracking application sends. xterm's parser cannot tell the
+  // difference, and unlike typing a DECSET at PSReadLine it cannot be undone by
+  // the line editor between arming and clicking. `?2004h` is re-sent here rather
+  // than inherited from §9 so the section stands alone: bracketed mode is what
+  // makes ESC[200~ the discriminator.
+  //
+  // It asserts the fix's CONTRACT (we do not paste when the application owns
+  // button-2) and not the user-visible defect (the text appears twice), so it
+  // earns its place only ALONGSIDE §17 — never instead of it.
+  await selectTabByPty(shellPty, 'shell');
+  const CLIP = `CE-TRACK-${RUN}`;
+  await clearLine();
+  await app.evaluate(({ BrowserWindow }, id) =>
+    BrowserWindow.getAllWindows()[0].webContents.send('pty:data', id, '\x1b[?2004h\x1b[?1000h\x1b[?1006h'), shellPty);
+  await win.waitForTimeout(400);
+  await setClip(CLIP);
+  await focusTerm();
+  const from = await mark();
+  await win.locator(`${VIS}.xterm-screen`).click({ button: 'right' });
+  await win.waitForTimeout(700);
+  const sent = await sentTo(shellPty, from);
+  const joined = sent.map((m) => m.data).join('');
+  // PRECONDITION, and it is doing real work: without it "no paste reached the
+  // pty" would be equally green if the DECSET had never taken effect, or if the
+  // click had missed the terminal entirely. The button-2 report IS the proof
+  // that xterm believes the application owns the mouse.
+  check('a right-click under mouse tracking forwards SGR button-2 to the pty  [PRECONDITION]',
+    /\x1b\[<2;\d+;\d+M/.test(joined), `${sent.length} pty:write — ${printable(joined)}`);
+  check('KAN-99: and no paste follows it — the application owns button-2',
+    !joined.includes(BRA_ON) && !joined.includes(CLIP),
+    `${sent.length} pty:write — ${printable(joined)}; the unfixed build adds ${printable(BRA_ON + CLIP + BRA_OFF)}`);
 }
 
 await close();
