@@ -209,6 +209,67 @@ describe('sanitize', () => {
       expect(sanitize(once)).toEqual(once)
     })
   })
+
+  // KAN-84/85.
+  describe('color', () => {
+    // REGRESSION GUARD, not a discriminator (same caveat the `pinned` guard
+    // above documents): the `...s` spread already carries a valid preset
+    // string through untouched, so this alone can't prove sanitizeSpaceColor
+    // is even being called. What it DOES pin down is the round trip — a
+    // colored space survives a write and a read — and it is kept alongside
+    // the coercion/absence tests below, which are what actually go red if the
+    // `color: sanitizeSpaceColor(s.color)` line is deleted.
+    it('round-trips a preset color, including through a JSON write  [REGRESSION GUARD]', () => {
+      const w = base()
+      w.spaces[0].color = 'var(--clay)'
+      const out = sanitize(w)
+      expect(out.spaces[0].color).toBe('var(--clay)')
+      expect(JSON.parse(JSON.stringify(out)).spaces[0].color).toBe('var(--clay)')
+    })
+
+    it('round-trips a custom light/dark pair', () => {
+      const w = base()
+      w.spaces[0].color = { light: '#C15F3Cff', dark: '#D2795A80' }
+      const out = sanitize(w)
+      expect(out.spaces[0].color).toEqual({ light: '#C15F3Cff', dark: '#D2795A80' })
+    })
+
+    // A pre-0.10.0 workspace.json has no such field at all, and `undefined`
+    // has to be dropped by JSON.stringify so it stays that way.
+    it('drops the key entirely for an uncolored (or pre-0.10.0) space', () => {
+      const out = sanitize(base())
+      expect(out.spaces[0].color).toBeUndefined()
+      expect('color' in JSON.parse(JSON.stringify(out)).spaces[0]).toBe(false)
+    })
+
+    // A hand-edited value outside what this app ever writes must be coerced
+    // away, not interpolated into an inline style unexamined.
+    it('coerces hand-edited garbage to absent, never rendered', () => {
+      for (const garbage of [1, {}, { light: 'var(--clay)' }, { light: 1, dark: 2 }, null, '']) {
+        const w = base()
+        // @ts-expect-error deliberately malformed, as a hand-edited file would be
+        w.spaces[0].color = garbage
+        expect(sanitize(w).spaces[0].color).toBeUndefined()
+      }
+    })
+
+    // A custom pair needs BOTH halves valid, or neither is trusted — a
+    // half-corrupt pair rendered anyway would silently lose the theme half
+    // the user never asked to lose.
+    it('rejects a custom pair with only one valid half', () => {
+      const w = base()
+      // @ts-expect-error deliberately malformed
+      w.spaces[0].color = { light: '#C15F3Cff', dark: 123 }
+      expect(sanitize(w).spaces[0].color).toBeUndefined()
+    })
+
+    it('is idempotent for a colored space — a second pass churns nothing', () => {
+      const w = base()
+      w.spaces[0].color = { light: '#C15F3Cff', dark: '#D2795A80' }
+      const once = sanitize(w)
+      expect(sanitize(once)).toEqual(once)
+    })
+  })
 })
 
 /**

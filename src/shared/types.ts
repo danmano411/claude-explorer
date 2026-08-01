@@ -317,7 +317,32 @@ export interface Space {
    * Says nothing about this space's TABS: it gates exactly one operation.
    */
   pinned?: boolean
+  /**
+   * KAN-84/85: this space's ambient wash color. Absent, not any default, for
+   * an uncolored space — same precedent as `pinned` immediately above: a
+   * pre-0.10.0 workspace.json has no such key and must load unchanged, and
+   * `JSON.stringify` drops `undefined` so an uncolored space writes no key
+   * back either. Coerced explicitly in sanitize() (src/main/workspace.ts) —
+   * never left to ride the `{...s}` spread the way `colFractions`/
+   * `rowFractions` still do; this does not add a third unvalidated field.
+   */
+  color?: SpaceColor
 }
+
+/**
+ * KAN-84/85. Two shapes share ONE render path — both resolve to the pair of
+ * inline custom properties a space's chrome sets, `--space-color-light` /
+ * `--space-color-dark` (src/shared/spacecolor.ts, src/renderer/index.css):
+ *
+ *  - PRESET: a single `var()` name string, exactly like `TabGroup.color`
+ *    (GROUP_COLORS, shared/groups.ts) — both properties get set to the SAME
+ *    name, which itself repaints under dark mode for free.
+ *  - CUSTOM (KAN-85): an explicit light/dark pair the user picked. A single
+ *    hex cannot repaint per theme, and a derived dark variant would be a
+ *    color the user never chose — so the picker asks for both explicitly and
+ *    stores exactly what it asked for.
+ */
+export type SpaceColor = string | { light: string; dark: string }
 
 /**
  * A tab as it survives a restart. `ptyId` is deliberately absent: it is a live

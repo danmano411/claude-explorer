@@ -146,6 +146,38 @@ body {
 .group-label-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-label-count { flex: none; white-space: nowrap; }
 
+/* ===== Per-space ambient wash (KAN-84/85) =====
+   `.app-colored` is applied to the root `.app` element ONLY when the active
+   space has a color (App.tsx) — never unconditionally — so an uncolored
+   space runs no color-mix() at all and its chrome stays byte-identical to
+   before this feature. (color-mix(in srgb, transparent N%, X) is NOT the
+   same paint as X: it also blends alpha, so "tint with transparent" would
+   have been a subtle regression on every uncolored space, not a no-op.)
+
+   `--space-color-light`/`--space-color-dark` are set inline on `.app` by
+   spaceColorStyle() (shared/spacecolor.ts) — a preset sets both to the SAME
+   `var()` name (which itself repaints under dark mode), a custom pair
+   (KAN-85) sets two different resolved colors. Either way this is the ONE
+   rule that picks between them per theme, same as :root's own light/dark
+   swap above.
+
+   Scope is the CHROME BAND ONLY: the tab strip (`.tabbar`, which is also
+   `.spacebar` in split view — same element) and the file pane's `.navbar`.
+   Never `.filebrowser`/`.viewer`/`.terminal` — tinting behind the file list
+   or the xterm is a readability risk and fights the paper background.
+   `--space-color` inherits from `.app` down through `.content` into a
+   FileBrowser nested many panes deep, so no prop-drilling was needed to
+   reach `.navbar` — only the two rules below actually PAINT with it.
+
+   Recipe is `.tabgroup`'s `color-mix()` above, verbatim, just mixed against
+   each element's own existing base color instead of `transparent`. */
+.app-colored { --space-color: var(--space-color-light); }
+@media (prefers-color-scheme: dark) {
+  .app-colored { --space-color: var(--space-color-dark); }
+}
+.app-colored .tabbar { background: color-mix(in srgb, var(--space-color) 14%, var(--bg-sunken)); }
+.app-colored .navbar { background: color-mix(in srgb, var(--space-color) 14%, var(--bg-panel)); }
+
 /* ===== Content region ===== */
 .content { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--bg-panel); }
 
@@ -405,6 +437,20 @@ body {
 }
 .modal-actions button.danger { background: var(--clay); border-color: var(--clay); color: #fff; }
 .modal-actions button.primary { background: var(--clay); border-color: var(--clay); color: #fff; }
+
+/* Custom space color picker (KAN-85). Same .modal shell as everything else
+   here — no fifth dialog chrome. One row per theme: a native `<input
+   type=color>` (the OS dialog supplies the hex field and full picker for
+   free — no color library) plus an alpha range, then BOTH resulting previews
+   rendered together below the rows, side by side, so the pair is judged as a
+   pair rather than one theme at a time. */
+.colorpicker { max-width: 340px; }
+.colorpicker-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.colorpicker-label { flex: none; width: 4ch; color: var(--ink-soft); font-size: 13px; }
+.colorpicker-row input[type='color'] { flex: none; width: 36px; height: 28px; padding: 2px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); cursor: pointer; }
+.colorpicker-alpha { flex: 1 1 auto; }
+.colorpicker-compare { display: flex; gap: 8px; margin: 14px 0 0 0; }
+.colorpicker-preview { flex: 1 1 0; height: 32px; border: 1px solid var(--line); border-radius: var(--radius); }
 
 /* agent spawn confirmation (KAN-41). Same .modal shell, wider — this dialog's
    whole job is showing one path legibly. */
