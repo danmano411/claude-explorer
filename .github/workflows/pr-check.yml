@@ -51,3 +51,15 @@ jobs:
       # runner: GitHub Actions sets no CLAUDE_EXPLORER_* variables.
       - name: Test
         run: npm test
+
+      # KAN-98: KAN-96 shipped a v0.10.0 draft with the renderer completely
+      # broken (#root empty, React never mounted) while tsc + the unit suite
+      # above were both green — vitest runs in node, where the bare
+      # `process.platform` that broke the renderer under contextIsolation
+      # doesn't throw. Nothing above this step ever launches the real app;
+      # this is the one thing in CI that does.
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test (renderer actually rendered)
+        run: node test/harness/smoke.mjs
