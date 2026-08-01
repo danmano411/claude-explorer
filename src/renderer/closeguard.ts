@@ -47,6 +47,16 @@
  * measure different things (a turn in flight vs. a child process), and folding
  * them into one "is it busy" would make each arm answer for a question it cannot
  * see — a Claude session mid-turn spawns no child, and a shell reports no hook.
+ *
+ * ponytail: a command TYPED BUT NOT RUN is not busy, so a tab with a half-written
+ * line at the prompt closes with no question and that line is gone. Accepted: the
+ * rule at the top of this file protects unrecoverable WORK, and an unsubmitted
+ * line is a few seconds of typing, not a running process — while prompting about
+ * it would restore exactly the always-confirm behaviour KAN-100 removed. The
+ * shell's other blind spot (a long-running *in-process* builtin such as
+ * `Start-Sleep`) is a property of the signal itself and is documented where the
+ * signal is, in src/main/pty.ts. Ceiling for both: reading the shell's current
+ * input buffer, which no pty API exposes.
  */
 
 import type { ClaudeState, PtyStatus, TabView } from '../shared/types'

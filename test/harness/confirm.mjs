@@ -375,6 +375,19 @@ console.log('\n2b. a shell at an idle prompt closes with NO dialog (KAN-100)');
     `${beforeTabs} → ${await tabCount(win)}`);
   check('…and its pty really is gone, so the silent close was a close',
     (idleId ? await ptyProbe(idleId) : 1) === 0);
+
+  // RECOVERY, for the reason stated in the `soft` comment above: on a build
+  // where this section fails, it fails by leaving a MODAL up — and a
+  // `.modal-backdrop` swallows every subsequent click, so section 3 would die on
+  // an escaping Playwright timeout and report one stack trace instead of the
+  // remaining fifty assertions. Put the app back into the state section 3
+  // expects (one files tab, no dialog) whichever way this section went.
+  if (await modals(win)) {
+    await clickCancel(win);
+    await closeX(win, 1);
+    await settleModal(win);
+    await clickDanger(win);
+  }
 }
 
 // ---------------------------------------------------------------------------
