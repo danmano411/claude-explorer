@@ -66,6 +66,41 @@ export interface Settings {
    * human gate.
    */
   agentFreeSessions: number
+  /**
+   * KAN-83. Overrides for the four space-switching shortcuts (KAN-59's
+   * Ctrl+1..9, KAN-82's pinned Ctrl+Shift+1..9 and Ctrl+Tab/Ctrl+Shift+Tab
+   * cycling). Absent — not a filled-in map — so the built-in defaults apply
+   * and an existing settings.json needs no migration (the `pinned?` /
+   * `agentSpawned?` precedent); each of the four keys is independently
+   * optional for the same reason, so rebinding one action need not restate
+   * the other three.
+   *
+   * The switch actions store only a modifier set: the space NUMBER a press
+   * selects is read off the physical digit key at match time
+   * (`spaceIndex`/`pinnedSpaceIndex` in `renderer/keys.ts`), never off this
+   * map. The cycle actions store a modifier set AND a key, because there is
+   * no digit to imply it — Tab itself is the configurable part.
+   *
+   * Shaped exactly like `renderer/keys.ts`'s `Mods`/`KeyBinding` but NOT
+   * imported from there: this ticket touches only this interface in this
+   * file, so the shape is restated structurally rather than importing a
+   * renderer type into a shared one. TS's structural typing is what makes a
+   * value round-trip between the two without any conversion — see
+   * `renderer/keys.ts`'s `resolveSpaceKeybinds` and `main/settings.ts`'s
+   * `normalizeSpaceKeybinds` for the two ends of that round trip.
+   *
+   * Normalized on read AND write like `agentFreeSessions` above
+   * (`main/settings.ts`): a field that is missing, wrongly shaped, or
+   * collides with another of these four falls back to ITS OWN default
+   * rather than leaving that one action — or a sibling it collided with —
+   * unreachable.
+   */
+  spaceKeybinds?: {
+    switchUnpinned?: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }
+    switchPinned?: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }
+    cycleNext?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
+    cyclePrev?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
+  }
 }
 
 /**

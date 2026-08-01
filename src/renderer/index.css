@@ -390,6 +390,13 @@ body {
 .modal {
   background: var(--bg-panel); border: 1px solid var(--line); box-shadow: 4px 4px 0 var(--line);
   padding: 20px 22px; max-width: 380px; font-family: var(--font-serif); font-size: 14px; color: var(--ink);
+  /* KAN-83: the Keybinds section is the first thing to make Settings tall
+     enough to matter — without this, the window growing no taller than the
+     content pushed Save/Cancel below the fold with no way to reach them.
+     `max-height`, not a fixed one, so every OTHER modal (delete confirm,
+     spawn confirm) that already fits keeps its exact current size. */
+  max-height: 85vh;
+  overflow-y: auto;
 }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .modal-actions button {
@@ -525,6 +532,24 @@ body {
 .settings-hint { font-size: 12px; color: var(--ink-soft); }
 .settings-hint code { background: var(--bg-panel); padding: 0 3px; border-radius: 3px; }
 .settings-checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--ink-soft); }
+
+/* KAN-83. The first sectioned area in what was a flat field list — KAN-77's
+   Notifications section follows this same `<h3 class="settings-section">` +
+   field-group shape rather than inventing a second one. */
+.settings-section {
+  margin: 20px 0 8px; padding-top: 14px; border-top: 1px solid var(--line);
+  font-family: var(--font-serif); font-size: 13px; font-weight: bold; color: var(--ink);
+}
+.keybind-row { display: flex; align-items: center; gap: 8px; }
+.keybind-row code {
+  background: var(--bg-panel); padding: 2px 6px; border-radius: var(--radius); font-family: var(--font-mono);
+}
+.keybind-row button {
+  font-family: var(--font-serif); font-size: 12px; padding: 3px 10px; border-radius: var(--radius);
+  cursor: pointer; border: 1px solid var(--line); background: var(--bg-sunken); color: var(--ink);
+}
+.keybind-row button.recording { background: var(--clay); border-color: var(--clay); color: #fff; }
+.keybind-warning { color: var(--clay); }
 
 /* Explorer / Developer mode toggle (status bar) */
 .mode-toggle {

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { isTextBox, isTypingTarget, pinnedSpaceIndex, spaceCycle, spaceIndex } from '../src/renderer/keys'
+import {
+  DEFAULT_SPACE_KEYBINDS, findSpaceBindingConflict, isTextBox, isTypingTarget, knownAppShortcut,
+  pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex, type SpaceKeybinds,
+} from '../src/renderer/keys'
 
 /**
  * `KeyboardEvent` fields these predicates read, structurally — vitest here
@@ -100,5 +103,105 @@ describe('isTextBox / isTypingTarget', () => {
   it('isTypingTarget is true for both INPUT and TEXTAREA', () => {
     expect(isTypingTarget({ tagName: 'INPUT' } as unknown as EventTarget)).toBe(true)
     expect(isTypingTarget({ tagName: 'TEXTAREA' } as unknown as EventTarget)).toBe(true)
+  })
+})
+
+// KAN-83. `spaceIndex`/`pinnedSpaceIndex`/`spaceCycle` used to hardcode their
+// chord; these prove the parameter actually REPLACES it rather than merely
+// widening the match — the surest way a half-done rebind ships is the new
+// chord working while the old one keeps firing too.
+describe('KAN-83: customizable Mods/KeyBinding parameters', () => {
+  it('spaceIndex matches a rebound Mods and no longer matches the default Ctrl chord', () => {
+    const rebound = { alt: true }
+    expect(spaceIndex(key('3', 'Digit3', { alt: true }), rebound)).toBe(2)
+    expect(spaceIndex(key('3', 'Digit3', { ctrl: true }), rebound)).toBeNull()
+  })
+
+  it('pinnedSpaceIndex matches a rebound Mods and no longer matches the default Ctrl+Shift chord', () => {
+    const rebound = { alt: true, shift: true }
+    expect(pinnedSpaceIndex(key('#', 'Digit3', { alt: true, shift: true }), rebound)).toBe(2)
+    expect(pinnedSpaceIndex(key('#', 'Digit3', { ctrl: true, shift: true }), rebound)).toBeNull()
+  })
+
+  it('spaceCycle matches a rebound key entirely off Tab, independently for next/prev', () => {
+    const next = { mods: { ctrl: true }, key: ']' }
+    const prev = { mods: { ctrl: true }, key: '[' }
+    expect(spaceCycle(key(']', 'BracketRight', { ctrl: true }), next, prev)).toBe(1)
+    expect(spaceCycle(key('[', 'BracketLeft', { ctrl: true }), next, prev)).toBe(-1)
+    // The old Tab chord is dead once rebound — a half-fix would leave it live.
+    expect(spaceCycle(key('Tab', 'Tab', { ctrl: true }), next, prev)).toBeNull()
+    expect(spaceCycle(key('Tab', 'Tab', { ctrl: true, shift: true }), next, prev)).toBeNull()
+  })
+
+  it('every function still falls back to the historical default with no argument', () => {
+    expect(spaceIndex(key('3', 'Digit3', { ctrl: true }))).toBe(2)
+    expect(pinnedSpaceIndex(key('#', 'Digit3', { ctrl: true, shift: true }))).toBe(2)
+    expect(spaceCycle(key('Tab', 'Tab', { ctrl: true }))).toBe(1)
+    expect(spaceCycle(key('Tab', 'Tab', { ctrl: true, shift: true }))).toBe(-1)
+  })
+})
+
+describe('resolveSpaceKeybinds', () => {
+  it('with nothing stored, is exactly DEFAULT_SPACE_KEYBINDS', () => {
+    expect(resolveSpaceKeybinds(undefined)).toEqual(DEFAULT_SPACE_KEYBINDS)
+  })
+
+  it('fills in only the missing fields — rebinding one action need not restate the other three', () => {
+    const resolved = resolveSpaceKeybinds({ switchUnpinned: { alt: true } })
+    expect(resolved.switchUnpinned).toEqual({ alt: true })
+    expect(resolved.switchPinned).toEqual(DEFAULT_SPACE_KEYBINDS.switchPinned)
+    expect(resolved.cycleNext).toEqual(DEFAULT_SPACE_KEYBINDS.cycleNext)
+    expect(resolved.cyclePrev).toEqual(DEFAULT_SPACE_KEYBINDS.cyclePrev)
+  })
+})
+
+describe('findSpaceBindingConflict (KAN-83 acceptance #5: refuse a duplicate)', () => {
+  it('refuses switchPinned rebinding onto switchUnpinned\'s current mods', () => {
+    const current: SpaceKeybinds = { ...DEFAULT_SPACE_KEYBINDS, switchUnpinned: { alt: true } }
+    expect(findSpaceBindingConflict('switchPinned', { alt: true }, current)).toBe('switchUnpinned')
+  })
+
+  it('does not refuse a binding that differs from every other action', () => {
+    expect(findSpaceBindingConflict('switchPinned', { alt: true }, DEFAULT_SPACE_KEYBINDS)).toBeNull()
+  })
+
+  it('refuses cyclePrev rebinding onto cycleNext\'s current mods+key', () => {
+    expect(
+      findSpaceBindingConflict('cyclePrev', { mods: { ctrl: true }, key: 'Tab' }, DEFAULT_SPACE_KEYBINDS),
+    ).toBe('cycleNext')
+  })
+
+  it('does not refuse two cycle actions that share mods but differ by key', () => {
+    const current: SpaceKeybinds = { ...DEFAULT_SPACE_KEYBINDS, cyclePrev: { mods: { ctrl: true }, key: '[' } }
+    expect(findSpaceBindingConflict('cycleNext', { mods: { ctrl: true }, key: ']' }, current)).toBeNull()
+  })
+
+  it('refuses a cycle action pointed at a digit that a switch action already claims with the same mods', () => {
+    // The edge case a fully-generic cycle rebind opens up: cycleNext has no
+    // fixed key, so nothing stops a user aiming it at '3' — which, with the
+    // same mods as switchUnpinned, is indistinguishable from Ctrl+3 at
+    // keypress time even though the two are stored in completely different
+    // shapes (Mods vs KeyBinding).
+    expect(
+      findSpaceBindingConflict('cycleNext', { mods: { ctrl: true }, key: '3' }, DEFAULT_SPACE_KEYBINDS),
+    ).toBe('switchUnpinned')
+  })
+
+  it('a cycle action on a LETTER key never conflicts with a switch action, digit or not', () => {
+    expect(
+      findSpaceBindingConflict('cycleNext', { mods: { ctrl: true }, key: 'g' }, DEFAULT_SPACE_KEYBINDS),
+    ).toBeNull()
+  })
+})
+
+describe('knownAppShortcut (KAN-83 acceptance: warn, do not block)', () => {
+  it('names Ctrl+Shift+G as the grid picker', () => {
+    expect(knownAppShortcut({ mods: { ctrl: true, shift: true }, key: 'g' })).toMatch(/grid picker/)
+  })
+  it('names Ctrl+F as Search, case-insensitively', () => {
+    expect(knownAppShortcut({ mods: { ctrl: true }, key: 'F' })).toMatch(/Search/)
+  })
+  it('is null for a chord that collides with nothing the app already owns', () => {
+    expect(knownAppShortcut({ mods: { ctrl: true, alt: true }, key: 'q' })).toBeNull()
   })
 })
