@@ -115,6 +115,17 @@ function rememberRoot(root: string): string {
 // async since KAN-89: the volume of a path is an st_dev walk on POSIX. The
 // writability probe went async with it — accessSync on a volume root is exactly
 // the dead-UNC main-thread freeze KAN-68 spent a ticket removing from git.ts.
+//
+// KAN-90 verified the POSIX shape of this rather than changing it, and the
+// result is worth writing down because it looks like a bug and is not: on macOS
+// and on most Linux boxes `volumeRootOf()` answers `/`, the W_OK probe FAILS for
+// an ordinary user, and staging falls back to userData/trash. That is the right
+// answer, not a degradation — userData sits under the home directory, which is
+// on the same volume as the files a user is deleting, so undo is still a rename.
+// An external disk is where it matters and it behaves like Windows does: the
+// climb stops at the mount point (/Volumes/… , /media/…), that IS writable, and
+// the bucket lands on the disk. The cross-volume case is covered either way,
+// because move() falls back to copy+delete on EXDEV.
 async function trashRootFor(p: string): Promise<string> {
   try {
     const root = await volumeRootOf(p)

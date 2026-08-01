@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { FileMode } from '../shared/types'
+import { isWindows } from '../shared/pathutil'
 
 export type Op = 'delete' | 'permanentDelete' | 'move' | 'copy' | 'rename' | 'mkdir' | 'newFile'
 export type PathClass = 'system' | 'driveRoot' | 'trash' | 'normal'
@@ -14,28 +15,116 @@ export type Verdict =
 export const CONFIRM_WORD = 'CONFIRM'
 export const TRASH_DIR_NAME = '.claude-explorer-trash'
 
-export const DEFAULT_SYSTEM_ROOTS = [
+/** The separator this platform's paths are made of. Taken from KAN-89's
+ *  `isWindows` rather than node's `path.sep` deliberately: `path.sep` cannot be
+ *  moved in a test, so the POSIX arms below would be unreachable and would ship
+ *  unexercised — which is the exact failure mode this ticket exists to fix. */
+const SEP = isWindows ? '\\' : '/'
+
+const WINDOWS_SYSTEM_ROOTS = [
   'C:\\Windows',
   'C:\\Program Files',
   'C:\\Program Files (x86)',
   'C:\\ProgramData',
 ]
 
-/** Lower-case, backslash-only, no trailing separator. */
+/**
+ * KAN-90. ONE POSIX list, not a darwin one and a linux one: every entry that
+ * does not belong to a platform simply does not exist there (`/System` and
+ * `/Library` are meaningless on Linux, `/boot` on macOS), so two lists would
+ * differ only in dead entries while doubling what has to stay in step.
+ *
+ * `/private/etc` is NOT decoration. On macOS `/etc` is a symlink to
+ * `/private/etc`, and gate() canonicalises through symlinks BEFORE classifying —
+ * so a delete aimed at `/etc/hosts` arrives here spelled `/private/etc/hosts`
+ * and would sail past a list containing only `/etc`. The guard's own
+ * canonicalisation is what would have defeated it. `/var` and `/tmp` are the
+ * other two macOS symlinks into `/private` and are deliberately absent for the
+ * opposite reason — see below.
+ *
+ * Deliberately NOT protected, each because protecting it would be wrong rather
+ * than merely cautious:
+ *  - `/Applications` (macOS): dragging an app out of it IS how a mac user
+ *    uninstalls software. Guarding it would break the platform's most ordinary
+ *    file-manager action.
+ *  - `/var`, `/private/var` (macOS): `$TMPDIR` is `/private/var/folders/…`, so
+ *    protecting `/var` would deny every delete inside the user's own temp
+ *    directory. Linux's `/var` is left out for symmetry; what is dangerous under
+ *    it is root-owned anyway.
+ *  - `/opt` (Linux/macOS): `/opt/homebrew` is user-installed software the user
+ *    manages, not the OS.
+ *  - `/Users`, `/home`: `C:\Users` is not on the Windows list either, and
+ *    parity beats inventing new protection on the new platforms.
+ *
+ * On modern Linux `/bin`, `/sbin` and `/lib` are symlinks into `/usr`
+ * (usrmerge), so canonicalisation folds them onto `/usr`, which is listed — the
+ * entries are kept for the distros that have not merged.
+ */
+const POSIX_SYSTEM_ROOTS = [
+  '/System',
+  '/Library',
+  '/usr',
+  '/bin',
+  '/sbin',
+  '/etc',
+  '/private/etc',
+  '/lib',
+  '/boot',
+]
+
+export const DEFAULT_SYSTEM_ROOTS = isWindows ? WINDOWS_SYSTEM_ROOTS : POSIX_SYSTEM_ROOTS
+
+/** Lower-case, one separator, no trailing separator.
+ *
+ *  Windows folds '/' onto '\'; POSIX must NOT, because a backslash is an
+ *  ordinary character in a POSIX filename and folding it would split `a\b.txt`
+ *  into two segments — which is how a file could be mistaken for the trash dir.
+ *
+ *  Lower-casing on POSIX is deliberate. macOS is case-insensitive by default, so
+ *  there it is simply correct; on case-sensitive Linux it can only ever
+ *  OVER-match (`/USR` is not `/usr`), and every over-match is a refusal on a
+ *  path no real system has, which fails safe. */
 function norm(p: string): string {
+  if (!isWindows) return p.replace(/\/+$/, '').toLowerCase() || '/'
   return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
 }
 
 /** True when `child` IS `parent` or sits beneath it. Segment-aware, so
- *  "C:\WindowsBackup" is not treated as living under "C:\Windows". */
+ *  "C:\WindowsBackup" is not treated as living under "C:\Windows" — and
+ *  "/etcetera" is not treated as living under "/etc". */
 function isUnder(child: string, parent: string): boolean {
   const c = norm(child)
   const p = norm(parent)
-  return c === p || c.startsWith(p + '\\')
+  return c === p || c.startsWith(p + SEP)
 }
 
-/** `C:`, `\\server\share`, and their `\\?\` / `\\?\UNC\` spellings. */
+/**
+ * The POSIX answer to `D:\`: the filesystem root, and the mount points where
+ * emptying the directory empties a whole disk. Both the container and the mounts
+ * inside it, because deleting `/Volumes` is as bad as deleting the disk under it.
+ *
+ *   macOS   /Volumes, /Volumes/<disk>
+ *   Linux   /mnt, /mnt/<disk>, /media, /media/<disk>,
+ *           /media/<user>/<disk>, /run/media/<user>/<disk>  (udisks, per distro)
+ *
+ * One level under /Volumes and /mnt, no deeper — `/mnt/c/Users/dan` is a folder
+ * a WSL user browses constantly, and treating it as a drive root would deny
+ * every operation in it. The two-level alternative is only for the udisks
+ * layouts, where the extra level is the user name and the disk is beneath it.
+ *
+ * ponytail: a static list of the four conventional mount containers, not a
+ * /proc/mounts or `mount` parse. classify() is pure synchronous string matching
+ * on purpose (gate() is the only thing allowed to touch the disk, behind its
+ * queue). A real mount-table lookup belongs behind volumeRootOf() the day a
+ * distro turns up that mounts removable media somewhere else.
+ */
+const POSIX_MOUNT_ROOT =
+  /^\/(?:volumes|mnt|media)(?:\/[^/]+)?$|^\/(?:media|run\/media)\/[^/]+\/[^/]+$/
+
+/** `C:`, `\\server\share`, and their `\\?\` / `\\?\UNC\` spellings — or, on
+ *  POSIX, `/` and a mount point. */
 function isDriveRoot(n: string): boolean {
+  if (!isWindows) return n === '/' || POSIX_MOUNT_ROOT.test(n)
   const s = n.replace(/^\\\\\?\\/, '').replace(/^unc\\/, '\\\\')
   return /^[a-z]:$/.test(s) || /^\\\\[^\\]+\\[^\\]+$/.test(s)
 }
@@ -44,7 +133,7 @@ export function classify(p: string, roots: string[] = DEFAULT_SYSTEM_ROOTS): Pat
   const n = norm(p)
   // Trash is checked first: it is denied in BOTH modes, so it must win over
   // any other classification that might merely require confirmation.
-  if (n.split('\\').includes(TRASH_DIR_NAME)) return 'trash'
+  if (n.split(SEP).includes(TRASH_DIR_NAME)) return 'trash'
   if (isDriveRoot(n)) return 'driveRoot'
   for (const r of roots) if (isUnder(p, r)) return 'system'
   return 'normal'
@@ -215,7 +304,9 @@ export function check(
       }
       return {
         kind: 'confirm',
-        reason: `${what}: ${p} — this can break Windows. Type ${CONFIRM_WORD} to proceed.`,
+        // "your system", not "Windows": the same sentence now appears on macOS
+        // and Linux. Nothing asserts on this string.
+        reason: `${what}: ${p} — this can break your system. Type ${CONFIRM_WORD} to proceed.`,
         typed: true,
       }
     }

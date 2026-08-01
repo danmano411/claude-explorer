@@ -30,6 +30,12 @@ vi.mock('node:child_process', () => ({
     return { on: () => {}, unref: () => {} }
   },
 }))
+// KAN-90: external.ts now imports electron's dialog, for the POSIX arms that can
+// genuinely have nowhere to open a terminal. Never reached on the Windows path
+// these tests measure — external.posix.test.ts is where it is exercised.
+vi.mock('electron', () => ({
+  dialog: { showMessageBox: () => Promise.resolve({ response: 0 }) },
+}))
 
 const { openExternalTerminal } = await import('../src/main/external')
 const { stripInheritedAppSecrets } = await import('../src/main/pty')
@@ -40,9 +46,21 @@ afterEach(() => {
   delete process.env.CLAUDE_EXPLORER_PTY_ID
 })
 
+// KAN-90 made openExternalTerminal() branch on the platform, so the branch under
+// test is named rather than inherited from whatever runner this lands on.
+function openOnWindows(path: string): void {
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+  try {
+    openExternalTerminal(path)
+  } finally {
+    Object.defineProperty(process, 'platform', real)
+  }
+}
+
 describe('KAN-67: openExternalTerminal and the root-cause scrub', () => {
   it('spawns wt.exe with no env option — the exact "inherits everything" channel the scrub closes', () => {
-    openExternalTerminal('C:\\repo')
+    openOnWindows('C:\\repo')
     expect(calls[0].file).toBe('wt.exe')
     expect('env' in calls[0].opts).toBe(false)
   })
@@ -52,7 +70,7 @@ describe('KAN-67: openExternalTerminal and the root-cause scrub', () => {
     process.env.CLAUDE_EXPLORER_PTY_ID = 'STALE-EXTERNAL-PTY'
 
     stripInheritedAppSecrets()
-    openExternalTerminal('C:\\repo')
+    openOnWindows('C:\\repo')
 
     // Unchanged by design: external.ts still passes no env override...
     expect('env' in calls[0].opts).toBe(false)

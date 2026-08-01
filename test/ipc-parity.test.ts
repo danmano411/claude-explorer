@@ -46,6 +46,9 @@ vi.mock('electron', () => ({
   },
   BrowserWindow: class {},
   clipboard: { readText: () => '' },
+  // KAN-90: external.ts imports dialog for the POSIX "no terminal emulator was
+  // found" message. Never invoked here — registering a handler does not call it.
+  dialog: { showMessageBox: vi.fn(async () => ({ response: 0 })) },
   contextBridge: {
     exposeInMainWorld: (_name: string, api: Record<string, unknown>) => {
       h.exposedApi = api

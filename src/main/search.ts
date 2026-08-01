@@ -26,9 +26,20 @@ export function resolveRg(): string | null {
   // @vscode/ripgrep 1.18 ships the binary in a per-platform optional dependency
   // (the esbuild pattern) rather than downloading it in a postinstall, so the
   // exe lives in a SIBLING package, not under @vscode/ripgrep itself.
-  const pkg = (arch: string) => `node_modules/@vscode/ripgrep-win32-${arch}/bin/rg.exe`
+  //
+  // KAN-90: which sibling is the platform's business. All four POSIX packages
+  // (@vscode/ripgrep-darwin-x64/-arm64, -linux-x64/-arm64) are already optional
+  // dependencies in the lockfile and ship `bin/rg` with no extension, so this is
+  // a name, not a new dependency. process.platform is used raw rather than
+  // KAN-89's isWindows because there are three answers here, not two.
+  const plat = process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux'
+  const exe = process.platform === 'win32' ? 'rg.exe' : 'rg'
+  const pkg = (arch: string) => `node_modules/@vscode/ripgrep-${plat}-${arch}/bin/${exe}`
+  // Both arches are probed rather than trusting process.arch: an x64 build runs
+  // under Rosetta on Apple Silicon (and under WOW64 on Windows) reporting the
+  // arch it was BUILT for, not the package npm actually installed.
   const candidates = app.isPackaged
-    ? [join(process.resourcesPath, 'rg.exe')]
+    ? [join(process.resourcesPath, exe)]
     : [
         join(app.getAppPath(), pkg('x64')),
         join(app.getAppPath(), pkg('arm64')),
