@@ -19,6 +19,7 @@ import { registerSearchHandlers } from './search.handlers'
 import { registerWorkspaceHandlers } from './workspace.handlers'
 import { registerControlHandlers } from './control.handlers'
 import { registerSpawnConfirmHandlers } from './spawnconfirm.handlers'
+import { registerNotifyHandlers } from './notify.handlers'
 import { startMcpServer, stopMcpServer, answerSpawnConfirm } from './mcp'
 import { setMcpInjection, stripInheritedAppSecrets } from './pty'
 import { hookSettings } from './claudestate'
@@ -38,6 +39,15 @@ import { CH } from '../shared/ipc'
 // deleting it here, before any handler can spawn anything, costs the
 // legitimate path nothing.
 stripInheritedAppSecrets()
+
+// KAN-79. Windows toasts need a Start Menu shortcut carrying an
+// AppUserModelID, or the toast shows up as "Electron" — wrong name, wrong
+// icon. Squirrel.Windows sets this automatically; this app packages with NSIS
+// (package.json's `build.win.target`), which does not, so it has to be set
+// here, matching the same `appId` electron-builder stamps on the NSIS
+// shortcut. Harmless (a no-op) on platforms without this concept, and cheap
+// enough to call unconditionally rather than guard on `process.platform`.
+app.setAppUserModelId('com.danma.claude-explorer')
 
 let mainWindow: BrowserWindow | null = null
 let flushed = false
@@ -303,6 +313,9 @@ app.whenReady().then(async () => {
   // prompt in front of a human is neither. The answer function comes from mcp.ts
   // (which owns the guard) and is passed in, so the glue stays a leaf.
   registerSpawnConfirmHandlers(() => mainWindow, answerSpawnConfirm)
+  // KAN-79: the main-side half of a toast click (focus the one window). See
+  // notify.handlers.ts.
+  registerNotifyHandlers(() => mainWindow)
   // Async since KAN-55 — File > Open Recent now lists each recent folder's
   // Claude sessions, and a native menu template is built ahead of the click.
   // Not awaited: the window must not wait on a session-directory scan, and

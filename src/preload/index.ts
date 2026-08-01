@@ -105,6 +105,8 @@ const api: Api = {
     ipcRenderer.on(CH.claudeState, h);
     return () => ipcRenderer.off(CH.claudeState, h);
   },
+  // --- KAN-79 toast click ---
+  notifyFocusWindow: () => ipcRenderer.send(CH.notifyFocusWindow),
 };
 
 contextBridge.exposeInMainWorld('api', api);
