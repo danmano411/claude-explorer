@@ -1,33 +1,46 @@
 import { describe, it, expect } from 'vitest'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex, spaceNeedsInput } from '../src/renderer/spacemenu'
+import { DEFAULT_SPACE_KEYBINDS } from '../src/renderer/keys'
 import type { ClaudeState } from '../src/shared/types'
 
 describe('acceleratorLabel', () => {
-  it('labels the first nine UNPINNED indices Ctrl+1..Ctrl+9 (pinned omitted or false)', () => {
-    expect(acceleratorLabel(0)).toBe('Ctrl+1')
-    expect(acceleratorLabel(8)).toBe('Ctrl+9')
-    expect(acceleratorLabel(0, false)).toBe('Ctrl+1')
+  it('labels the first nine UNPINNED indices Ctrl+1..Ctrl+9 with the DEFAULT binding', () => {
+    expect(acceleratorLabel(0, DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBe('Ctrl+1')
+    expect(acceleratorLabel(8, DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBe('Ctrl+9')
   })
 
   it('has no label past the ninth index or below zero, unpinned or pinned', () => {
-    expect(acceleratorLabel(9)).toBeNull()
-    expect(acceleratorLabel(-1)).toBeNull()
-    expect(acceleratorLabel(9, true)).toBeNull()
-    expect(acceleratorLabel(-1, true)).toBeNull()
+    expect(acceleratorLabel(9, DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBeNull()
+    expect(acceleratorLabel(-1, DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBeNull()
+    expect(acceleratorLabel(9, DEFAULT_SPACE_KEYBINDS.switchPinned)).toBeNull()
+    expect(acceleratorLabel(-1, DEFAULT_SPACE_KEYBINDS.switchPinned)).toBeNull()
   })
 
   // KAN-82: pinned spaces get Ctrl+Shift+N instead of Ctrl+N, same nine slots.
-  it('labels the first nine PINNED indices Ctrl+Shift+1..Ctrl+Shift+9', () => {
-    expect(acceleratorLabel(0, true)).toBe('Ctrl+Shift+1')
-    expect(acceleratorLabel(8, true)).toBe('Ctrl+Shift+9')
+  it('labels the first nine PINNED indices Ctrl+Shift+1..Ctrl+Shift+9 with the DEFAULT binding', () => {
+    expect(acceleratorLabel(0, DEFAULT_SPACE_KEYBINDS.switchPinned)).toBe('Ctrl+Shift+1')
+    expect(acceleratorLabel(8, DEFAULT_SPACE_KEYBINDS.switchPinned)).toBe('Ctrl+Shift+9')
   })
 
   // The index is GROUP-RELATIVE, not the row's absolute position — a pinned
   // space and an unpinned space can both legitimately be passed index 2, and
-  // must come back with DIFFERENT labels distinguished only by `pinned`.
-  it('the same index means different spaces depending on pinned — group-relative, not absolute', () => {
-    expect(acceleratorLabel(2, false)).toBe('Ctrl+3')
-    expect(acceleratorLabel(2, true)).toBe('Ctrl+Shift+3')
+  // must come back with DIFFERENT labels distinguished only by which `mods`
+  // the caller passes (SpaceMenu picks `.switchPinned`/`.switchUnpinned`).
+  it('the same index means different spaces depending on which binding is passed — group-relative, not absolute', () => {
+    expect(acceleratorLabel(2, DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBe('Ctrl+3')
+    expect(acceleratorLabel(2, DEFAULT_SPACE_KEYBINDS.switchPinned)).toBe('Ctrl+Shift+3')
+  })
+
+  // KAN-95. THE regression this ticket exists for. Every assertion above
+  // passes a DEFAULT binding, so a formatter that silently ignored its `mods`
+  // argument and just returned the old hardcoded "Ctrl+N"/"Ctrl+Shift+N"
+  // text would pass every one of them too — that is exactly the bug (the
+  // label never consulted the binding). This is the one case that can only
+  // pass if `mods` is actually read: the expected text is derived from a
+  // REBOUND chord, not the default.
+  it('reflects a REBOUND chord rather than the hardcoded default', () => {
+    expect(acceleratorLabel(2, { alt: true })).toBe('Alt+3')
+    expect(acceleratorLabel(0, { ctrl: true, alt: true })).toBe('Ctrl+Alt+1')
   })
 })
 

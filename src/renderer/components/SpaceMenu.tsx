@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { Space, SpaceColor } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
+import type { SpaceKeybinds } from '../keys'
 import { orderSpaces } from '../spaces'
 import { deleteSpaceReason, type CloseRisk } from '../closeguard'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -79,6 +80,13 @@ export interface SpaceMenuProps {
    * dropdown can tell rows apart without a stored, driftable flag per space.
    */
   needsInput: (spaceId: string) => boolean
+  /** KAN-95. The RESOLVED space keybinds (`resolveSpaceKeybinds`'s output,
+   *  same object App.tsx already feeds `spaceIndex`/`pinnedSpaceIndex`/
+   *  `spaceCycle`/Terminal) — `acceleratorLabel` formats each row's label
+   *  from `.switchUnpinned`/`.switchPinned` here instead of a hardcoded
+   *  "Ctrl+1"/"Ctrl+Shift+1", so a rebind updates the dropdown with no
+   *  restart. */
+  keybinds: SpaceKeybinds
 }
 
 /** Is this drag something a space row can accept? `getData` is blocked during
@@ -87,7 +95,7 @@ const movable = (t: DataTransfer) => t.types.includes(TAB_MIME) || t.types.inclu
 
 export function SpaceMenu({
   spaces, activeSpaceId, onSwitch, onCreate, onRename, onDelete, onTogglePin, onSetColor, tabsOf,
-  onMoveTab, onMoveGroup, needsInput,
+  onMoveTab, onMoveGroup, needsInput, keybinds,
 }: SpaceMenuProps) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -281,7 +289,7 @@ export function SpaceMenu({
               // 0..pinnedCount-1); an unpinned row's is its position minus
               // however many pinned rows precede it.
               const groupIdx = s.pinned ? i : i - pinnedCount
-              const accel = acceleratorLabel(groupIdx, s.pinned)
+              const accel = acceleratorLabel(groupIdx, s.pinned ? keybinds.switchPinned : keybinds.switchUnpinned)
               return (
                 <Fragment key={s.id}>
                   {/* KAN-81: the seam between the pinned run and the unpinned

@@ -6,6 +6,7 @@
  */
 
 import type { ClaudeState } from '../shared/types'
+import { formatMods, type Mods } from './keys'
 
 /** The minimal shape `spaceNeedsInput` needs — the `Closeable` precedent in
  *  closeguard.ts. `Tab` (renderer/tabs.ts) satisfies it structurally. */
@@ -38,25 +39,29 @@ export function spaceNeedsInput(
 
 /**
  * "Ctrl+1".."Ctrl+9" for the first nine UNPINNED items, "Ctrl+Shift+1"..
- * "Ctrl+Shift+9" for the first nine PINNED ones (KAN-82); null past the ninth
- * of either run — there is no tenth accelerator, the menu just lists the space
- * with none.
+ * "Ctrl+Shift+9" for the first nine PINNED ones (KAN-82) BY DEFAULT; null past
+ * the ninth of either run — there is no tenth accelerator, the menu just
+ * lists the space with none.
+ *
+ * KAN-95: formats from the caller's `mods` — the RESOLVED binding
+ * (`resolveSpaceKeybinds`'s output in keys.ts: `keybinds.switchUnpinned` or
+ * `.switchPinned`, whichever the row's `pinned` picks) — via the shared
+ * `formatMods`, rather than emitting a hardcoded "Ctrl"/"Ctrl+Shift"
+ * constant. So a rebind (KAN-83) is reflected here with no restart, and
+ * there is exactly one place ("+", the digit, and `formatMods`) that spells
+ * a chord — `formatMods` is also KAN-91's seam for platform symbols, so this
+ * function never has to change for that.
  *
  * `index` is GROUP-RELATIVE, not the row's absolute position in the dropdown:
  * the 1st pinned space and the 1st unpinned space both pass `0`, distinguished
- * only by `pinned`. Callers get that index for free from `spaces.orderSpaces`
- * — pinned spaces sort to the front, so a pinned row's position IS its
- * group-relative index, and an unpinned row's is its position minus however
- * many pinned rows precede it.
- *
- * ponytail: still emits the DEFAULT chord text, so a rebind (KAN-83) leaves
- * this label stale. Tracked as KAN-95 — the fix is to format from the resolved
- * binding, and it wants KAN-91's platform symbols in the same formatter rather
- * than two.
+ * only by which `mods` the caller passes. Callers get that index for free
+ * from `spaces.orderSpaces` — pinned spaces sort to the front, so a pinned
+ * row's position IS its group-relative index, and an unpinned row's is its
+ * position minus however many pinned rows precede it.
  */
-export function acceleratorLabel(index: number, pinned?: boolean): string | null {
+export function acceleratorLabel(index: number, mods: Mods): string | null {
   if (index < 0 || index >= 9) return null
-  return pinned ? `Ctrl+Shift+${index + 1}` : `Ctrl+${index + 1}`
+  return `${formatMods(mods)}+${index + 1}`
 }
 
 /**
