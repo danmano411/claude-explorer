@@ -25,8 +25,7 @@ import {
 import { closeReason, closeRisk, moveTabReason, type CloseRisk } from './closeguard';
 import type { ConfirmRequest } from './opresult';
 import type {
-  ClaudeState, ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest,
-  TabGroup,
+  ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
 import { isTextBox, spaceIndex } from './keys';
 import { usePtyStatus } from './ptystatus';
