@@ -22,7 +22,10 @@ vi.mock('electron', () => ({
 // stageInto/flush are the "test-friendly core" (no Electron path resolution
 // involved), so no node:fs/node:fs/promises mocking is needed here — real tmp
 // dir I/O, same as the happy-path tests in trash.test.ts.
-const { stageInto, flush, takePendingTrashWarn, driveRootOf } = await import('../src/main/trash')
+const { stageInto, flush, takePendingTrashWarn } = await import('../src/main/trash')
+// KAN-89: driveRootOf became ./volume's volumeRootOf, async because POSIX
+// volume identity is st_dev. Same strings on Windows.
+const { volumeRootOf } = await import('../src/main/volume')
 
 let work: string
 beforeEach(() => {
@@ -40,7 +43,7 @@ describe('KAN-32 — pending trash warning', () => {
     const records = await stageInto(join(work, '.trash'), [a, b])
     io.trashFails = true
     expect(await flush(records)).toHaveLength(2) // still kept, per D-2 — unchanged by this ticket
-    expect(takePendingTrashWarn()).toEqual({ count: 2, volume: driveRootOf(a) })
+    expect(takePendingTrashWarn()).toEqual({ count: 2, volume: await volumeRootOf(a) })
   })
 
   it('a fully successful flush leaves no pending warning', async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DirEntry, FileMode, GitStatusResult, TrashWarn } from '../../shared/types';
-import { sameDrive, winBasename, winDirname } from '../../shared/pathutil';
+import { winBasename, winDirname } from '../../shared/pathutil';
 import { emptySelection, applyClick, type Selection } from '../selection';
 import { initHistory, canBack, canForward, navigate, goBack, goForward } from '../history';
 import { renameCmd, moveCmd, copyCmd, mkdirCmd, newFileCmd, deleteCmd, OpError, type Command } from '../undo';
@@ -303,7 +303,10 @@ export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onO
   const runDrop = async (paths: string[], destFolder: string, ev: { ctrlKey: boolean; shiftKey: boolean }, forced?: 'move' | 'copy') => {
     if (paths.some((p) => app.isBusy(p)) || app.isBusy(destFolder)) { notify('That item is busy — drop refused.'); return; }
     for (const src of paths) {
-      const kind = forced ?? ((ev.ctrlKey || !sameDrive(src, destFolder)) ? 'copy' : 'move');
+      // KAN-89: the volume test is main's to answer — on POSIX it is an st_dev
+      // compare, not a string compare. Ordered so Ctrl-drag (an explicit copy)
+      // and a forced menu choice never pay for the round trip.
+      const kind = forced ?? ((ev.ctrlKey || !(await window.api.sameVolume(src, destFolder))) ? 'copy' : 'move');
       // dropping into the folder an item already lives in is a no-op for a move
       if (kind === 'move' && winDirname(src) === destFolder) continue;
       const make: CommandFactory = kind === 'copy'

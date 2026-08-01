@@ -120,6 +120,13 @@ export const CH = {
   // folds this channel into a state map must fold pty:exit in as well, or a
   // finished session sits on its last hook state forever.
   claudeState: 'claude:state', // main -> renderer event
+  // --- KAN-89: "are these two paths on the same volume?", the one path
+  // question the renderer cannot answer for itself. On Windows it is a string
+  // compare of drive letters, but on POSIX it is an st_dev compare — and
+  // src/shared is bundled into the renderer, which has no fs. So the drop
+  // handler's move-vs-copy decision comes over IPC rather than being computed
+  // in place. Read-only and stat-only: no gate, and it mutates nothing.
+  sameVolume: 'path:sameVolume',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -243,4 +250,11 @@ export interface Api {
    *
    *  'stopped' never arrives here — see the CH.claudeState comment. */
   onClaudeState(cb: (ptyId: string, state: ClaudeState) => void): () => void
+  // --- KAN-89 cross-platform volume identity.
+  /** Same volume => a drop without Ctrl is a move; different volumes => a copy.
+   *  Async because POSIX has to stat both paths (st_dev); on Windows main
+   *  answers from the strings alone and never touches the filesystem.
+   *  Answers false — copy, which keeps the source — if either path cannot be
+   *  stat'ed. */
+  sameVolume(a: string, b: string): Promise<boolean>
 }
