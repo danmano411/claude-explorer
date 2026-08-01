@@ -259,6 +259,28 @@ console.log('\n6. THE pair that matters: a REBOUND key switches AND is suppresse
   }
 }
 
+// ===========================================================================
+console.log('\n7. KAN-95: the dropdown label ITSELF reflects the rebind, not the stale default');
+// ===========================================================================
+{
+  // KAN-95's own trap: asserting the label equals a hardcoded string it was
+  // ALREADY equal to (e.g. re-checking "Ctrl+3") can never fail — it would
+  // pass against a version of `acceleratorLabel` that never reads its
+  // binding at all. The only assertion that can catch that bug is one
+  // comparing against the REBOUND chord, which switchUnpinned now is
+  // (Alt-only, saved in §5, still live with no restart).
+  //
+  // 'Gamma' is the 3rd UNPINNED space created (Space, Beta, Gamma — §6),
+  // none of them pinned, so its group-relative index is 2 — the same "3" a
+  // Ctrl+3-labelled row would have claimed before this ticket.
+  await openSpaceMenu();
+  const gammaAccel = await win.locator('.spacemenu-item', { hasText: 'Gamma' })
+    .locator('.spacemenu-accel').textContent();
+  check('the dropdown labels the 3rd unpinned space "Alt+3" — the rebound chord — not the stale default "Ctrl+3"',
+    gammaAccel === 'Alt+3', String(gammaAccel));
+  await win.locator('.spacemenu-btn').click(); // close, same toggle openSpaceMenu used to open
+}
+
 await close();
 try { fs.rmSync(PROFILE, { recursive: true, force: true }); } catch { /* %TEMP% */ }
 const failed = results.filter((r) => !r.pass);
