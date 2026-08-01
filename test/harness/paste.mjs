@@ -796,6 +796,134 @@ console.log('\n15. KAN-59 in a Claude tab: the space switches, Claude gets nothi
   }
 }
 
+// ===========================================================================
+console.log('\n16. KAN-82: Ctrl+Shift+1..9 (pinned) and Ctrl+Tab/Ctrl+Shift+Tab (cycle)');
+// ===========================================================================
+{
+  // Pin Beta. Display order (spaces.orderSpaces: pinned run, then unpinned,
+  // each run in its original relative order) becomes Beta, Space, Gamma —
+  // genuinely different from creation order (Space, Beta, Gamma), which is
+  // the arrangement this file's own §11 comments call out as the one that
+  // actually exercises group-relative indexing rather than a case a raw
+  // index would satisfy by accident.
+  await switchSpaceViaMenu('Beta');
+  await openSpaceMenu();
+  await win.locator('.spacemenu-item', { hasText: /^Pin space$/ }).click();
+  await win.waitForTimeout(300);
+  await switchSpaceViaMenu('Space');
+  await focusTerm();
+
+  {
+    const from = await mark();
+    const kfrom = await keyMark();
+    await win.keyboard.press('Control+Shift+1');
+    await win.waitForTimeout(700);
+    const sent = await sentTo(shellPty, from);
+    const keys = await keysSince(kfrom);
+    check('Ctrl+Shift+1 with a SHELL terminal focused switches to the 1st PINNED space (Beta)',
+      (await spaceName()) === 'Beta', await spaceName());
+    check('and the shell pty got no KEY byte for it — only the hidden pane\'s focus report, if any',
+      nonFocus(sent) === '',
+      `${sent.length} pty:write — ${printable(sent.map((m) => m.data).join(''))}`);
+    // NOT `k.key === '!'`: a real physical Shift+1 keypress reports the
+    // shifted symbol (which is exactly why `pinnedSpaceIndex` reads `e.code`
+    // instead of `e.key` at all — see keys.ts), but Playwright's synthesized
+    // 'Control+Shift+Digit1' does not reproduce that OS-level remap and
+    // reports the bare digit here. Either way the LAST keydown recorded is
+    // the one this press produced, so that is the one to check.
+    check('and the press was preventDefault-ed, because the app acted on it',
+      keys.length > 0 && keys[keys.length - 1].prevented, JSON.stringify(keys));
+  }
+
+  {
+    // Fewer than N PINNED spaces (only Beta is pinned) — mirrors §10's
+    // "Ctrl+4 with only three spaces" case: the byte is suppressed anyway
+    // (Terminal.tsx's arm is unconditional), App declines and does not cancel.
+    await switchSpaceViaMenu('Space');
+    await focusTerm();
+    const from = await mark();
+    const kfrom = await keyMark();
+    await win.keyboard.press('Control+Shift+2');
+    await win.waitForTimeout(600);
+    const sent = await sentTo(shellPty, from);
+    const keys = await keysSince(kfrom);
+    check('Ctrl+Shift+2 with only one pinned space changes nothing',
+      (await spaceName()) === 'Space', await spaceName());
+    check('and still puts nothing on the wire',
+      sent.length === 0, `${sent.length} pty:write — ${sent.map((m) => printable(m.data)).join(' + ')}`);
+    check('and it is NOT preventDefault-ed: the handler that declines does not cancel',
+      keys.length > 0 && !keys[keys.length - 1].prevented, JSON.stringify(keys));
+  }
+
+  // Display order is Beta(pinned, idx0), Space(idx1), Gamma(idx2).
+  {
+    // Ctrl+Tab forward, from a SHELL terminal: Space -> Gamma.
+    const from = await mark();
+    const kfrom = await keyMark();
+    await win.keyboard.press('Control+Tab');
+    await win.waitForTimeout(700);
+    const sent = await sentTo(shellPty, from);
+    const keys = await keysSince(kfrom);
+    check('Ctrl+Tab with a SHELL terminal focused cycles forward to the next space in DISPLAY order',
+      (await spaceName()) === 'Gamma', await spaceName());
+    check('and the shell pty got no KEY byte for it — no tab character, no ESC[Z',
+      nonFocus(sent) === '',
+      `${sent.length} pty:write — ${printable(sent.map((m) => m.data).join(''))}; the unfixed build sends TAB and cancels the event before App ever sees it`);
+    check('and the press was preventDefault-ed — Tab\'s native focus-move never fires',
+      keys.some((k) => k.key === 'Tab' && k.prevented), JSON.stringify(keys));
+  }
+
+  {
+    // Ctrl+Tab wraps: Gamma is LAST in display order, so forward from here is
+    // Beta, FIRST. Gamma is an empty space (no tab of its own), so there is no
+    // terminal to focus here — a neutral click on the strip, matching
+    // spaces.mjs's own "positive control" pattern, still exercises the
+    // App-level switch+wrap (there is nothing in this space to leak a byte
+    // from either way).
+    await win.click('.tabbar');
+    await win.waitForTimeout(150);
+    await win.keyboard.press('Control+Tab');
+    await win.waitForTimeout(700);
+    check('Ctrl+Tab wraps from the LAST space in display order back to the FIRST',
+      (await spaceName()) === 'Beta', await spaceName());
+  }
+
+  {
+    // Ctrl+Shift+Tab wraps the other way: Beta is FIRST, so backward from here
+    // is Gamma, LAST. Also empty — same neutral-click reasoning as above.
+    await win.click('.tabbar');
+    await win.waitForTimeout(150);
+    await win.keyboard.press('Control+Shift+Tab');
+    await win.waitForTimeout(700);
+    check('Ctrl+Shift+Tab wraps the OTHER way — from the FIRST space back to the LAST',
+      (await spaceName()) === 'Gamma', await spaceName());
+  }
+
+  {
+    // Back to a SHELL terminal for Ctrl+Shift+Tab's own two-halves proof —
+    // §11-§15 established the forward/plain-Ctrl case for digits; this is the
+    // one combination (Shift AND a non-digit key) not yet measured against a
+    // live pty. From Space (idx1), backward is Beta (idx0) — no wrap involved,
+    // isolating the "does it leak a byte" claim from the "does it wrap" claim
+    // already proved above.
+    await switchSpaceViaMenu('Space');
+    await focusTerm();
+    const from = await mark();
+    const kfrom = await keyMark();
+    await win.keyboard.press('Control+Shift+Tab');
+    await win.waitForTimeout(700);
+    const sent = await sentTo(shellPty, from);
+    const keys = await keysSince(kfrom);
+    check('Ctrl+Shift+Tab with a SHELL terminal focused cycles backward',
+      (await spaceName()) === 'Beta', await spaceName());
+    check('and the shell pty got no KEY byte for it — the unfixed build sends ESC[Z unbracketed',
+      nonFocus(sent) === '',
+      `${sent.length} pty:write — ${printable(sent.map((m) => m.data).join(''))}`);
+    check('and this press was preventDefault-ed too',
+      keys.some((k) => k.key === 'Tab' && k.prevented), JSON.stringify(keys));
+  }
+}
+
 await close();
 
 const failed = results.filter((r) => !r.pass);

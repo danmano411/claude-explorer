@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { Space } from '../../shared/types'
 import { acceleratorLabel, canDeleteSpace, nextFocusIndex } from '../spacemenu'
+import { orderSpaces } from '../spaces'
 import { deleteSpaceReason, type CloseRisk } from '../closeguard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GROUP_MIME, TAB_MIME } from '../TabBar'
@@ -90,6 +91,16 @@ export function SpaceMenu({
   // React keys and an autoFocus rename input on every matching row.
   const uniqueSpaces = spaces.filter((s, i) => spaces.findIndex((x) => x.id === s.id) === i)
   const active = uniqueSpaces.find((s) => s.id === activeSpaceId)
+
+  // KAN-81: pinned spaces first, unpinned after, each run in the ORDER THE
+  // USER ARRANGED IT — `orderSpaces` partitions, it does not sort within a
+  // run. This is also the order Ctrl+Tab cycles in (App.tsx), so "next" here
+  // always means "next" visually. `pinnedCount` doubles as the split point
+  // (pinned rows sort to indices `0..pinnedCount-1`) and as the group-relative
+  // accelerator index for an unpinned row (`i - pinnedCount`) — see the
+  // render loop below.
+  const ordered = orderSpaces(uniqueSpaces)
+  const pinnedCount = ordered.filter((s) => s.pinned).length
 
   const close = () => {
     setOpen(false)
@@ -231,51 +242,76 @@ export function SpaceMenu({
       {open && (
         <div className="spacemenu-dropdown" onMouseDown={onDropdownMouseDown}>
           <ul className="spacemenu-list">
-            {uniqueSpaces.map((s, i) => (
-              <li key={s.id}>
-                {renaming && s.id === activeSpaceId ? (
-                  <input
-                    ref={(el) => registerItem(el)}
-                    className="spacemenu-rename"
-                    autoFocus
-                    value={renameDraft}
-                    onChange={(e) => setRenameDraft(e.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-                      if (e.key === 'Escape') { e.preventDefault(); close() }
-                    }}
-                  />
-                ) : (
-                  <button
-                    ref={(el) => registerItem(el)}
-                    className={s.id === activeSpaceId ? 'spacemenu-item active' : 'spacemenu-item'}
-                    onClick={() => { onSwitch(s.id); close() }}
-                    // KAN-66: the row is the drop target. Only the drop is
-                    // handled here — the container above already accepts the
-                    // dragover for the whole menu, so a row inherits it and the
-                    // highlight it gives is the button's own `:hover`.
-                    //
-                    // Note what does NOT happen: `onSwitch`. Dropping a tab into
-                    // another space is not a request to go and look at it.
-                    onDrop={(e) => {
-                      const tabId = e.dataTransfer.getData(TAB_MIME)
-                      const groupId = e.dataTransfer.getData(GROUP_MIME)
-                      if (!tabId && !groupId) return
-                      e.preventDefault()
-                      e.stopPropagation()
-                      if (tabId) onMoveTab(tabId, s.id)
-                      else onMoveGroup(groupId, s.id)
-                      close()
-                    }}
-                  >
-                    <span className="spacemenu-check">{s.id === activeSpaceId ? '✓' : ''}</span>
-                    <span className="spacemenu-item-name" title={s.name}>{s.name}</span>
-                    {acceleratorLabel(i) && <span className="spacemenu-accel">{acceleratorLabel(i)}</span>}
-                  </button>
-                )}
-              </li>
-            ))}
+            {ordered.map((s, i) => {
+              // Group-relative: a pinned row's position IN THE ORDERED LIST
+              // already IS its index within the pinned run (pinned rows fill
+              // 0..pinnedCount-1); an unpinned row's is its position minus
+              // however many pinned rows precede it.
+              const groupIdx = s.pinned ? i : i - pinnedCount
+              const accel = acceleratorLabel(groupIdx, s.pinned)
+              return (
+                <Fragment key={s.id}>
+                  {/* KAN-81: the seam between the pinned run and the unpinned
+                      run — only when BOTH are non-empty, so zero pinned or
+                      every space pinned renders exactly as it did before this
+                      ticket (no stray line). */}
+                  {i === pinnedCount && pinnedCount > 0 && pinnedCount < ordered.length && (
+                    <li className="spacemenu-sep" role="separator" />
+                  )}
+                  <li>
+                    {renaming && s.id === activeSpaceId ? (
+                      <input
+                        ref={(el) => registerItem(el)}
+                        className="spacemenu-rename"
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                          if (e.key === 'Escape') { e.preventDefault(); close() }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        ref={(el) => registerItem(el)}
+                        className={
+                          s.id === activeSpaceId
+                            ? `spacemenu-item active${s.pinned ? ' pinned' : ''}`
+                            : `spacemenu-item${s.pinned ? ' pinned' : ''}`
+                        }
+                        onClick={() => { onSwitch(s.id); close() }}
+                        // KAN-66: the row is the drop target. Only the drop is
+                        // handled here — the container above already accepts the
+                        // dragover for the whole menu, so a row inherits it and the
+                        // highlight it gives is the button's own `:hover`.
+                        //
+                        // Note what does NOT happen: `onSwitch`. Dropping a tab into
+                        // another space is not a request to go and look at it.
+                        onDrop={(e) => {
+                          const tabId = e.dataTransfer.getData(TAB_MIME)
+                          const groupId = e.dataTransfer.getData(GROUP_MIME)
+                          if (!tabId && !groupId) return
+                          e.preventDefault()
+                          e.stopPropagation()
+                          if (tabId) onMoveTab(tabId, s.id)
+                          else onMoveGroup(groupId, s.id)
+                          close()
+                        }}
+                      >
+                        <span className="spacemenu-check">{s.id === activeSpaceId ? '✓' : ''}</span>
+                        <span className="spacemenu-item-name" title={s.name}>{s.name}</span>
+                        {/* KAN-81's marker. Aria-hidden: `active`'s "✓" and the
+                            title attribute already carry the accessible name;
+                            this is a purely visual echo of `.pinned`. */}
+                        {s.pinned && <span className="spacemenu-pin" aria-hidden="true">📌</span>}
+                        {accel && <span className="spacemenu-accel">{accel}</span>}
+                      </button>
+                    )}
+                  </li>
+                </Fragment>
+              )
+            })}
           </ul>
 
           <div className="spacemenu-sep" />
