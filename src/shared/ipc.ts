@@ -15,6 +15,7 @@ import type {
   ControlRequest,
   ControlReply,
   SpawnConfirmRequest,
+  ClaudeState,
 } from './types'
 
 export const CH = {
@@ -101,6 +102,24 @@ export const CH = {
   // channel" split as menuSession above.
   spawnConfirm: 'spawn:confirm', // main -> renderer event
   spawnConfirmAnswer: 'spawn:confirm-answer',
+  // --- KAN-73: what a Claude session is actually doing, from Claude Code's own
+  // hooks. A main -> renderer EVENT, keyed by ptyId, deliberately the same
+  // shape and the same addressing as pty:data / pty:exit — it is broadcast for
+  // every ptyId and consumers filter by id, so a second subscription model does
+  // not appear next to the one Terminal.tsx and usePtyStatus already use.
+  //
+  // Keyed by ptyId and NOT by Claude session id even though the hook reports
+  // the session id, because the renderer already joins tabs to ptys and nothing
+  // else in the tree addresses a session id at runtime. main resolves
+  // session -> pty from what PtyManager recorded at spawn, which also means an
+  // id main never spawned is dropped in main rather than reaching the renderer.
+  //
+  // NEVER CARRIES 'stopped'. A dead process cannot POST its own death, so that
+  // arm of ClaudeState comes from the pty:exit event above — which is also the
+  // only signal a session with no hooks at all ever produces. Anything that
+  // folds this channel into a state map must fold pty:exit in as well, or a
+  // finished session sits on its last hook state forever.
+  claudeState: 'claude:state', // main -> renderer event
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -213,4 +232,15 @@ export interface Api {
    *  prompt an older window put up). Escape and the backdrop are a DENY, not
    *  silence — the tool is waiting, and silence costs it the full timeout. */
   spawnConfirmAnswer(token: string, allow: boolean): void
+  // --- KAN-73 session state.
+  /** Claude Code reported what the session in `ptyId` is doing. Broadcast for
+   *  every pty, like onPtyData/onPtyExit, so a consumer filters by id.
+   *
+   *  A pty that has never been heard from is UNKNOWN and must render as
+   *  unknown: no state is optimistic, and plenty of legitimate sessions never
+   *  report (started by hand in a shell tab, launched while `agentControl` was
+   *  off, or running under the user's own `disableAllHooks` / `--bare`).
+   *
+   *  'stopped' never arrives here — see the CH.claudeState comment. */
+  onClaudeState(cb: (ptyId: string, state: ClaudeState) => void): () => void
 }

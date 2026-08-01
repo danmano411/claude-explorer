@@ -9,7 +9,8 @@ import { control } from './control.handlers'
 import { ControlError } from './control'
 import { isAuthorized } from './mcpauth'
 import { canonicalizeAsync } from './policy'
-import { agentSessionCount } from './pty.handlers'
+import { HOOK_PATH, stateFromHook } from './claudestate'
+import { agentSessionCount, deliverClaudeState } from './pty.handlers'
 import { getSettings } from './settings'
 import { promptSpawnConfirm } from './spawnconfirm.handlers'
 import { createSpawnGuard } from './spawnguard'
@@ -275,6 +276,16 @@ export function startMcpServer(): Promise<{ port: number; token: string }> {
       res.writeHead(401).end()
       return
     }
+    // KAN-73's hook route sits BELOW that check and above the MCP transport, so
+    // it inherits the fail-closed rule verbatim rather than restating it: an
+    // unauthenticated local process cannot forge a session state for the same
+    // reason it cannot call a tool. Its own route because it is not JSON-RPC —
+    // Claude Code POSTs the raw hook payload — and because the reply Claude Code
+    // reads is hook output, not a tool result.
+    if (req.url === HOOK_PATH) {
+      hookRequest(req, res)
+      return
+    }
     serve(req, res).catch(() => {
       // handleRequest owns the response once it has written; a throw before that
       // (or from transport setup) would otherwise leave the socket hanging and,
@@ -300,6 +311,53 @@ export function startMcpServer(): Promise<{ port: number; token: string }> {
 export function stopMcpServer(): void {
   http?.close()
   http = null
+}
+
+/**
+ * KAN-73. One session-state hook POST. Already authenticated by the caller.
+ *
+ * ALWAYS 200, whatever the payload says. This response is not an API result —
+ * Claude Code reads it as hook output, inside the user's turn, and a non-2xx or
+ * a body it dislikes is something the user sees in their session. Nothing this
+ * route can conclude ("that is not a session we spawned", "that event says
+ * nothing about state") is the session's fault or its business, so the parse
+ * failure, the unknown event and the unknown session id all answer identically.
+ * `{}` is an empty hook result and is what a live Claude Code was measured
+ * accepting; an empty body was not, so it is not what we send.
+ *
+ * ponytail: the cap discards an oversized body rather than streaming a parse.
+ * PreToolUse carries `tool_input`, so a Write of a big file is a big POST, and
+ * dropping one means one missed `working` transition on a session that is about
+ * to send another. What it buys is that a single request cannot grow main's
+ * heap without bound — the caller is authenticated, but so was the request that
+ * would OOM us. Ceiling: 4 MiB. Parse incrementally only if a real tool_input
+ * ever passes it.
+ */
+const MAX_HOOK_BODY = 4 * 1024 * 1024
+function hookRequest(req: IncomingMessage, res: ServerResponse): void {
+  let body = ''
+  let over = false
+  req.on('data', (chunk) => {
+    if (over) return
+    if (body.length + chunk.length > MAX_HOOK_BODY) {
+      over = true
+      body = ''
+      return
+    }
+    body += chunk
+  })
+  req.on('end', () => {
+    res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+    if (over) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      return
+    }
+    const t = stateFromHook(parsed)
+    if (t) deliverClaudeState(t.sessionId, t.state)
+  })
 }
 
 async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
