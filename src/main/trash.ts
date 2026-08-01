@@ -1,10 +1,11 @@
-import { rename, mkdir, readdir, readFile, writeFile, cp, rm } from 'node:fs/promises'
-import { accessSync, constants, readFileSync, writeFileSync, type Dirent } from 'node:fs'
+import { rename, mkdir, readdir, readFile, writeFile, cp, rm, access } from 'node:fs/promises'
+import { constants, readFileSync, writeFileSync, type Dirent } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { app, shell } from 'electron'
 import type { TrashRecord, TrashWarn } from '../shared/types'
-import { driveKey, uniqueName, winBasename, winDirname } from '../shared/pathutil'
+import { uniqueName, winBasename, winDirname } from '../shared/pathutil'
+import { volumeRootOf } from './volume'
 
 /** rename, with a copy+delete fallback when src and dst sit on different volumes.
  *  Staging and restoring MUST use the same move, or we can create deletes we are
@@ -83,11 +84,9 @@ export async function restore(records: TrashRecord[]): Promise<void> {
 }
 
 // Electron-facing wrappers (not unit-tested; verified at e2e).
-/** Exported for tests. "C:\" for local, "\\\\server\\share" for UNC. */
-export function driveRootOf(p: string): string {
-  const key = driveKey(p)
-  return key.startsWith('\\\\') ? key : key.toUpperCase() + '\\'
-}
+// KAN-89: driveRootOf lived here and was drive-letter arithmetic. It is now
+// volumeRootOf in ./volume — same strings on Windows, an st_dev walk to the
+// mount point on POSIX — which is what made everything below it async.
 
 // A bucket lives at the root of whichever volume the deleted file was on, so a
 // fresh process has nothing to derive that from. Record the roots we use.
@@ -113,10 +112,13 @@ function rememberRoot(root: string): string {
   return root
 }
 
-function trashRootFor(p: string): string {
+// async since KAN-89: the volume of a path is an st_dev walk on POSIX. The
+// writability probe went async with it — accessSync on a volume root is exactly
+// the dead-UNC main-thread freeze KAN-68 spent a ticket removing from git.ts.
+async function trashRootFor(p: string): Promise<string> {
   try {
-    const root = driveRootOf(p)
-    accessSync(root, constants.W_OK)
+    const root = await volumeRootOf(p)
+    await access(root, constants.W_OK)
     return rememberRoot(join(root, '.claude-explorer-trash'))
   } catch {
     // ponytail: falls back to userData when the volume root is unwritable
@@ -133,7 +135,7 @@ const live: TrashRecord[] = []
 export async function trashItems(paths: string[]): Promise<TrashRecord[]> {
   const out: TrashRecord[] = []
   try {
-    for (const p of paths) out.push(...await stageInto(trashRootFor(p), [p]))
+    for (const p of paths) out.push(...await stageInto(await trashRootFor(p), [p]))
   } catch (err) {
     // All-or-nothing: the caller reports "delete failed" and cannot carry a
     // partial record list back through OpResult, so put everything back and let
@@ -170,13 +172,14 @@ function untrack(records: TrashRecord[]): void {
 // running tally of every retry.
 let pendingTrashWarn: TrashWarn | null = null
 
-/** Pure: what to tell the user about a batch of staged items that would not
- *  go to the Recycle Bin. `volume` is the drive/share the items were
- *  originally deleted FROM (not the internal staging path) — that is what the
- *  user recognises. Omitted when the batch spans more than one volume. */
-function describeStuck(stuck: TrashRecord[]): TrashWarn | null {
+/** What to tell the user about a batch of staged items that would not go to the
+ *  Recycle Bin. `volume` is the drive/share/mount the items were originally
+ *  deleted FROM (not the internal staging path) — that is what the user
+ *  recognises. Omitted when the batch spans more than one volume.
+ *  Async since KAN-89 (volumeRootOf stats on POSIX); still pure. */
+async function describeStuck(stuck: TrashRecord[]): Promise<TrashWarn | null> {
   if (!stuck.length) return null
-  const volumes = new Set(stuck.map((r) => driveRootOf(r.original)))
+  const volumes = new Set(await Promise.all(stuck.map((r) => volumeRootOf(r.original))))
   return { count: stuck.length, volume: volumes.size === 1 ? [...volumes][0] : null }
 }
 
@@ -209,7 +212,7 @@ export async function flush(records: TrashRecord[]): Promise<TrashRecord[]> {
     await discard(bucketOf(r.staged)).catch(() => {})
   }
   untrack(done)
-  pendingTrashWarn = describeStuck(stuck)
+  pendingTrashWarn = await describeStuck(stuck)
   if (stuck.length) {
     console.warn(
       `[trash] ${stuck.length} item(s) could not reach the Recycle Bin and are still staged; the next startup sweep retries them:`,
@@ -264,7 +267,7 @@ export async function sweep(roots: string[] = knownRoots()): Promise<string[]> {
   if (recovered.length) {
     console.log(`[trash] swept ${recovered.length} orphaned item(s) to the Recycle Bin:`, recovered)
   }
-  pendingTrashWarn = describeStuck(stuck)
+  pendingTrashWarn = await describeStuck(stuck)
   return recovered
 }
 

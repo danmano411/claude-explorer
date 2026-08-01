@@ -1,8 +1,30 @@
 import { describe, it, expect } from 'vitest'
 import {
-  DEFAULT_SPACE_KEYBINDS, findSpaceBindingConflict, isTextBox, isTypingTarget, knownAppShortcut,
+  DEFAULT_SPACE_KEYBINDS, findSpaceBindingConflict, formatMods, isTextBox, isTypingTarget, knownAppShortcut,
   pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex, type SpaceKeybinds,
 } from '../src/renderer/keys'
+
+// KAN-95: the shared formatter `acceleratorLabel` (spacemenu.ts) now builds
+// its text from, rather than hand-writing a second copy of the same chord
+// text — the trap this ticket exists to prevent.
+describe('formatMods', () => {
+  it('formats the two default space-switch bindings exactly as the old hardcoded text did', () => {
+    expect(formatMods(DEFAULT_SPACE_KEYBINDS.switchUnpinned)).toBe('Ctrl')
+    expect(formatMods(DEFAULT_SPACE_KEYBINDS.switchPinned)).toBe('Ctrl+Shift')
+  })
+
+  it('orders multiple modifiers Ctrl, Shift, Alt, Meta regardless of the shape\'s own key order', () => {
+    expect(formatMods({ meta: true, alt: true, shift: true, ctrl: true })).toBe('Ctrl+Shift+Alt+Meta')
+  })
+
+  it('renders a single non-Ctrl modifier — the rebind case this ticket is actually about', () => {
+    expect(formatMods({ alt: true })).toBe('Alt')
+  })
+
+  it('is empty for no modifiers at all', () => {
+    expect(formatMods({})).toBe('')
+  })
+})
 
 /**
  * `KeyboardEvent` fields these predicates read, structurally — vitest here

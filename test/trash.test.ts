@@ -23,8 +23,12 @@ vi.mock('electron', () => ({
   },
 }))
 
-// accessSync always fails => trashRootFor takes its userData fallback, so
-// trashItems tests stage into a temp dir instead of the real C:\ root.
+// The writability probe always fails => trashRootFor takes its userData
+// fallback, so trashItems tests stage into a temp dir instead of the real C:\
+// root. KAN-89 moved that probe from fs.accessSync to fs/promises.access (a
+// sync one on a volume root is the dead-UNC freeze KAN-68 removed elsewhere);
+// both are stubbed so the redirect cannot quietly stop working. The "stages
+// under the userData fallback" assertion below is what catches it if it does.
 vi.mock('node:fs', async (orig) => {
   const real = await orig<typeof import('node:fs')>()
   return { ...real, default: real, accessSync: () => { throw errno('EACCES') } }
@@ -35,6 +39,7 @@ vi.mock('node:fs/promises', async (orig) => {
   return {
     ...real,
     default: real,
+    access: async () => { throw errno('EACCES') },
     rename: async (a: string, b: string) => {
       if (io.exdev) throw errno('EXDEV')
       return real.rename(a, b)
@@ -46,7 +51,10 @@ vi.mock('node:fs/promises', async (orig) => {
   }
 })
 
-const { stageInto, restore, driveRootOf, trashItems, flush, sweep } = await import('../src/main/trash')
+const { stageInto, restore, trashItems, flush, sweep } = await import('../src/main/trash')
+// KAN-89: driveRootOf moved out of trash.ts and became volumeRootOf, which is
+// async because POSIX volume identity is st_dev. Same strings on Windows.
+const { volumeRootOf } = await import('../src/main/volume')
 
 let work: string
 beforeEach(() => {
@@ -113,6 +121,11 @@ describe('trashItems', () => {
     expect(existsSync(a)).toBe(false)
     expect(records).toHaveLength(1)
     expect(existsSync(records[0].staged)).toBe(true)
+    // trashRootFor resolved to the userData fallback, not the real volume root.
+    // Without this the suite passes just as happily while writing into
+    // C:\.claude-explorer-trash — which is what it did if the access stub above
+    // ever stopped covering the probe trash.ts actually calls.
+    expect(records[0].staged.startsWith(work)).toBe(true)
   })
 
   it('puts already-staged items back when a later item fails', async () => {
@@ -231,14 +244,16 @@ describe('D3 — the EXDEV fallback preserves timestamps', () => {
   })
 })
 
-describe('driveRootOf', () => {
-  it('returns the drive root for a local path', () => {
-    expect(driveRootOf('C:\\Users\\dan\\f.txt')).toBe('C:\\')
+// Unchanged assertions from when this was trash.ts's driveRootOf — the point is
+// that KAN-89's platform branch returns the same strings it always did.
+describe('volumeRootOf (Windows)', () => {
+  it('returns the drive root for a local path', async () => {
+    expect(await volumeRootOf('C:\\Users\\dan\\f.txt')).toBe('C:\\')
   })
-  it('returns the share root for a UNC path', () => {
-    expect(driveRootOf('\\\\server\\share\\proj\\f.txt')).toBe('\\\\server\\share')
+  it('returns the share root for a UNC path', async () => {
+    expect(await volumeRootOf('\\\\server\\share\\proj\\f.txt')).toBe('\\\\server\\share')
   })
-  it('handles \\\\?\\ long paths', () => {
-    expect(driveRootOf('\\\\?\\C:\\deep\\f.txt')).toBe('C:\\')
+  it('handles \\\\?\\ long paths', async () => {
+    expect(await volumeRootOf('\\\\?\\C:\\deep\\f.txt')).toBe('C:\\')
   })
 })

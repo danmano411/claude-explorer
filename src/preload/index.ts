@@ -107,6 +107,8 @@ const api: Api = {
   },
   // --- KAN-79 toast click ---
   notifyFocusWindow: () => ipcRenderer.send(CH.notifyFocusWindow),
+  // --- KAN-89 volume identity ---
+  sameVolume: (a, b) => ipcRenderer.invoke(CH.sameVolume, a, b),
 };
 
 contextBridge.exposeInMainWorld('api', api);

@@ -9,5 +9,13 @@ CLAUDE.md
 .gstack/
 test/harness/*.png
 
-# Tycho's machine-local state (tally, heartbeat, turn record).
+# Tycho's machine-local state (tally, heartbeat, turn record) and config.
 .tycho/
+.tycho.toml
+*.tycho.bak
+
+# Another project's (Tycho's) local tooling — not relevant to this repo's history.
+.claude/
+
+# Scratch output written by the planning/brainstorming tooling, not curated docs.
+docs/superpowers/

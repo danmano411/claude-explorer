@@ -129,6 +129,13 @@ export const CH = {
   // main/index.ts), so the click asks main to do that one thing and switches
   // the tab itself, renderer-side, with no round trip needed for that part.
   notifyFocusWindow: 'notify:focus-window',
+  // --- KAN-89: "are these two paths on the same volume?", the one path
+  // question the renderer cannot answer for itself. On Windows it is a string
+  // compare of drive letters, but on POSIX it is an st_dev compare — and
+  // src/shared is bundled into the renderer, which has no fs. So the drop
+  // handler's move-vs-copy decision comes over IPC rather than being computed
+  // in place. Read-only and stat-only: no gate, and it mutates nothing.
+  sameVolume: 'path:sameVolume',
 } as const
 
 // invoke (renderer -> main -> Promise) signatures
@@ -257,4 +264,11 @@ export interface Api {
    *  un-minimizes/shows/focuses its one window; the renderer switches the tab
    *  itself with no reply to wait for. */
   notifyFocusWindow(): void
+  // --- KAN-89 cross-platform volume identity.
+  /** Same volume => a drop without Ctrl is a move; different volumes => a copy.
+   *  Async because POSIX has to stat both paths (st_dev); on Windows main
+   *  answers from the strings alone and never touches the filesystem.
+   *  Answers false — copy, which keeps the source — if either path cannot be
+   *  stat'ed. */
+  sameVolume(a: string, b: string): Promise<boolean>
 }

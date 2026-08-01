@@ -68,6 +68,27 @@ export interface Mods {
   meta?: boolean
 }
 
+/**
+ * KAN-95. The text a menu shows for a `Mods` — "Ctrl+Shift" for
+ * `{ ctrl: true, shift: true }`, "" for none (never actually emitted: every
+ * space action requires at least one modifier). Fixed order (Ctrl, Shift,
+ * Alt, Meta) so the same binding never prints two different ways.
+ *
+ * The seam KAN-91 (macOS `Cmd`) plugs into: swap these four literals for
+ * platform ones (⌘/⇧/⌥/⌃, `meta` becoming Cmd) behind a `process.platform`
+ * check, and every caller — today just `acceleratorLabel` in spacemenu.ts —
+ * renders correctly with no change on its end, because it formats from
+ * `Mods`, never from a hand-written chord string.
+ */
+export function formatMods(mods: Mods): string {
+  const parts: string[] = []
+  if (mods.ctrl) parts.push('Ctrl')
+  if (mods.shift) parts.push('Shift')
+  if (mods.alt) parts.push('Alt')
+  if (mods.meta) parts.push('Meta')
+  return parts.join('+')
+}
+
 /** Every modifier `mods` doesn't name must be up, not merely "don't care" —
  *  that asymmetry is the whole reason a shared helper exists at all. */
 function modsMatch(e: KeyboardEvent, mods: Mods): boolean {
@@ -123,11 +144,9 @@ export interface SpaceKeybinds {
  *  exact chords `spaceIndex`/`pinnedSpaceIndex`/`spaceCycle` matched before
  *  this ticket, so an untouched settings.json changes nothing.
  *
- *  ponytail: `spacemenu.ts`'s `acceleratorLabel` (the "Ctrl+1" text SpaceMenu's
- *  dropdown renders) still reads these as LITERALS and does not consult
- *  Settings, so a rebind leaves that label stale. Deliberately out of this
- *  ticket's scope ("space actions only", not a UI-wide sweep) — wire it to
- *  `resolveSpaceKeybinds` if a rebind's dropdown label turns out to matter. */
+ *  KAN-95: `spacemenu.ts`'s `acceleratorLabel` now formats from the resolved
+ *  binding (via `formatMods` above) rather than reading these as literals, so
+ *  a rebind no longer leaves the dropdown label stale. */
 export const DEFAULT_SPACE_KEYBINDS: SpaceKeybinds = {
   switchUnpinned: { ctrl: true },
   switchPinned: { ctrl: true, shift: true },
