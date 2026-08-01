@@ -1,6 +1,6 @@
 import { Fragment, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type { Tab } from './tabs';
-import type { PtyStatus, TabGroup } from '../shared/types';
+import type { ClaudeState, TabGroup } from '../shared/types';
 import type { CellKey, Side } from './gridlayout';
 import { useAppState, type DragPayload } from './appstate';
 import { GROUP_COLORS, moveGroupRun, reorderWithGroups, segments } from '../shared/groups';
@@ -101,7 +101,21 @@ interface Props {
   groupActions: GroupActions;
   splitActions: SplitActions;
   activeId: string;
-  status: Map<string, PtyStatus>;
+  /**
+   * KAN-73/KAN-74. Keyed by ptyId, from `useClaudeState()` (renderer/
+   * claudestate.ts) — NOT `PtyStatus`/`usePtyStatus`. The dot used to be
+   * driven by pty byte traffic, which is exactly what made it lie: a
+   * keystroke echo and a resize-triggered ConPTY repaint are both bytes, and
+   * bytes are all `PtyStatus` has. This map only ever changes on a real
+   * Claude Code hook or a real process exit (folded in inside
+   * `useClaudeState`), so typing and switching tabs cannot move the dot even
+   * in principle — there is no byte-shaped input path into it at all.
+   *
+   * Absence (`.get(ptyId)` undefined, or `t.ptyId` itself undefined for a
+   * restored-never-activated tab) renders the dormant/unknown dot — see
+   * `renderTab` below. Never defaulted here or anywhere downstream.
+   */
+  claudeState: ReadonlyMap<string, ClaudeState>;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onAdd: () => void;
@@ -147,7 +161,7 @@ interface Props {
 }
 
 export function TabBar({
-  tabs, groups, groupActions, splitActions, activeId, status, onSelect, onClose, onAdd, onReorder,
+  tabs, groups, groupActions, splitActions, activeId, claudeState, onSelect, onClose, onAdd, onReorder,
   onReorderGroup, onTogglePin, onRename, onOpenExplorer, onOpenTerminal, onOpenIde, spaceMenu,
   otherSpaces = [], onMoveTabToSpace, onMoveGroupToSpace, paneKey = null, onAdopt, onPaneGrab,
 }: Props) {
@@ -422,7 +436,20 @@ export function TabBar({
     if (springId === t.id) cls += ' spring-target';
     const isTerminal = t.view === 'terminal';
     const isClaude = isTerminal && t.terminalKind === 'claude';
-    const st = isClaude ? (status.get(t.ptyId!) ?? 'running') : null;
+    // KAN-74: NO optimistic default. `t.ptyId` is absent for a restored tab
+    // that has never been activated (no process exists at all yet), and
+    // `claudeState.get(ptyId)` is absent for one that has a process but has
+    // never reported (no hooks — agentSpawned worker, agentControl off,
+    // disableAllHooks/--bare — or simply hasn't said anything yet). Both
+    // cases fall through to `cState === undefined`, which renders the bare
+    // `.tab-status` rule below: dormant, not a guessed 'running'.
+    const cState: ClaudeState | undefined = isClaude && t.ptyId ? claudeState.get(t.ptyId) : undefined;
+    // KAN-76. Distinct from the dot's own colour — see the `.tab.needs-input`
+    // rule in index.css — because a colour swap alone is easy to miss at 8px
+    // and must not read as just another shade of "working". Derived here at
+    // render, same as the space chip/dropdown rollup in SpaceMenu.tsx: no
+    // second flag is ever stored for "this tab needs you".
+    if (cState === 'awaiting-input') cls += ' needs-input';
     return (
       <button
         key={t.id}
@@ -462,7 +489,7 @@ export function TabBar({
       >
         <span className="tab-icon">
           {isClaude
-            ? <span className={'tab-status ' + st} />
+            ? <span className={cState ? `tab-status ${cState}` : 'tab-status'} />
             : isTerminal ? '▶' : '📁'}
         </span>
         {/* Pinned = icon only: no title, no close button. KAN-57 makes that

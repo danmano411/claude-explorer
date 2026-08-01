@@ -29,6 +29,8 @@ import type {
 } from '../shared/types';
 import { isTextBox, spaceIndex } from './keys';
 import { usePtyStatus } from './ptystatus';
+import { useClaudeState } from './claudestate';
+import { spaceNeedsInput } from './spacemenu';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
@@ -91,6 +93,11 @@ export function App() {
    *  close confirm and a move confirm silently overwrite each other. */
   const [pendingMove, setPendingMove] = useState<ConfirmRequest | null>(null);
   const status = usePtyStatus();
+  // KAN-73/KAN-74/KAN-76: the ONE Claude-session-state map, shared by the
+  // dot (TabBar.tsx) and the cross-space markers (SpaceMenu.tsx) below —
+  // see the module doc in renderer/claudestate.ts for why this is a single
+  // hook rather than each consumer keeping its own subscription.
+  const claudeState = useClaudeState();
   // The pane container. SplitDividers' handles are grid items ON this element's
   // grid, so they must be its children, and the drag converts pixels to
   // fractions against its box.
@@ -1913,7 +1920,7 @@ export function App() {
     groups,
     groupActions: groupActionsFor(key),
     splitActions,
-    status,
+    claudeState,
     onSelect: selectTab,
     // Both the `×` and the context menu's Close land here (KAN-57) — never on
     // `closeTab`, which `closeNow` is now the only caller of.
@@ -1957,6 +1964,11 @@ export function App() {
           pinnedCount: members.filter((t) => t.pinned).length,
         };
       }}
+      // KAN-76: same join shape as `tabsOf` above, over `claudeState` instead
+      // of `status` — App is the only place that has both a space's tab
+      // membership and the ptyId-keyed state map to join them.
+      needsInput={(spaceId) =>
+        spaceNeedsInput(sliceOf(spaces.find((x) => x.id === spaceId)?.tabIds ?? [], tabs), claudeState)}
     />
   );
 

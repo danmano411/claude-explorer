@@ -5,6 +5,37 @@
  * resolved before by TS/Vite trying `.ts` ahead of `.tsx`.
  */
 
+import type { ClaudeState } from '../shared/types'
+
+/** The minimal shape `spaceNeedsInput` needs — the `Closeable` precedent in
+ *  closeguard.ts. `Tab` (renderer/tabs.ts) satisfies it structurally. */
+export type ClaudeMember = { terminalKind?: 'claude' | 'shell'; ptyId?: string }
+
+/**
+ * KAN-76. Does ANY tab in this space have a Claude session genuinely blocked
+ * on the user right now? Pure and meant to be called AT RENDER, never stored —
+ * see the module doc on `useClaudeState` (renderer/claudestate.ts): a second
+ * place that remembers "this space needs attention" is a second thing that can
+ * disagree with the state signal itself, and disagreeing is exactly the bug
+ * the marker must never reproduce (it has to clear the instant the session
+ * leaves `awaiting-input`, with nobody visiting the tab to notice).
+ *
+ * Keyed off `claudeState`, never `PtyStatus`: a shell tab is never "blocked
+ * awaiting input" in the sense this feature means (there is no permission
+ * dialog for a plain shell), and a Claude tab with no ptyId yet (restored,
+ * never activated) or no entry yet (no hooks — see claudestate.ts) has
+ * nothing to report either, which `.get(undefined)` / `.get(ptyId) ===
+ * 'awaiting-input'` both already refuse without a special case.
+ */
+export function spaceNeedsInput(
+  members: readonly ClaudeMember[],
+  claudeState: ReadonlyMap<string, ClaudeState>,
+): boolean {
+  return members.some(
+    (t) => t.terminalKind === 'claude' && t.ptyId !== undefined && claudeState.get(t.ptyId) === 'awaiting-input',
+  )
+}
+
 /** "Ctrl+1".."Ctrl+9" for the first nine items (index 0-8); null past that —
  *  there is no tenth accelerator, the menu just lists the space with none. */
 export function acceleratorLabel(index: number): string | null {
