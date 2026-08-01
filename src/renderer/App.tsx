@@ -26,7 +26,7 @@ import { spaceColorStyle } from '../shared/spacecolor';
 import { closeReason, closeRisk, moveTabReason, type CloseRisk } from './closeguard';
 import type { ConfirmRequest } from './opresult';
 import type {
-  ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
+  ClaudeState, ControlRequest, ControlResult, GridCell, GridLayout, Space, SpawnConfirmRequest, TabGroup,
 } from '../shared/types';
 import {
   DEFAULT_SPACE_KEYBINDS, isTextBox, pinnedSpaceIndex, resolveSpaceKeybinds, spaceCycle, spaceIndex,
@@ -35,12 +35,14 @@ import {
 import { usePtyStatus } from './ptystatus';
 import { useClaudeState } from './claudestate';
 import { spaceNeedsInput } from './spacemenu';
+import { enteredAwaitingInput, needsNotifSetup, notifyIfEnteredAwaitingInput, shouldToast, showToast } from './notify';
 import { attentionNeeded } from './attention';
 import { FileBrowser } from './components/FileBrowser';
 import { Terminal } from './components/Terminal';
 import { Viewer } from './components/Viewer';
 import { DiffView } from './components/DiffView';
 import { SettingsModal } from './components/SettingsModal';
+import { NotifSetupCard } from './components/NotifSetupCard';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { SpawnConfirm } from './components/SpawnConfirm';
 import { SpaceMenu } from './components/SpaceMenu';
@@ -79,6 +81,14 @@ export function App() {
   const [activeSpaceId, setActiveSpaceId] = useState<string>('');
   const [active, setActive] = useState<string>('');
   const [showSettings, setShowSettings] = useState(false);
+  // KAN-79. Absent `notifSetupSeen` (never DEFAULTS-filled — see that field's
+  // doc comment in shared/types.ts) is "never asked"; checked once on mount,
+  // same shape as refreshKeybinds below. Starts false so a slow settingsGet
+  // never flashes the card for a returning user.
+  const [showNotifSetup, setShowNotifSetup] = useState(false);
+  useEffect(() => {
+    void window.api.settingsGet().then((s) => setShowNotifSetup(needsNotifSetup(s)));
+  }, []);
   // KAN-83. The resolved (all four fields present) space keybinds, cached here
   // rather than re-read per keystroke — `settingsGet` is async and a keydown
   // handler has to decide synchronously, before xterm's own capture-phase
@@ -1269,6 +1279,68 @@ export function App() {
     setActive(focus);
   };
 
+  /**
+   * KAN-79. The toast click's "one legitimate focus-steal": jump to a SPECIFIC
+   * tab in a SPECIFIC space, which may not be either the space a user is
+   * currently looking at or that space's own remembered `activeTabId` (unlike
+   * `switchToSpace` above, which always lands on the latter). `goToSpace`
+   * updates `activeSpaceIdRef` synchronously before `selectTab` reads it, so
+   * calling the two back to back — reusing both exactly as every other caller
+   * already does — lands on the right tab of the right space with no new
+   * split-view-aware logic duplicated here.
+   */
+  const jumpToTab = (spaceId: string, tabId: string) => {
+    goToSpace(spaceId);
+    selectTab(tabId);
+  };
+
+  /**
+   * KAN-77/79. Chime + toast on a transition INTO 'awaiting-input' — the same
+   * trigger, gated separately (notifySound / notifyDesktop), fired off
+   * `claudeState` (renderer/claudestate.ts's single source of truth, per its
+   * own module doc — the dot, the cross-space markers and this all read ONE
+   * map rather than each keeping a second one that can silently disagree).
+   *
+   * `prevClaudeState` is a ref, not state: `applyClaudeEvent` already returns
+   * the SAME Map reference when nothing changed, so most renders bail out on
+   * one reference check with zero further work — same discipline as
+   * `usePtyStatus`/`useClaudeState` themselves.
+   *
+   * `tabVisible` is approximated as "this is the globally active tab" —
+   * ponytail: a tab visible in a non-focused SPLIT PANE of the active space
+   * (not `active` itself) still toasts under this rule. A real fix needs
+   * gridPlacement's own notion of "on screen", which nothing else in this
+   * effect touches; revisit if a split-view user reports a toast for
+   * something already on their own screen.
+   */
+  const prevClaudeState = useRef<ReadonlyMap<string, ClaudeState>>(new Map());
+  useEffect(() => {
+    const prev = prevClaudeState.current;
+    prevClaudeState.current = claudeState;
+    if (prev === claudeState) return;
+    for (const [ptyId, state] of claudeState) {
+      if (!enteredAwaitingInput(prev.get(ptyId), state)) continue;
+      const tab = tabs.find((t) => t.ptyId === ptyId);
+      if (!tab) continue;
+      const space = spaces.find((s) => s.tabIds.includes(tab.id));
+      const appFocused = document.hasFocus();
+      const tabVisible = space?.id === activeSpaceId && tab.id === active;
+      void window.api.settingsGet().then((s) => {
+        notifyIfEnteredAwaitingInput(prev.get(ptyId), state, !s.notifySound);
+        if (shouldToast({ notifyDesktop: s.notifyDesktop, appFocused, tabVisible })) {
+          showToast({
+            spaceName: space?.name ?? 'Claude Explorer',
+            folder: basename(tab.cwd),
+            onClick: () => {
+              window.api.notifyFocusWindow();
+              if (space) jumpToTab(space.id, tab.id);
+            },
+          });
+        }
+      });
+    }
+  }, [claudeState, tabs, spaces, activeSpaceId, active, jumpToTab]);
+
   // KAN-45 integration review #5: `spaces` (this render's closure) is used
   // only to mint the new space's fixed id up front — `createSpace` calls
   // `crypto.randomUUID()`, so it cannot be re-run against a fresher list
@@ -2265,6 +2337,14 @@ export function App() {
         // outcomes here would only duplicate SettingsModal's own knowledge of
         // whether it actually wrote anything.
         <SettingsModal onClose={() => { setShowSettings(false); refreshKeybinds(); }} />
+      )}
+      {showNotifSetup && (
+        <NotifSetupCard
+          onDone={(choices) => {
+            setShowNotifSetup(false);
+            void window.api.settingsSet({ ...choices, notifSetupSeen: true });
+          }}
+        />
       )}
       {pendingClose && (
         <ConfirmDialog request={pendingClose} onClose={() => setPendingClose(null)} />

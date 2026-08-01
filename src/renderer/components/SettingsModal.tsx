@@ -33,6 +33,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [agentControl, setAgentControl] = useState(true)
   const [agentFreeSessions, setAgentFreeSessions] = useState<number>(DEFAULT_AGENT_FREE_SESSIONS)
   const [keybinds, setKeybinds] = useState<SpaceKeybinds>(DEFAULT_SPACE_KEYBINDS)
+  // KAN-77/79. Mirrors whatever is actually saved (default false for all
+  // three, settings.ts's DEFAULTS) — unlike NotifSetupCard, which pre-selects
+  // notifyDesktop true as a first-run SUGGESTION, this section always shows
+  // the real persisted value, same as every other field in this file.
+  const [notifySound, setNotifySound] = useState(false)
+  const [notifyDesktop, setNotifyDesktop] = useState(false)
+  const [autoSwitchOnInput, setAutoSwitchOnInput] = useState(false)
   // KAN-83. Which of the four space actions is mid-capture, or `null` — the
   // "capture a keystroke" input the ticket asks for instead of a free-text
   // field that invites five spellings of "Ctrl+Shift+1". `keybindMsg` is the
@@ -50,6 +57,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       setAgentControl(s.agentControl)
       setAgentFreeSessions(s.agentFreeSessions)
       setKeybinds(resolveSpaceKeybinds(s.spaceKeybinds))
+      setNotifySound(s.notifySound)
+      setNotifyDesktop(s.notifyDesktop)
+      setAutoSwitchOnInput(s.autoSwitchOnInput)
       setLoaded(true)
     })
   }, [])
@@ -130,6 +140,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       agentControl,
       agentFreeSessions,
       spaceKeybinds: keybinds,
+      notifySound,
+      notifyDesktop,
+      autoSwitchOnInput,
     })
     onClose()
   }
@@ -243,6 +256,48 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           key (1-9); only the modifiers rebind. Esc cancels without changing anything.
         </p>
         {keybindMsg && <p className="settings-hint keybind-warning">{keybindMsg}</p>}
+        {/* KAN-77/79. Follows the exact section pattern KAN-83 established
+            above (an <h3 class="settings-section"> heading, then ordinary
+            rows) rather than inventing a second one. The first-run card
+            (NotifSetupCard.tsx) writes these SAME three keys — this section
+            is not a second source of truth for them, just the place to change
+            a choice made there (or never made at all). */}
+        <h3 className="settings-section">Notifications</h3>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            data-setting="notifySound"
+            checked={notifySound}
+            disabled={!loaded}
+            onChange={(e) => setNotifySound(e.target.checked)}
+          />
+          <span>Play a sound when a session needs you</span>
+        </label>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            data-setting="notifyDesktop"
+            checked={notifyDesktop}
+            disabled={!loaded}
+            onChange={(e) => setNotifyDesktop(e.target.checked)}
+          />
+          <span>Desktop notifications, even when Claude Explorer is not the active window</span>
+        </label>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            data-setting="autoSwitchOnInput"
+            checked={autoSwitchOnInput}
+            disabled={!loaded}
+            onChange={(e) => setAutoSwitchOnInput(e.target.checked)}
+          />
+          <span>Jump to the session that needs input</span>
+        </label>
+        <p className="settings-hint">
+          A session needing input marks its tab, its space, and the spaces menu regardless of any of
+          these three — they only control the sound, the Windows toast, and whether you get switched
+          to it automatically.
+        </p>
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
           {/* Saving before settingsGet resolves would write the initial state

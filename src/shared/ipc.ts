@@ -120,6 +120,15 @@ export const CH = {
   // folds this channel into a state map must fold pty:exit in as well, or a
   // finished session sits on its last hook state forever.
   claudeState: 'claude:state', // main -> renderer event
+  // --- KAN-79. Clicking a desktop toast is "the one legitimate focus-steal,
+  // because the user clicked" (the ticket's own words). The toast itself is
+  // constructed in the RENDERER (src/renderer/notify.ts's showToast) — it
+  // already has everything else the click needs (which space, which tab) —
+  // but only MAIN can reliably un-minimize and bring the OS window forward
+  // (same restore()-then-focus() shape as the second-instance handler in
+  // main/index.ts), so the click asks main to do that one thing and switches
+  // the tab itself, renderer-side, with no round trip needed for that part.
+  notifyFocusWindow: 'notify:focus-window',
   // --- KAN-78: the desktop/taskbar unread indicator. Renderer -> main, one-way,
   // ONE BOOLEAN — "does anything need attention right now" — never the
   // ClaudeState map itself and never a transition history. The renderer already
@@ -260,6 +269,11 @@ export interface Api {
    *
    *  'stopped' never arrives here — see the CH.claudeState comment. */
   onClaudeState(cb: (ptyId: string, state: ClaudeState) => void): () => void
+  // --- KAN-79 toast click.
+  /** A desktop toast was clicked. Fire-and-forget `send`, like ptyWrite: main
+   *  un-minimizes/shows/focuses its one window; the renderer switches the tab
+   *  itself with no reply to wait for. */
+  notifyFocusWindow(): void
   // --- KAN-78 desktop/taskbar unread indicator.
   /** Fire-and-forget `send`, like ptyWrite/controlReply/spawnConfirmAnswer:
    *  this IS the notification, not a request with an answer. Called by

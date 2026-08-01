@@ -13,6 +13,16 @@ const DEFAULTS: Settings = {
   // before this key existed read as `true` rather than `undefined`.
   agentControl: true,
   agentFreeSessions: DEFAULT_AGENT_FREE_SESSIONS,
+  // KAN-77/79. All three off by default — see the doc comments on these three
+  // fields in shared/types.ts for why each one specifically defaults false
+  // (notifyDesktop's "ask here" pre-selection is a NotifSetupCard presentation
+  // choice, not a second default here). Deliberately no `notifSetupSeen` key in
+  // this object at all — see that field's own doc comment for why its absence
+  // from DEFAULTS is what makes an upgrading user's settings.json (which also
+  // lacks it) read as "never asked".
+  notifySound: false,
+  notifyDesktop: false,
+  autoSwitchOnInput: false,
 }
 const file = () => join(app.getPath('userData'), 'settings.json')
 
@@ -28,19 +38,33 @@ const file = () => join(app.getPath('userData'), 'settings.json')
  * and the file is user-editable, on write so a renderer sending junk cannot
  * park it on disk for the next reader to normalize again.
  */
+// KAN-77. Same "meaningful nonsense" bar as agentFreeSessions above: a
+// hand-edited `"notifySound": "yes"` is truthy in JS but was never one of the
+// two values this field can hold, so it falls back to DEFAULT rather than
+// being read as `true` (or, worse, as `false` via some other stringly-typed
+// guess) by whatever happens to consume it next.
+const bool = (v: unknown, def: boolean): boolean => (typeof v === 'boolean' ? v : def)
+
 function normalize(s: Settings): Settings {
   const n = (AGENT_FREE_SESSION_CHOICES as readonly number[]).includes(s.agentFreeSessions)
     ? s.agentFreeSessions
     : DEFAULT_AGENT_FREE_SESSIONS
   const spaceKeybinds = normalizeSpaceKeybinds(s.spaceKeybinds)
+  const notifySound = bool(s.notifySound, DEFAULTS.notifySound)
+  const notifyDesktop = bool(s.notifyDesktop, DEFAULTS.notifyDesktop)
+  const autoSwitchOnInput = bool(s.autoSwitchOnInput, DEFAULTS.autoSwitchOnInput)
   // `spaceKeybinds` is only `=== s.spaceKeybinds` in the common case where
   // both are `undefined` (nobody has touched this yet) — otherwise
   // `normalizeSpaceKeybinds` always returns a freshly built object, so this
   // check exists to skip a needless rewrite for that common case, not to
   // detect "no change" in the customized one.
-  return n === s.agentFreeSessions && spaceKeybinds === s.spaceKeybinds
+  return (
+    n === s.agentFreeSessions && spaceKeybinds === s.spaceKeybinds &&
+    notifySound === s.notifySound && notifyDesktop === s.notifyDesktop &&
+    autoSwitchOnInput === s.autoSwitchOnInput
+  )
     ? s
-    : { ...s, agentFreeSessions: n, spaceKeybinds }
+    : { ...s, agentFreeSessions: n, spaceKeybinds, notifySound, notifyDesktop, autoSwitchOnInput }
 }
 
 type ModsLike = { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }

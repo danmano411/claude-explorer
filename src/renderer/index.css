@@ -455,6 +455,13 @@ body {
 /* agent spawn confirmation (KAN-41). Same .modal shell, wider — this dialog's
    whole job is showing one path legibly. */
 .spawn-modal { max-width: 520px; }
+
+/* KAN-79 first-run notification setup card. Same .modal shell as everything
+   else, wider than the default 380px — this is the one place the feature
+   itself gets explained in a full paragraph, not a one-line hint. */
+.notif-setup { max-width: 480px; }
+.notif-setup .settings-checkbox { align-items: flex-start; }
+.notif-setup .settings-checkbox input { margin-top: 3px; }
 .spawn-path {
   display: block; margin: 12px 0; padding: 8px 10px;
   background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius);

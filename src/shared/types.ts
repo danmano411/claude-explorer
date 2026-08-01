@@ -101,6 +101,51 @@ export interface Settings {
     cycleNext?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
     cyclePrev?: { mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }; key: string }
   }
+  /**
+   * KAN-77. A short WebAudio-synthesized chime (no bundled asset) on a Claude
+   * session's transition INTO `awaiting-input` — never on every state change,
+   * never repeatedly while one stays blocked. Default `false` ("muted by
+   * default", the ticket's own words); normalized on read AND write like
+   * `agentFreeSessions` above (settings.ts), so a hand-edited non-boolean value
+   * falls back to the default rather than being read as truthy/falsy by
+   * accident.
+   */
+  notifySound: boolean
+  /**
+   * KAN-79. A Windows toast on the same transition as `notifySound` above,
+   * even when Claude Explorer is not the active window. Default `false` — the
+   * conservative fallback for any path that never went through the first-run
+   * card (see `notifSetupSeen`): an upgrading user who somehow never sees the
+   * card gets silence, not surprise popups. The card itself pre-selects this
+   * ON when it asks (Dan's ticket marks this row "ask here", unlike the other
+   * two which are plainly "off") — that is a presentation choice in
+   * `NotifSetupCard`, not a second default living here.
+   */
+  notifyDesktop: boolean
+  /**
+   * KAN-80 owns the actual auto-switch BEHAVIOUR (jumping the active tab to a
+   * session the instant it starts needing input) — this ticket (KAN-77/79)
+   * only defines the key, because the first-run card (KAN-79) has to collect
+   * it alongside the other two. Default `false` ("off unless you want it",
+   * the ticket's own words): this is the one choice of the three that changes
+   * what the user is looking at, so it does not get to default on.
+   */
+  autoSwitchOnInput: boolean
+  /**
+   * KAN-79 show-once marker. Absent — not `false` — until the first-run
+   * notification card is dismissed once, same optional-`true` provenance
+   * shape as `pinned?: true` / `agentSpawned?: true` above: an upgrading
+   * user's existing settings.json has no such key and must read as "never
+   * asked", which is exactly what leaving this OUT of `DEFAULTS` (settings.ts)
+   * preserves — `{...DEFAULTS, ...parsed}` cannot manufacture a value for a
+   * key DEFAULTS never mentions. Deliberately its OWN field rather than
+   * inferred from whether `notifySound`/`notifyDesktop`/`autoSwitchOnInput`
+   * happen to be set: those three are individually editable from Settings →
+   * Notifications with no card ever having been seen, and inferring "seen"
+   * from any one of them would let an ordinary settings edit silently
+   * suppress the card forever.
+   */
+  notifSetupSeen?: true
 }
 
 /**
