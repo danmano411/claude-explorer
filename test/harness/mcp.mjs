@@ -451,12 +451,23 @@ console.log('\n4 — list_tabs from a Claude session running in a tab');
 // --- 5. the same question, asked from outside the app -----------------------
 console.log('\n5 — the same prompt, from a Claude started outside the app');
 {
+  // KAN-67. "Outside the app" has to be built, not assumed. This harness is
+  // routinely run FROM a Claude Explorer terminal, and then its own environment
+  // carries the PARENT app's token — a different app than the one under test,
+  // but indistinguishable from a leak if you only test for the name. Asserting
+  // `!process.env.CLAUDE_EXPLORER_MCP_TOKEN` therefore failed for a reason that
+  // had nothing to do with the app under test, and the spawn below inherited a
+  // foreign token into the very session that is supposed to have none — which
+  // would have made the two real checks unsound, not merely red.
+  const outsideEnv = { ...process.env };
+  delete outsideEnv.CLAUDE_EXPLORER_MCP_TOKEN;
+  delete outsideEnv.CLAUDE_EXPLORER_PTY_ID;
   check('this process — outside the app — holds no token',
-    !process.env.CLAUDE_EXPLORER_MCP_TOKEN, String(process.env.CLAUDE_EXPLORER_MCP_TOKEN));
+    !outsideEnv.CLAUDE_EXPLORER_MCP_TOKEN, String(outsideEnv.CLAUDE_EXPLORER_MCP_TOKEN));
 
   const out = await new Promise((resolve) => {
     const child = spawn(`claude -p "${PROMPT}"`, {
-      cwd: OUTSIDE_DIR, shell: true, env: process.env,
+      cwd: OUTSIDE_DIR, shell: true, env: outsideEnv,
     });
     let text = '';
     child.stdout.on('data', (c) => { text += c; });

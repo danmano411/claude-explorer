@@ -345,6 +345,63 @@ describe.each(BRANCHES)('KAN-41 recursion guard ($kind)', ({ mod }) => {
   })
 })
 
+/**
+ * KAN-67. launchEnv() copied the whole parent environment and filtered only
+ * INHERITED_SESSION_VARS, which did not include CLAUDE_EXPLORER_MCP_TOKEN or
+ * CLAUDE_EXPLORER_PTY_ID — Claude Explorer's OWN bearer token and pty id. So
+ * launching the app from inside one of its own Claude terminals (`npm run dev`
+ * in a Claude tab, the CLI invoked from a Claude session, a shell tab
+ * launching the packaged app) put that token in process.env for the whole
+ * process, and every pty it then spawned inherited it: a shell tab (which is
+ * documented to get neither var) and an agentSpawned worker (KAN-41's
+ * recursion guard withholds --mcp-config, but inheritance handed the token
+ * back regardless).
+ *
+ * These set the two vars directly in process.env rather than relying on
+ * whatever the test RUNNER's own parent env happens to hold, so the case is
+ * exercised deterministically no matter who launched `npm test`. The value
+ * is deliberately different from any legitimately-injected token, so a normal
+ * session receiving the STALE value instead of its own would still fail.
+ */
+describe('KAN-67: launchEnv strips this app’s own session identity', () => {
+  const STALE_TOKEN = 'STALE-INHERITED-TOKEN-xyz'
+  const STALE_PTY_ID = 'stale-inherited-pty-id'
+  const CONFIG = 'C:\\Users\\x\\AppData\\Roaming\\claude-explorer\\mcp-agent-control.json'
+  const REAL_TOKEN = 'REAL-BEARER-TOKEN-abc123'
+
+  beforeEach(() => {
+    process.env.CLAUDE_EXPLORER_MCP_TOKEN = STALE_TOKEN
+    process.env.CLAUDE_EXPLORER_PTY_ID = STALE_PTY_ID
+  })
+  afterEach(() => {
+    delete process.env.CLAUDE_EXPLORER_MCP_TOKEN
+    delete process.env.CLAUDE_EXPLORER_PTY_ID
+    EXE.setMcpInjection(null)
+  })
+
+  it('a shell tab spawned from a nested launch has neither var', () => {
+    new EXE.PtyManager().spawn({ path: 'C:\\repo', shell: true }, noop, noop)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBeUndefined()
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBeUndefined()
+  })
+
+  it('an agentSpawned session from a nested launch still has no token', () => {
+    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN })
+    new EXE.PtyManager().spawn({ path: 'C:\\repo', agentSpawned: true }, noop, noop)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBeUndefined()
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBeUndefined()
+  })
+
+  it('a normal (non-agent) session from a nested launch still receives ITS OWN token, not the stale inherited one', () => {
+    EXE.setMcpInjection({ configPath: CONFIG, token: REAL_TOKEN })
+    const id = new EXE.PtyManager().spawn({ path: 'C:\\repo' }, noop, noop)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).toBe(REAL_TOKEN)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_MCP_TOKEN).not.toBe(STALE_TOKEN)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).toBe(id)
+    expect(spawned[0].opts.env.CLAUDE_EXPLORER_PTY_ID).not.toBe(STALE_PTY_ID)
+  })
+})
+
 // KAN-39: the two ids are the only caller-influenced values that reach ARGV, and
 // a control-channel caller (KAN-40's MCP server) picks them. node-pty builds the
 // Win32 command line itself and quotes narrowly: `argsToCommandLine`
