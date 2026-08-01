@@ -228,21 +228,48 @@ export function Terminal({
     // right-click on a selection is a no-op, deliberately.
     // term.paste, not ptyWrite, so bracketing matches Ctrl+V.
     //
-    // KAN-63, decided: when the application has requested mouse tracking, a
-    // right-click puts BOTH the SGR button-2 press/release AND this paste on
-    // the wire. Windows Terminal suppresses its own paste in that case, on the
-    // grounds that the app asked for the mouse. We deliberately do not. Claude
-    // Code requests tracking and does nothing with button-2, and a Claude tab
-    // is exactly where a user wants right-click paste — matching Windows
-    // Terminal would cost the feature its main use to protect a TUI nobody
-    // here runs. Two consequences to know before changing this: `vim -c 'set
-    // mouse=a'` in a tab both moves the cursor and pastes, and because xterm
-    // forwards mouse events instead of selecting under tracking,
-    // `hasSelection()` is always false there — so the selection exception
-    // above only ever fires in a plain shell. Revisit if a real mouse TUI
-    // becomes a normal thing to run in a tab.
+    // KAN-63 decided NOT to suppress this under mouse tracking. KAN-99 reverses
+    // that: its premise was wrong, and the bug it caused shipped.
+    //
+    // Still true, and the reason the question exists at all: when the
+    // application has requested mouse tracking, a right-click puts BOTH the SGR
+    // button-2 press/release AND this paste on the wire, and Claude Code
+    // requests tracking. What KAN-63 got wrong is what happens next. It assumed
+    // Claude Code "does nothing with button-2". It does: it reads the Windows
+    // clipboard ITSELF and pastes — the same OpenClipboard/GetClipboardData path
+    // KAN-60 already relies on for images, just reached by a mouse report
+    // instead of a keystroke. So a single right-click in a Claude tab inserted
+    // the clipboard TWICE, and had done since KAN-58 shipped the feature.
+    //
+    // Why nothing caught it: that second paste is performed by the CHILD, so it
+    // is invisible at the `pty:write` seam paste.mjs was built on. Our side was
+    // never wrong — one message, one bracket pair, one mounted Terminal — and
+    // every byte assertion stayed green while the screen showed the text twice.
+    // Isolated by writing ONLY the two mouse bytes through `ptyWrite` with no
+    // DOM contextmenu event at all: the marker was never sent as text by anyone
+    // and Claude still echoed it once.
+    //
+    // So KAN-63's cost/benefit is inverted, not merely rebalanced: standing
+    // down under tracking is what makes right-click paste work ONCE in a Claude
+    // tab — the feature's main use — rather than what costs it. Matching
+    // Windows Terminal turns out to be matching Claude Code too, whose button-2
+    // model is console-like and complete: after a left-drag selection of its
+    // own, a right-click there does NOT paste (measured 0, against 1 from us on
+    // the unfixed build). Getting out of its way reproduces that exactly.
+    //
+    // Also measured false, and worth correcting because it read as a licence to
+    // ignore the exception below: `hasSelection()` is NOT always false under
+    // tracking. A plain drag gives 0 selection rects, but Shift+drag gives 3 —
+    // xterm's force-selection path is deliberately reachable under tracking. A
+    // selection CAN exist there, which is another reason the tracking check is
+    // its own guard and not folded into that one.
+    //
+    // The consequence to know before changing this is now the ordinary one:
+    // `vim -c 'set mouse=a'` in a tab moves the cursor and does not paste,
+    // which is what every other Windows terminal does.
     const el = ref.current;
     const onContextMenu = () => {
+      if (term.modes.mouseTrackingMode !== 'none') return;  // the app owns button-2
       if (term.hasSelection()) return;
       const text = window.api.clipboardReadText();
       if (text) term.paste(text);
