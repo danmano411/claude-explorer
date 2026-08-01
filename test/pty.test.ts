@@ -9,6 +9,15 @@ const spawned: { file: string; args: string[] | string; opts: any }[] = []
 // ending on its own is the OTHER site that has to forget a session (kill() is
 // the tab-closing one), and a test cannot fire an exit it was never handed.
 const exitCbs: ((e: { exitCode: number }) => void)[] = []
+// KAN-70. Real node-pty THROWS from resize() once the native ConPTY callback
+// has set its exit code — which is ~1s BEFORE it fires the JS onExit that
+// removes our handle. This flag models that gap, and nothing else can: the
+// handle has to still be in the map, so firing exitCbs would measure the wrong
+// thing (once the handle is gone, `?.` already makes resize a no-op).
+// `resizes` records the ones that got through, so the guard can be shown to be
+// a guard and not a blanket no-op — an assertion that only checks "did not
+// throw" passes just as happily against a resize() that does nothing at all.
+const ptyFake = { resizeThrows: false, resizes: [] as [number, number][] }
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[] | string, opts: any) => {
     spawned.push({ file, args, opts })
@@ -16,7 +25,11 @@ vi.mock('node-pty', () => ({
       onData: () => {},
       onExit: (cb: (e: { exitCode: number }) => void) => { exitCbs.push(cb) },
       write: () => {},
-      resize: () => {},
+      resize: (cols: number, rows: number) => {
+        // Real node-pty throws instead of resizing, so record nothing here.
+        if (ptyFake.resizeThrows) throw new Error('Cannot resize a pty that has already exited')
+        ptyFake.resizes.push([cols, rows])
+      },
       kill: () => {},
     }
   },
@@ -73,7 +86,10 @@ const BRANCHES = [
 const noop = () => {}
 // A real Claude session id — the shape of a `<uuid>.jsonl` transcript name.
 const UUID = '11111111-2222-4333-8444-555555555555'
-beforeEach(() => { spawned.length = 0; exitCbs.length = 0 })
+beforeEach(() => {
+  spawned.length = 0; exitCbs.length = 0
+  ptyFake.resizeThrows = false; ptyFake.resizes.length = 0
+})
 
 /**
  * The claude argv spawn() asked for, whichever branch built it: the array as
@@ -388,4 +404,58 @@ describe.each(BRANCHES)('spawn refuses an id that is not a Claude session id ($k
     )).toThrow(mod.PtyArgError)
     expect(spawned).toEqual([])
   })
+})
+
+/**
+ * KAN-70. A resize landing in the ~1 second after a child died froze the WHOLE
+ * app: node-pty throws, ptyResize is a synchronous `ipcMain.on` with nothing
+ * above it, and Electron's default handler for an uncaught main-process
+ * exception is a MODAL dialog whose nested message loop stops the event loop
+ * dead. Measured on the unfixed build: a tab whose child exits at spawn left
+ * main refusing HTTP for 77s+, and dragging the window across a real `/exit`
+ * left DOM and IPC calls in flight for 514s.
+ *
+ * Two ordinary ways in, so this is not a corner: resizing a pane while a
+ * session ends, and any Claude that dies within ~1s of its tab opening —
+ * deterministic, because Terminal.tsx fits on mount and again at +60ms.
+ */
+describe('KAN-70: a resize that lands after the child has exited', () => {
+  for (const { kind, mod } of BRANCHES) {
+    it(`does not throw out of PtyManager.resize — ${kind}`, () => {
+      const mgr = new mod.PtyManager()
+      const id = mgr.spawn({ path: 'C:\repo' }, noop, noop)
+
+      // The gap: node-pty's exit code is set, so resize throws, but its
+      // deferred onExit has NOT run, so the handle is still in our map.
+      ptyFake.resizeThrows = true
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        expect(() => mgr.resize(id, 80, 24)).not.toThrow()
+        // Anti-vacuity, and the reason this assertion cannot go quietly fake:
+        // without it the test would still pass if the fake never threw at all.
+        // The warn proves a throw really happened and the guard swallowed it.
+        expect(warn).toHaveBeenCalled()
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it(`still resizes a LIVE pty — the guard is not a blanket no-op — ${kind}`, () => {
+      // The over-broad fix this exists to catch: emptying resize() out, or
+      // returning early for every handle, satisfies "does not throw" perfectly.
+      // So assert the dimensions REACHED node-pty, not merely that nothing blew
+      // up — otherwise the pane silently stops tracking the window and KAN-50
+      // (xterm's grid must match what the pty was last told) breaks instead.
+      const mgr = new mod.PtyManager()
+      const id = mgr.spawn({ path: 'C:\repo' }, noop, noop)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        expect(() => mgr.resize(id, 120, 40)).not.toThrow()
+        expect(ptyFake.resizes).toEqual([[120, 40]])
+        expect(warn).not.toHaveBeenCalled() // nothing threw, so nothing to report
+      } finally {
+        warn.mockRestore()
+      }
+    })
+  }
 })

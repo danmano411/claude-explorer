@@ -286,8 +286,37 @@ export class PtyManager {
   write(id: string, data: string) {
     this.handles.get(id)?.proc.write(data)
   }
+  /** KAN-70. The try/catch is the whole bug fix, and it is not defensive
+   *  padding: node-pty THROWS `Cannot resize a pty that has already exited`
+   *  once the native ConPTY callback has set its exit code, but it defers the
+   *  JS onExit above — and therefore `handles.delete` — by its own
+   *  FLUSH_DATA_INTERVAL of 1000 ms. So for ~1 s after a child dies the handle
+   *  is still in the map and `?.` does NOT save us. Measured: resize at +60 ms
+   *  returns, at +90 ms throws, onExit fires at 1.17 s.
+   *
+   *  ptyResize is a synchronous `ipcMain.on` with nothing above it, so the
+   *  throw reached Electron's default handler, which shows a MODAL dialog —
+   *  and its nested message loop stops main's event loop dead. The whole app
+   *  freezes behind a box, while the OS still reports it responsive because it
+   *  is pumping messages. Two ordinary triggers: resizing a pane while a
+   *  session ends, and any Claude that dies within ~1 s of its tab opening
+   *  (Terminal.tsx fits on mount and again at +60 ms), which is deterministic
+   *  for a fast-failing launch.
+   *
+   *  Only resize throws after exit — write() and kill() were both checked. And
+   *  this is the manager, not the handler, because mgr.resize has exactly one
+   *  caller: guarding here cannot be routed around later. */
   resize(id: string, cols: number, rows: number) {
-    this.handles.get(id)?.proc.resize(cols, rows)
+    const h = this.handles.get(id)
+    if (!h) return
+    try {
+      h.proc.resize(cols, rows)
+    } catch (err) {
+      // Expected in the ~1 s gap and harmless — the pty is gone, the tab is
+      // about to unmount. Logged rather than swallowed so a resize failing for
+      // any OTHER reason is still visible.
+      console.warn(`pty ${id}: resize failed`, (err as Error).message)
+    }
   }
   kill(id: string) {
     this.handles.get(id)?.proc.kill()
