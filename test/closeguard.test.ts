@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { closeRisk, closeReason, deleteSpaceReason, moveTabReason, type Closeable } from '../src/renderer/closeguard'
-import type { PtyStatus } from '../src/shared/types'
+import { closeRisk, closeReason, deleteSpaceReason, moveTabReason, type Closeable, type CloseRisk } from '../src/renderer/closeguard'
+import type { ClaudeState, PtyStatus } from '../src/shared/types'
 
 const statusMap = (entries: Array<[string, PtyStatus]> = []) => new Map(entries)
 
@@ -42,6 +42,66 @@ describe('closeRisk', () => {
     const hot = statusMap([['p1', 'running']])
     expect(closeRisk({ view: 'files', ptyId: 'p1' }, hot)).toBe('none')
     expect(closeRisk({ view: 'viewer', ptyId: 'p1' }, hot)).toBe('none')
+  })
+})
+
+// KAN-75. A Claude session that finished its turn and is sitting idle at the
+// prompt reports 'waiting' on `status` (bytes cannot tell idle from mid-turn),
+// which is exactly the false positive the ticket names: closing it warned
+// "still running" when there was no turn. `claudeState`, sourced from Claude
+// Code's own hooks, is what actually answers the question.
+describe('closeRisk: an idle Claude session is not "still running" (KAN-75)', () => {
+  const claudeMap = (entries: Array<[string, ClaudeState]> = []) => new Map(entries)
+
+  it('clears a Claude tab whose session is idle at the prompt, even though the pty is still alive', () => {
+    // The pty is 'waiting' (bytes went quiet), which is precisely the signal
+    // the old code could not tell apart from a live turn.
+    const status = statusMap([['p1', 'waiting']])
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap([['p1', 'idle']]))).toBe('none')
+  })
+
+  it('still flags a Claude tab mid-turn, whether working or blocked on a permission prompt', () => {
+    const status = statusMap([['p1', 'running']])
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap([['p1', 'working']]))).toBe('claude')
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap([['p1', 'awaiting-input']]))).toBe('claude')
+  })
+
+  it('keeps today\'s behaviour for a Claude tab with no hook state at all — unknown is not idle', () => {
+    // Covers agentSpawned workers, sessions this app did not launch, and
+    // agentControl:false — none of them ever report, and none may be treated
+    // as safe to close just because nothing is known.
+    const status = statusMap([['p1', 'running']])
+    expect(closeRisk(terminal('claude', 'p1'), status)).toBe('claude')
+    expect(closeRisk(terminal('claude', 'p1'), status, claudeMap())).toBe('claude')
+  })
+
+  it('never lets claudeState leak into a shell tab\'s risk', () => {
+    const status = statusMap([['p1', 'running']])
+    expect(closeRisk(terminal('shell', 'p1'), status, claudeMap([['p1', 'idle']]))).toBe('shell')
+  })
+
+  it('a restored tab with no ptyId still never prompts, claudeState notwithstanding', () => {
+    expect(closeRisk(terminal('claude'), statusMap(), claudeMap([['p1', 'working']]))).toBe('none')
+  })
+
+  it('a batch of only idle Claude sessions needs no confirm at all', () => {
+    const risks: CloseRisk[] = [
+      closeRisk(terminal('claude', 'p1'), statusMap([['p1', 'waiting']]), claudeMap([['p1', 'idle']])),
+      closeRisk(terminal('claude', 'p2'), statusMap([['p2', 'waiting']]), claudeMap([['p2', 'idle']])),
+    ]
+    expect(risks).toEqual(['none', 'none'])
+    expect(closeReason(risks)).toBeNull()
+  })
+
+  // The ticket's own acceptance criterion: deleteSpaceReason consumes the same
+  // CloseRisk[], so a space full of idle sessions must stop over-warning too —
+  // proof that the fix lives in closeRisk and not at a call site.
+  it('a space full of idle Claude sessions gets the pre-KAN-57 wording, not a live clause', () => {
+    const risks: CloseRisk[] = [
+      closeRisk(terminal('claude', 'p1'), statusMap([['p1', 'waiting']]), claudeMap([['p1', 'idle']])),
+      closeRisk(terminal('claude', 'p2'), statusMap([['p2', 'waiting']]), claudeMap([['p2', 'idle']])),
+    ]
+    expect(deleteSpaceReason('Research', 2, risks, 0)).toBe('Delete «Research» and close its 2 tabs?')
   })
 })
 
