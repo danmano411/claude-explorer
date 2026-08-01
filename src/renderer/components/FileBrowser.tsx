@@ -387,9 +387,16 @@ export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onO
       // file's path lands on the OS clipboard (and gets pasted into Claude).
       if (!focused) return;
       const typing = isTypingTarget(e.target);
-      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
-      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
-      if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
+      // KAN-69: these three were ABOVE the `typing` guard (unlike everything
+      // below it), so Alt+Left/Alt+Right/F5 fired straight through a focused
+      // rename box — or the address bar, or the search box — and navigated the
+      // pane out from under whatever was being typed. Unlike Ctrl+F just below,
+      // nothing needs these to reach a text field, so they move behind the gate.
+      if (!typing) {
+        if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); setHistory(goBack); return; }
+        if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); setHistory(goForward); return; }
+        if (e.key === 'F5') { e.preventDefault(); refresh(); return; }
+      }
       // Above the `typing` guard on purpose: Ctrl+F must reach the search box
       // even when a field already has focus, the way every other app behaves.
       if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); setSearching(true); return; }
@@ -467,22 +474,37 @@ export function FileBrowser({ cwd, tabId, focused, onNavigate, onOpenClaude, onO
         {listError && <li className="empty">{listError}</li>}
         {shown.map((e, i) => {
           const selected = selection.indices.has(i);
+          // KAN-69: the rename `<input>` below is a DOM descendant of this row, and
+          // it only ever stops propagation for `click` (that event type alone —
+          // `dblclick`/`contextmenu`/`dragstart` are each their own DOM event type
+          // and bubble straight past a click-only guard). Gating the ROW's props
+          // on "is THIS row being renamed" closes every event type at once — the
+          // same idiom TabBar already uses for `draggable` — rather than adding
+          // another per-event stopPropagation line to the input that the next new
+          // event type would just as easily miss again.
+          const isRenamingThis = renaming?.path === e.path;
           return (
             <li
               key={e.path}
-              draggable
+              draggable={!isRenamingThis}
               className={[selected ? 'entry selected' : 'entry', dropTarget === e.path ? 'drop-target' : ''].join(' ').trim()}
               style={e.hidden ? { opacity: 0.55 } : undefined}
               onMouseDown={(ev) => { dragButton.current = ev.button; }}
               onClick={(ev) => setSelection((s) => applyClick(s, i, { ctrl: ev.ctrlKey, shift: ev.shiftKey }))}
-              onDoubleClick={() => (e.isDirectory ? nav(e.path) : onOpenFile(e.path))}
-              onContextMenu={(ev) => {
-                ev.preventDefault(); ev.stopPropagation();
-                const inSel = selection.indices.has(i);
-                if (!inSel) setSelection(applyClick(emptySelection(), i, { ctrl: false, shift: false }));
-                const paths = inSel ? selectedPaths : [e.path];
-                setMenu({ x: ev.clientX, y: ev.clientY, items: buildMenu(e, paths) });
-              }}
+              onDoubleClick={isRenamingThis ? undefined : () => (e.isDirectory ? nav(e.path) : onOpenFile(e.path))}
+              onContextMenu={isRenamingThis
+                // Swallowed, not left to bubble: the containing <ul> has its OWN
+                // onContextMenu (empty-space menu), so simply omitting this handler
+                // while renaming would still surface A context menu, just the wrong
+                // one.
+                ? (ev) => { ev.preventDefault(); ev.stopPropagation(); }
+                : (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    const inSel = selection.indices.has(i);
+                    if (!inSel) setSelection(applyClick(emptySelection(), i, { ctrl: false, shift: false }));
+                    const paths = inSel ? selectedPaths : [e.path];
+                    setMenu({ x: ev.clientX, y: ev.clientY, items: buildMenu(e, paths) });
+                  }}
               onDragStart={(ev) => {
                 let paths = selectedPaths;
                 if (!selection.indices.has(i)) { setSelection(applyClick(emptySelection(), i, { ctrl: false, shift: false })); paths = [e.path]; }

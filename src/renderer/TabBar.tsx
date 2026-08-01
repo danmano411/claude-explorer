@@ -433,7 +433,12 @@ export function TabBar({
         title={t.pinned ? t.title : undefined}
         draggable={renaming !== t.id}
         onClick={() => onSelect(t.id)}
-        onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: t.id }); }}
+        // KAN-69: latent here (tab activation is a single click, so nothing
+        // ELSE on this button races the rename input the way FileBrowser's
+        // dblclick did) but the same unguarded gap — fixed in passing with the
+        // idiom `draggable` above already uses, so a future click-triggered
+        // context menu doesn't reopen it.
+        onContextMenu={renaming === t.id ? undefined : (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: t.id }); }}
         onDragStart={(e) => {
           beginDrag({ kind: 'tab', id: t.id, ids: new Set([t.id]), moveKeys: [t.id] }, e, e.currentTarget);
           e.dataTransfer.setData(TAB_MIME, t.id);
@@ -582,7 +587,8 @@ export function TabBar({
                 e.dataTransfer.setData(GROUP_MIME, g.id);
               }}
               onClick={() => { if (gRenaming !== seg.group!.id) groupActions.toggleCollapsed(seg.group!.id); }}
-              onContextMenu={(e) => { e.preventDefault(); setGmenu({ x: e.clientX, y: e.clientY, id: seg.group!.id }); }}
+              // KAN-69: same latent gap as the tab button above.
+              onContextMenu={gRenaming === seg.group.id ? undefined : (e) => { e.preventDefault(); setGmenu({ x: e.clientX, y: e.clientY, id: seg.group!.id }); }}
             >
               {gRenaming === seg.group.id
                 ? renameInput(commitGroupRename, () => setGRenaming(null))
