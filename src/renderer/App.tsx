@@ -47,6 +47,7 @@ import { NotifSetupCard } from './components/NotifSetupCard';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { SpawnConfirm } from './components/SpawnConfirm';
 import { SpaceMenu } from './components/SpaceMenu';
+import { SpaceSwitcher } from './components/SpaceSwitcher';
 import { LONE_MIME, TAB_MIME, TabBar, type GroupActions, type SplitActions } from './TabBar';
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -66,6 +67,20 @@ const keyOfTab = (layout: GridLayout, tabId: string | undefined | null): CellKey
 /** How far the pointer must travel before an Alt+press on a pane becomes a
  *  drag rather than the click-to-focus it would otherwise have been. */
 const PANE_DRAG_PX = 4;
+
+/** KAN-101. How long the cycle chord must be HELD before the space switcher
+ *  panel becomes visible. The highlight itself starts on the very first press
+ *  regardless — only the panel waits — so a quick tap is still one silent step
+ *  to the next space and never flashes a window at someone who has already
+ *  landed. One module-level constant so "no grace period at all" is a
+ *  one-character change to `0`. */
+const SWITCHER_DELAY_MS = 120;
+
+/** KAN-101. Keys whose press only CHANGES the modifier set rather than starting
+ *  something new: pressing Shift mid-cycle reverses direction, it does not
+ *  abandon the gesture, so these must not be read as "the user did something
+ *  else" the way Ctrl+1..9 is. */
+const MOD_KEYS = new Set(['Control', 'Shift', 'Alt', 'Meta']);
 
 /** A space's ordered tab records: `tabIds` (the order) resolved against the tab
  *  store (the records). An id with no record is dropped rather than rendered as
@@ -1680,20 +1695,174 @@ export function App() {
   // the digits, cannot leave preventDefault to "only when something changes".
   // KAN-83: `keybinds.cycleNext`/`.cyclePrev`, same reasoning as the digit
   // effect above.
+  //
+  // KAN-101 turned the press into a HOLD. The first Ctrl+Tab no longer
+  // switches: it opens a highlight, further presses move it, and releasing
+  // Ctrl commits it through the same one `switchToSpace` every other caller
+  // uses. A quick tap is unchanged in outcome — still exactly one step, still
+  // wrapping at both ends — the only difference being that the switch now
+  // lands on the keyup rather than the keydown, which is what makes holding
+  // through several spaces a single gesture instead of N visible switches.
+  //
+  // `switcherRef` is the SOURCE OF TRUTH for these handlers; `switcher` state
+  // exists only to render. Same split as `lastInputAt`/`paneDrag` above, for a
+  // sharper reason here: this effect re-registers whenever spaces/keybinds
+  // change, and a commit must read the highlight as of the KEYSTROKE, not as
+  // of whichever render happened to create the closure. It holds an ID and
+  // never an index — a space closed mid-hold would silently retarget an index
+  // at a different space.
+  const [switcher, setSwitcher] = useState<{ id: string; shown: boolean } | null>(null);
+  const switcherRef = useRef<string | null>(null);
+  const switcherTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearSwitcherTimer = () => {
+    if (switcherTimer.current !== null) clearTimeout(switcherTimer.current);
+    switcherTimer.current = null;
+  };
+  const endSwitcher = () => {
+    clearSwitcherTimer();
+    switcherRef.current = null;
+    setSwitcher(null);
+  };
+  const commitSwitcher = () => {
+    const id = switcherRef.current;
+    endSwitcher();
+    if (id) switchToSpace(id);
+  };
+  // The unmount clear, and deliberately its OWN mount-only effect rather than
+  // the listener effect's cleanup below: that one re-runs on every dependency
+  // change, so clearing there would silently cancel the grace timer mid-hold
+  // any time `spaces` was touched.
+  useEffect(() => clearSwitcherTimer, []);
+
   useEffect(() => {
-    const h = (e: KeyboardEvent) => {
+    // Both cycle bindings must carry a modifier for a RELEASE to be observable
+    // at all: `modsMatch` against an empty `Mods` is true exactly when nothing
+    // is held, so a modifier-less binding leaves `holdActive` permanently true
+    // and the panel permanently open. SettingsModal refuses to record one
+    // ("Hold at least one modifier key…"), but a hand-edited settings.json can
+    // still produce it — degrade to the pre-KAN-101 switch-on-keydown rather
+    // than to a panel nothing can dismiss.
+    const canHold = [keybinds.cycleNext.mods, keybinds.cyclePrev.mods]
+      .every((m) => !!(m.ctrl || m.shift || m.alt || m.meta));
+    // "The modifier half of EITHER cycle binding is still down." With the
+    // shipped defaults (next = Ctrl, prev = Ctrl+Shift) Ctrl alone matches the
+    // first and Ctrl+Shift the second, so letting go of SHIFT to reverse
+    // direction does not end the hold — only letting go of Ctrl does, and on
+    // that keyup Chromium already reports `ctrlKey === false`. No `e.key`
+    // special-case for the modifier itself is needed or wanted.
+    const holdActive = (e: KeyboardEvent) =>
+      modsMatch(e, keybinds.cycleNext.mods) || modsMatch(e, keybinds.cyclePrev.mods);
+
+    const onKeyDown = (e: KeyboardEvent) => {
       const dir = spaceCycle(e, keybinds.cycleNext, keybinds.cyclePrev);
+      if (switcherRef.current !== null) {
+        if (e.key === 'Escape') {
+          // Cancel, and SWALLOW: Escape was pressed to abandon a navigation
+          // gesture, and leaking it into the Claude tab underneath would
+          // interrupt a run as a side effect of aborting a space switch.
+          e.preventDefault();
+          e.stopPropagation();
+          endSwitcher();
+          return;
+        }
+        if (!holdActive(e)) {
+          // The hold is already up and we never saw the keyup — the OS ate it
+          // (Alt+Tab, a UAC prompt). Land the pick now, on the first keystroke
+          // that proves it. `dir` is necessarily null here: a non-null result
+          // means the event matched one binding's mods, which is `holdActive`.
+          commitSwitcher();
+        } else if (dir === null && !MOD_KEYS.has(e.key)) {
+          // Some OTHER shortcut fired mid-hold; Ctrl+1..9 is the one that
+          // actually happens. CANCEL, not commit — that press is about to pick
+          // a space of its own, and committing a stale highlight first would
+          // switch twice and land wherever the two listeners happened to run.
+          // Stated here on purpose: the outcome must not depend on which
+          // window listener was registered first (they are on different
+          // phases, and both effects re-register on their own schedule).
+          endSwitcher();
+        }
+      }
       if (dir === null) return;
       if (isTextBox(e.target)) return;
       e.preventDefault();
       const ordered = orderSpaces(spaces);
-      if (ordered.length === 0) return;
-      const from = ordered.findIndex((s) => s.id === activeSpaceId);
+      if (ordered.length < 2) return; // nothing to cycle between; the press is still eaten
+      // Recomputed fresh per press, never captured across a hold, and stepped
+      // from the HIGHLIGHT when one is up so a second press advances the
+      // preview instead of re-stepping from the space we are still standing in.
+      const fromId = switcherRef.current ?? activeSpaceId;
+      const from = ordered.findIndex((s) => s.id === fromId);
       const next = ordered[((from === -1 ? 0 : from) + dir + ordered.length) % ordered.length];
-      switchToSpace(next.id);
+      if (!canHold) { switchToSpace(next.id); return; }
+      const opening = switcherRef.current === null;
+      switcherRef.current = next.id;
+      setSwitcher((s) => ({ id: next.id, shown: s?.shown ?? false }));
+      // Visibility only — the highlight above is already live. Started once,
+      // on the press that opens the gesture, so holding through six spaces
+      // does not keep pushing the panel out of reach.
+      if (opening) {
+        switcherTimer.current = setTimeout(() => {
+          switcherTimer.current = null;
+          setSwitcher((s) => (s ? { ...s, shown: true } : null));
+        }, SWITCHER_DELAY_MS);
+      }
     };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (switcherRef.current !== null && !holdActive(e)) commitSwitcher();
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (switcherRef.current === null) return;
+      // Swallow this one press. A Ctrl+click during a hold would otherwise
+      // both land the space switch AND multi-select a file row underneath
+      // (FileBrowser's ctrl-click), which is two results for one gesture.
+      e.preventDefault();
+      e.stopPropagation();
+      // `pointerdown`'s preventDefault suppresses only the COMPATIBILITY mouse
+      // events (mousedown/mouseup); `click` is dispatched regardless, and
+      // FileBrowser selects on click (FileBrowser.tsx:500), so swallowing the
+      // pointerdown alone still selects the row. Eat exactly the next click,
+      // at capture on window — React 18 delegates to the root container, which
+      // is a descendant, so stopping it here is enough. Self-limiting: `once`
+      // drops it when a click lands, the timeout drops it when one never does
+      // (press-and-drag away fires no click, and a stale eater would swallow
+      // an unrelated click later).
+      //
+      // PRIMARY BUTTON ONLY. Only button 0 is followed by a `click`, so arming
+      // this for a right- or middle-press leaves an eater that `once` can never
+      // consume — and for the whole 500 ms fallback window it swallows the
+      // user's next legitimate left click instead. The press itself still
+      // commits and is still stopped above; it just does not arm the eater.
+      if (e.button === 0) {
+        const eatClick = (c: MouseEvent) => { c.preventDefault(); c.stopPropagation(); };
+        window.addEventListener('click', eatClick, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener('click', eatClick, true), 500);
+      }
+      commitSwitcher();
+    };
+    // Alt+Tabbing out of the app is exactly when the OS eats the keyup that
+    // would have committed. NOT capture, unlike the three above: `blur` does
+    // not bubble, so a capture-phase window listener fires for every element
+    // blur inside the app — including ones a space switch itself causes.
+    const onBlur = () => { if (switcherRef.current !== null) commitSwitcher(); };
+
+    // CAPTURE PHASE, all three, and this is load-bearing rather than tidy:
+    // xterm calls stopPropagation on the keys it owns, so a bubble-phase
+    // window listener never sees them while a terminal is focused — which is
+    // most of the time in this app. The chord itself would survive at bubble
+    // phase because Terminal.tsx's own arm pre-empts it, but Escape, the
+    // recovery keystroke and the commit keyup have no such arm and would be
+    // silently dead. Same registration as the pane-drag Escape handler below.
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [spaces, activeSpaceId, keybinds]);
 
   /**
@@ -2433,6 +2602,17 @@ export function App() {
             dragover. Everything about it is written by `paint`. */}
         <div className="drop-indicator" data-zone="" aria-hidden ref={indicatorRef} />
       </div>
+      {/* KAN-101. A child of `.app` for the same reason the picker below is —
+          `.content` is a grid container and an in-flow child of one claims a
+          pane's cell. Mounted only once the grace timer has fired, so a quick
+          tap renders nothing at all; `orderSpaces` is inside the `&&` so it
+          does not run on every render of every other state change. The panel
+          is purely a readout — `pointer-events: none`, no focus, no handlers —
+          because every input for this gesture is owned by the window listeners
+          above, where the keys actually arrive. */}
+      {switcher?.shown && (
+        <SpaceSwitcher spaces={orderSpaces(spaces)} highlightId={switcher.id} />
+      )}
       {/* Rendered as a child of `.app`, NOT of `.content`, and that placement is
           load-bearing: any in-flow child of a grid container is auto-placed into
           the first free cell, so a popover inside `.content` would silently
