@@ -933,6 +933,15 @@ body {
   z-index: 110;
   min-width: 220px;
   padding: 6px;
+  /* A space list is unbounded, unlike `.gridpick`'s fixed 3x3 — at ~31px a row
+     it outgrows a 660px viewport around 21 spaces and clips off BOTH ends,
+     which would leave the highlight somewhere the user cannot see. Cap it and
+     let SpaceSwitcher scroll the active row into view. `overflow-y: auto`
+     rather than `hidden` so the programmatic scroll has somewhere to go; the
+     user cannot scroll it by hand anyway (`pointer-events: none` below, and
+     the gesture owns the keyboard). */
+  max-height: 70vh;
+  overflow-y: auto;
   background: var(--bg-panel);
   border: 1px solid var(--line);
   box-shadow: 4px 4px 0 var(--line);

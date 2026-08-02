@@ -1827,9 +1827,17 @@ export function App() {
       // drops it when a click lands, the timeout drops it when one never does
       // (press-and-drag away fires no click, and a stale eater would swallow
       // an unrelated click later).
-      const eatClick = (c: MouseEvent) => { c.preventDefault(); c.stopPropagation(); };
-      window.addEventListener('click', eatClick, { capture: true, once: true });
-      setTimeout(() => window.removeEventListener('click', eatClick, true), 500);
+      //
+      // PRIMARY BUTTON ONLY. Only button 0 is followed by a `click`, so arming
+      // this for a right- or middle-press leaves an eater that `once` can never
+      // consume — and for the whole 500 ms fallback window it swallows the
+      // user's next legitimate left click instead. The press itself still
+      // commits and is still stopped above; it just does not arm the eater.
+      if (e.button === 0) {
+        const eatClick = (c: MouseEvent) => { c.preventDefault(); c.stopPropagation(); };
+        window.addEventListener('click', eatClick, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener('click', eatClick, true), 500);
+      }
       commitSwitcher();
     };
     // Alt+Tabbing out of the app is exactly when the OS eats the keyup that
