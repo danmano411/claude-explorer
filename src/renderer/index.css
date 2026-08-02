@@ -919,3 +919,38 @@ body {
   margin-top: 8px; text-align: center;
   font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft);
 }
+
+/* The Alt-Tab-style space switcher (KAN-101), shown while Ctrl+Tab /
+   Ctrl+Shift+Tab is held past the grace period. Fixed and centred over
+   `.content` like `.gridpick` above, and — unlike `.gridpick` — never the
+   target of a click: App.tsx commits on the held key's release or on
+   pointerdown anywhere, so the panel itself must never intercept a pointer
+   event underneath it. */
+.spaceswitch {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 110;
+  min-width: 220px;
+  padding: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  box-shadow: 4px 4px 0 var(--line);
+  font-family: var(--font-serif);
+  color: var(--ink);
+  pointer-events: none;
+}
+.spaceswitch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.spaceswitch-row.is-active {
+  background: var(--clay-soft);
+  color: var(--ink);
+}
+.spaceswitch-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spaceswitch-pin { font-size: 11px; }

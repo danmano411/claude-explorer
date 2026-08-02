@@ -286,6 +286,11 @@ console.log('\n2. THE TICKET: first -> fourth under ONE held modifier is ONE swi
   }
   const panelsHeld = await panelCount();
   const nameHeld = await spaceName();
+  // Snapshot WHILE HELD. Read after the release it would be the post-commit
+  // value, i.e. exactly what the next assertion requires to be 1 — the two
+  // checks below would then be mutually unsatisfiable on every build. The
+  // predicate is unchanged; only the moment it is sampled is.
+  const seqHeld = await seqSince(sfrom);
   await win.keyboard.up('Control');
   await win.waitForTimeout(1500);           // let every settle timer land
   const panelsAfter = await panelCount();
@@ -296,8 +301,8 @@ console.log('\n2. THE TICKET: first -> fourth under ONE held modifier is ONE swi
   check('the highlight walks 2nd -> 3rd -> 4th while the modifier stays down', RED,
     seen.join('|') === [DISPLAY[1], DISPLAY[2], DISPLAY[3]].join('|'), seen.join(' | '));
   check('and NOTHING has switched yet while it is still held', RED,
-    nameHeld === DISPLAY[0] && seq.length === 0,
-    `on "${nameHeld}", departures ${JSON.stringify(seq)}`);
+    nameHeld === DISPLAY[0] && seqHeld.length === 0,
+    `on "${nameHeld}", departures ${JSON.stringify(seqHeld)}`);
   check('THE WHOLE GESTURE COMMITS EXACTLY ONE SPACE SWITCH, not three', RED,
     seq.length === 1 && seq[0] === DISPLAY[0], `${seq.length} departure(s): ${JSON.stringify(seq)}`);
   check('and resizes EXACTLY ONE pty — three reveals is three ConPTY screen repaints', RED,
