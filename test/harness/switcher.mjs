@@ -36,15 +36,27 @@
 // Escape test run from a focused `.tabbar` passes against a bubble-phase
 // implementation and therefore proves nothing about the case that matters.
 //
-// LABELS. Every assertion below is one of exactly two kinds, and says which:
+// LABELS. Every assertion below is one of exactly three kinds, and says which:
 //   [RED-on-unmodified]     — measured FAILING against the pre-KAN-101 build.
 //   [GREEN-regression-guard] — passes today and must keep passing.
+//   [RED-on-sabotage]        — §§8-10. Covers a guard INSIDE the KAN-101 diff, so
+//                              "the pre-KAN-101 build" is not the useful control:
+//                              each one was measured failing with its own guard
+//                              deleted from an otherwise-shipping build, and the
+//                              deletion is named at the head of the section.
 // The measured split for the unmodified build is printed at the bottom of the
 // run. MEASURED on the pre-implementation build (branch feat/kan-101-space-
 // switcher at 77d08fd, `npm run build` first): 11/28 passed — all 17 RED
 // failing, all 11 GREEN passing. Two assertions were changed rather than
 // rationalised when the first run showed them green, and both are documented
 // where they stand (§6's selection check, and §7's `.last()` tab).
+//
+// §§8-10 were added afterwards, against the shipping implementation, because an
+// adversarial review found three defects that were FIXED off manual experiments
+// rather than off a red assertion — which by this repo's rules is not covered at
+// all. The reviewer proved the gap by sabotage: MOD_KEYS could be emptied and
+// this file still reported 28/28. Each new section records its own measured red
+// where it stands.
 //
 // Plain PowerShell tabs, never Claude: the claim is about pane reveals and pty
 // resizes, which are the same machinery either way, and this costs no tokens.
@@ -55,6 +67,7 @@ import { launchApp } from './app.mjs';
 
 const RED = '[RED-on-unmodified]';
 const GREEN = '[GREEN-regression-guard]';
+const SAB = '[RED-on-sabotage]';
 
 const results = [];
 const check = (name, kind, pass, detail = '') => {
@@ -504,13 +517,188 @@ console.log('\n7. regression guards — what already worked must keep working');
     (await spaceName()) === DISPLAY[0], await spaceName());
 }
 
+// ===========================================================================
+console.log('\n8. OVERSHOOT THEN REVERSE — a bare Shift keydown must not end the gesture');
+// SABOTAGE THAT REDS THIS: `const MOD_KEYS = new Set()` (App.tsx:83).
+//
+// This is the gesture MOD_KEYS exists for, and nothing tested it. §4 presses
+// Shift DOWN before any panel exists, so the guard is never reached — the
+// reviewer emptied the Set, rebuilt, and this file still said 28/28.
+//
+// Overshooting and coming back is probably the most common Alt-Tab gesture
+// there is. Without the guard the bare Shift keydown falls into the "some
+// OTHER shortcut fired mid-hold" arm (`dir === null`), which CANCELS: the
+// panel is destroyed, the highlight is dropped, and the Tab that was meant to
+// reverse instead opens a FRESH gesture from the space you never left — so it
+// steps backward from the ORIGIN and you land at the far end of the list
+// instead of one back from your overshoot.
+// ===========================================================================
+{
+  await switchSpaceViaMenu('Space');
+  await win.click('.tabbar');
+  await win.waitForTimeout(150);
+  await settle();
+  const sfrom = await seqMark();
+
+  await win.keyboard.down('Control');
+  await win.keyboard.press('Tab');            // -> 2nd
+  await win.waitForTimeout(180);
+  await win.keyboard.press('Tab');            // -> 3rd: the overshoot
+  await win.waitForTimeout(320);
+  const panelsBefore = await panelCount();
+  const hlBefore = (await highlight())[0] ?? '(none)';
+  await win.keyboard.down('Shift');           // <-- THE UNCOVERED MOMENT
+  await win.waitForTimeout(320);
+  const panelsAfterShift = await panelCount();
+  const hlAfterShift = (await highlight())[0] ?? '(none)';
+  await win.keyboard.press('Tab');            // reverse: 3rd -> 2nd
+  await win.waitForTimeout(320);
+  const hlReversed = (await highlight())[0] ?? '(none)';
+  await win.keyboard.up('Control');
+  await win.keyboard.up('Shift');
+  await win.waitForTimeout(900);
+  const seq = await seqSince(sfrom);
+  const landed = await spaceName();
+
+  check('pressing SHIFT mid-gesture does not destroy the open panel', SAB,
+    panelsBefore === 1 && panelsAfterShift === 1,
+    `panels before ${panelsBefore}, after the Shift keydown ${panelsAfterShift}`);
+  check('and does not drop the highlight — it stays on the space the overshoot reached', SAB,
+    hlBefore === DISPLAY[2] && hlAfterShift === DISPLAY[2],
+    `"${hlBefore}" -> "${hlAfterShift}"  (want "${DISPLAY[2]}" both sides)`);
+  check('the reversing Shift+Tab steps BACK from the highlight, not from the space we never left', SAB,
+    hlReversed === DISPLAY[1], `${hlReversed}  (want ${DISPLAY[1]}; a fresh gesture would give ${DISPLAY[3]})`);
+  check('so overshoot-then-reverse lands on the highlighted space, in ONE switch', SAB,
+    landed === DISPLAY[1] && seq.length === 1 && seq[0] === DISPLAY[0],
+    `on "${landed}" (want "${DISPLAY[1]}"), departures ${JSON.stringify(seq)}`);
+}
+
+// ===========================================================================
+console.log('\n9. a RIGHT-press commits WITHOUT arming a click-eater');
+// SABOTAGE THAT REDS THIS: drop the `if (e.button === 0)` around the eater in
+// App.tsx's onPointerDown, i.e. arm it unconditionally again.
+//
+// Only button 0 is followed by a `click` — a non-primary press produces
+// `auxclick` — so an eater armed on a right-press can never be consumed by its
+// own `{ once: true }`. It sits there for the whole 500 ms fallback window and
+// swallows the user's next legitimate LEFT click instead.
+// ===========================================================================
+{
+  await switchSpaceViaMenu('Space');
+  await win.locator('.tab:not(.add)').nth(0).click();     // the files tab
+  await win.waitForTimeout(500);
+  const entries = await win.locator(`${VIS}.entry`).count();
+  if (entries < 3) throw new Error(`switcher.mjs §9: need 3 file rows, saw ${entries}`);
+  // A point on the tab strip's own BACKGROUND — FOUND, never hardcoded. Where
+  // the right-press lands is irrelevant to the eater, but a right-press on a
+  // file row or a tab opens a context menu whose backdrop would intercept the
+  // left click this section is entirely about, breaking it on both builds.
+  const spot = await win.evaluate(() => {
+    const bar = document.querySelector('.tabbar');
+    const r = bar.getBoundingClientRect();
+    const y = r.top + r.height / 2;
+    for (let x = r.right - 4; x > r.left; x -= 8) {
+      if (document.elementFromPoint(x, y) === bar) return { x, y };
+    }
+    return null;
+  });
+  if (!spot) throw new Error('switcher.mjs §9: no empty point on the tab strip');
+  await settle();
+
+  // Four Tabs across four spaces wraps the highlight back to the origin, as in
+  // §6, so the commit is a no-op for the pane and the file list stays on screen.
+  await win.keyboard.down('Control');
+  for (let i = 0; i < 4; i++) { await win.keyboard.press('Tab'); await win.waitForTimeout(150); }
+  const panelsBefore = await panelCount();
+  const t0 = Date.now();
+  await win.mouse.move(spot.x, spot.y);
+  await win.mouse.down({ button: 'right' });
+  await win.mouse.up({ button: 'right' });
+  await win.keyboard.up('Control');           // a plain left click next, not Ctrl+click
+  const panelsAfter = await panelCount();
+  await win.waitForTimeout(150);
+  await win.locator(`${VIS}.entry`).nth(2).click();
+  const elapsed = Date.now() - t0;
+  await win.waitForTimeout(300);
+  // THE CLICKED ROW's own state, never a total count — §6 already caught that
+  // trap once, where a leaked click still totalled 1 because the switching had
+  // reset the pane's selection on the way through.
+  const hitSelected = await win.locator(`${VIS}.entry`).nth(2)
+    .evaluate((el) => el.classList.contains('selected'));
+
+  check(`the left click landed ${elapsed} ms after the right-press, inside the eater's 500 ms fallback`, GREEN,
+    elapsed < 500, `${elapsed} ms — at 500+ the check below would be vacuous on both builds`);
+  check('a RIGHT-press mid-gesture still commits and closes the panel', GREEN,
+    panelsBefore === 1 && panelsAfter === 0, `before ${panelsBefore}, after ${panelsAfter}`);
+  check('and the next LEFT click is not swallowed — it still selects the row it hit', SAB,
+    hitSelected === true, `row hit selected=${hitSelected}`);
+}
+
+// ===========================================================================
+console.log('\n10. the 70vh cap — the highlight stays visible when the list overflows');
+// SABOTAGE THAT REDS THIS: delete `max-height: 70vh` from `.spaceswitch`
+// (reds the overflow guard), or delete SpaceSwitcher's scrollIntoView effect
+// (reds the visibility check).
+//
+// LAST SECTION ON PURPOSE: it creates enough spaces to overflow the cap and
+// therefore invalidates DISPLAY for everything above it.
+// ===========================================================================
+{
+  // Sized from the REAL viewport, not from a literal: 70vh of this window is
+  // ~15 rows at the measured ~31.4 px, and hardcoding either number makes the
+  // whole section vacuous the day the window size changes.
+  const need = await win.evaluate(() => Math.ceil((0.7 * window.innerHeight) / 31.4) + 4);
+  console.log(`  growing the list to ${need} spaces to overflow a ${await win.evaluate(() => window.innerHeight)}px viewport`);
+  for (let i = DISPLAY.length; i < need; i++) await createSpace(`S${i}`);
+  await switchSpaceViaMenu('Space');
+  await win.click('.tabbar');
+  await win.waitForTimeout(150);
+  await settle();
+
+  // One Shift+Tab from the FIRST space wraps to the LAST — the far end of the
+  // list in a single press, which is the row furthest outside an unscrolled box.
+  await win.keyboard.down('Control');
+  await win.keyboard.down('Shift');
+  await win.keyboard.press('Tab');
+  await win.waitForTimeout(500);
+  const box = await win.evaluate(() => {
+    const p = document.querySelector('.spaceswitch');
+    const row = document.querySelector('.spaceswitch-row.is-active');
+    if (!p || !row) return null;
+    const pr = p.getBoundingClientRect(), rr = row.getBoundingClientRect();
+    return {
+      rows: p.querySelectorAll('.spaceswitch-row').length,
+      overflows: p.scrollHeight > p.clientHeight + 1,
+      inside: rr.top >= pr.top - 1 && rr.bottom <= pr.bottom + 1,
+      onscreen: rr.top >= 0 && rr.bottom <= window.innerHeight,
+      rt: Math.round(rr.top), rb: Math.round(rr.bottom),
+      pt: Math.round(pr.top), pb: Math.round(pr.bottom),
+      ph: Math.round(pr.height), sh: p.scrollHeight, vh: window.innerHeight,
+    };
+  });
+  await win.keyboard.up('Control');
+  await win.keyboard.up('Shift');
+  await win.waitForTimeout(900);
+  if (!box) throw new Error('switcher.mjs §10: no panel or no highlighted row while held');
+
+  check('with the list grown past the cap the panel is genuinely overflowing', GREEN,
+    box.overflows && box.rows === need,
+    `${box.rows} rows, panel ${box.ph}px of ${box.sh}px content in a ${box.vh}px viewport` +
+    ` — without an overflow the next check is vacuous`);
+  check('and the highlighted LAST row is scrolled into the panel AND on screen', SAB,
+    box.inside && box.onscreen,
+    `row ${box.rt}..${box.rb}, panel ${box.pt}..${box.pb}, viewport 0..${box.vh}`);
+}
+
 await close();
 
 const failed = results.filter((r) => !r.pass);
 const red = results.filter((r) => r.kind === RED);
 const green = results.filter((r) => r.kind === GREEN);
+const sab = results.filter((r) => r.kind === SAB);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 console.log(`  ${red.length} labelled ${RED} (${red.filter((r) => r.pass).length} currently passing)`);
 console.log(`  ${green.length} labelled ${GREEN} (${green.filter((r) => r.pass).length} currently passing)`);
+console.log(`  ${sab.length} labelled ${SAB} (${sab.filter((r) => r.pass).length} currently passing)`);
 if (failed.length) console.log('failing:', failed.map((f) => f.name).join('; '));
 process.exit(failed.length ? 1 : 0);
