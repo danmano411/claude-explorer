@@ -1,6 +1,44 @@
 import { describe, it, expect, vi } from 'vitest'
-import { posix } from 'node:path'
-import { driveKey, isWindows, sameDrive, uniqueName, winBasename, winDirname } from '../src/shared/pathutil'
+import { posix, win32 } from 'node:path'
+import { crumbs, driveKey, isWindows, sameDrive, uniqueName, winBasename, winDirname } from '../src/shared/pathutil'
+
+// Breadcrumb paths. Every expectation below failed against the pre-fix
+// algorithm (segments re-joined with no root) except the Windows labels, which
+// are deliberately unchanged. The independent instrument is node's own
+// isAbsolute: a crumb that is not absolute opens somewhere relative to the
+// main process's cwd, which is the whole bug.
+describe('crumbs', () => {
+  it('backslash literals survived the edit (guard for everything below)', () => {
+    expect('C:\\'.length).toBe(3)
+    expect('\\\\srv'.length).toBe(5)
+  })
+  it('POSIX: keeps the leading / and offers / itself', () => {
+    expect(crumbs('/Users/me/proj')).toEqual([
+      { label: '/', path: '/' },
+      { label: 'Users/', path: '/Users' },
+      { label: 'me/', path: '/Users/me' },
+      { label: 'proj/', path: '/Users/me/proj' },
+    ])
+    expect(crumbs('/')).toEqual([{ label: '/', path: '/' }])
+  })
+  it('drive: the drive crumb opens C:\\, not "C:" (drive C\'s cwd)', () => {
+    expect(crumbs('C:\\Users\\me')).toEqual([
+      { label: 'C:\\', path: 'C:\\' },
+      { label: 'Users\\', path: 'C:\\Users' },
+      { label: 'me\\', path: 'C:\\Users\\me' },
+    ])
+    expect(crumbs('C:\\')).toEqual([{ label: 'C:\\', path: 'C:\\' }])
+  })
+  it('UNC: keeps the leading \\\\', () => {
+    expect(crumbs('\\\\srv\\share\\dir').map((c) => c.path)).toEqual(['\\\\srv', '\\\\srv\\share', '\\\\srv\\share\\dir'])
+  })
+  it("every crumb is absolute by node's own definition", () => {
+    for (const cwd of ['/Users/me/proj', '/', '/tmp', 'C:\\Users\\me', 'C:\\', 'D:\\a\\b', '\\\\srv\\share\\dir']) {
+      const isAbs = cwd.includes('\\') ? win32.isAbsolute : posix.isAbsolute
+      for (const c of crumbs(cwd)) expect(isAbs(c.path), `${cwd} -> ${c.path}`).toBe(true)
+    }
+  })
+})
 
 describe('sameDrive', () => {
   it('compares drive letters case-insensitively', () => {
