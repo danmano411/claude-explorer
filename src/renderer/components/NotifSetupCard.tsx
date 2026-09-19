@@ -57,7 +57,7 @@ export function NotifSetupCard({
             checked={notifyDesktop}
             onChange={(e) => setNotifyDesktop(e.target.checked)}
           />
-          <span>Desktop notifications — a Windows notification even when Claude Explorer is not the active window.</span>
+          <span>Desktop notifications — a system notification even when Claude Explorer is not the active window.</span>
         </label>
         <label className="settings-checkbox">
           <input
