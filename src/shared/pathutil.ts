@@ -84,6 +84,27 @@ export function winDirname(p: string): string {
   return i <= 0 ? trimmed : trimmed.slice(0, i)
 }
 
+/** The breadcrumb trail for `cwd`: each crumb's label and the path a click on
+ *  it opens. Joining the split segments back together — what Breadcrumb did
+ *  inline through 0.10.1 — drops the path's ROOT, and every crumb it produced
+ *  was then relative: POSIX lost its leading '/' ("Users/me"), a UNC share lost
+ *  its '\\' ("server\share"), and a drive crumb became "C:", which is the
+ *  process's current directory ON drive C, not C:\ (PR #83 found the POSIX case).
+ *
+ *  Separator style is read from the path itself, as Breadcrumb always did, so
+ *  both arms are testable from one run on either OS. */
+export function crumbs(cwd: string): { label: string; path: string }[] {
+  const sep = cwd.includes('\\') ? '\\' : '/'
+  const parts = cwd.split(/[\\/]/).filter(Boolean)
+  const lead = /^[\\/]{2}/.test(cwd) ? sep + sep : /^[\\/]/.test(cwd) ? sep : ''
+  const out = lead === '/' ? [{ label: '/', path: '/' }] : []
+  parts.forEach((seg, i) => {
+    const path = lead + parts.slice(0, i + 1).join(sep)
+    out.push({ label: seg + sep, path: /^[A-Za-z]:$/.test(seg) ? path + sep : path })
+  })
+  return out
+}
+
 function splitExt(name: string): [string, string] {
   const dot = name.lastIndexOf('.')
   return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
