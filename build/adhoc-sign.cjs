@@ -6,6 +6,12 @@
 // with no dialog. An ad-hoc signature over the whole bundle is valid, so macOS
 // shows its normal "Open Anyway" prompt instead. Skipped when a real identity
 // is configured (electron-builder signs in that case).
+//
+// Deliberately NO `--options runtime`. Hardened runtime kills Electron's V8
+// JIT unless allow-jit entitlements are added — KAN-92's reason for turning
+// down electron-builder's `mac.identity: "-"`, which enables it. Without the
+// flag the signature is `flags=0x2(adhoc)` and the app runs normally
+// (measured; see package.yml's macOS comment).
 const { execFileSync } = require('node:child_process')
 const path = require('node:path')
 

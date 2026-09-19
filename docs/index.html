@@ -795,15 +795,15 @@ npm run dev         # or: live development</code></pre>
 
 <p>An app installed from a release checks GitHub Releases on start, downloads in the background and offers to restart. Built from source, auto-update is off &mdash; local builds are not tied to the release feed.</p>
 
-<h3>macOS: the app is unsigned, and Gatekeeper will say so</h3>
-<p>Claude Explorer is not signed with an Apple Developer ID and is not notarized &mdash; that needs a paid Apple Developer Program membership this project does not have. Nothing is wrong with your download; Apple simply has no way to attest to it. The first launch says:</p>
-<blockquote style="border-left:3px solid var(--line);margin:12px 0;padding-left:16px;color:var(--ink-soft);max-width:72ch">"Claude Explorer" cannot be opened because Apple cannot check it for malicious software.</blockquote>
+<h3>macOS: the app is not notarized, and Gatekeeper will say so</h3>
+<p>Claude Explorer is not signed with an Apple Developer ID and is not notarized &mdash; that needs a paid Apple Developer Program membership this project does not have. Nothing is wrong with your download; Apple simply has no way to attest to it. The first time you open it, macOS refuses and says it cannot verify the app is free of malware. To open it anyway:</p>
 <ol class="body">
-  <li><b>Right-click</b> the app in Applications and choose <b>Open</b>, then <b>Open</b> again. Double-clicking will not offer this &mdash; the right-click menu is what unlocks it.</li>
-  <li>Or: <b>System Settings ▸ Privacy &amp; Security</b>, scroll to the message about Claude Explorer, <b>Open Anyway</b>.</li>
-  <li>If macOS says the app <b>"is damaged and can't be opened"</b>, that is the quarantine flag, not damage: <code>xattr -cr "/Applications/Claude Explorer.app"</code></li>
+  <li>Try to open the app once, so macOS records the refusal.</li>
+  <li>Open <b>System Settings ▸ Privacy &amp; Security</b>, scroll to the message about Claude Explorer, click <b>Open Anyway</b>, and confirm.</li>
+  <li>On macOS 14 and earlier, right-clicking the app and choosing <b>Open</b> also works. macOS 15 removed that shortcut.</li>
 </ol>
-<p>You do this once per installed version. <b>Auto-update is switched off on macOS</b> as a direct consequence: macOS verifies an update against the app's signature before installing, so an unsigned build cannot update itself. Rather than download ~100&nbsp;MB on every launch and fail at the last step, the app does not try. Watch the Releases page and drag the new DMG over the old app.</p>
+<p>Builds up to v0.10.1 carried an incomplete signature, so macOS may instead say one of those <b>"is damaged and can't be opened"</b>, or open nothing at all. Nothing is damaged: <code>xattr -cr "/Applications/Claude Explorer.app"</code> clears the quarantine flag.</p>
+<p>You do this once per installed version. <b>Auto-update is switched off on macOS</b> as a direct consequence: macOS verifies an update against the app's Developer ID signature before installing, so a build without one cannot update itself. Rather than download ~100&nbsp;MB on every launch and fail at the last step, the app does not try. Watch the Releases page and drag the new DMG over the old app.</p>
 
 <h3>Linux</h3>
 <p>Download the AppImage, <code>chmod +x</code> it, run it. Two differences from Windows, neither a bug: the unread-session badge goes through the Unity Launcher API, so Unity, KDE and GNOME-with-Dash-to-Dock show it while plain GNOME Shell shows nothing (the in-app markers work either way); and <b>Open in Terminal</b> tries a list of known terminal emulators, declining rather than guessing if none is installed.</p>

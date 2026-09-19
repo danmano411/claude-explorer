@@ -76,28 +76,26 @@ jobs:
             dist/latest.yml
           if-no-files-found: error
 
-  # KAN-92. UNSIGNED, by owner decision — no Apple Developer Program
-  # membership ($99/yr), so no `Developer ID Application` certificate, no
-  # notarization, and NO SIGNING SECRETS ANYWHERE IN THIS FILE. The visible
-  # consequence is Gatekeeper: users get "Apple cannot check this app for
-  # malicious software" and must right-click → Open (or allow it under System
-  # Settings → Privacy & Security). README's Platform support section says so.
+  # KAN-92. No Developer ID, by owner decision — no Apple Developer Program
+  # membership ($99/yr), so no notarization and NO SIGNING SECRETS ANYWHERE IN
+  # THIS FILE. electron-builder's own signing step still logs "skipped macOS
+  # application code signing ... 0 identities found".
   #
-  # Nothing is signed at all. This leg's log says so verbatim: "skipped macOS
-  # application code signing ... 0 identities found". Ad-hoc signing
-  # (`mac.identity: "-"`) is deliberately NOT used as a consolation prize —
-  # it produces a signature with no Apple Team ID, so it buys nothing with
-  # Gatekeeper, and electron-builder defaults `hardenedRuntime` to true once
-  # signing is on, which without `com.apple.security.cs.allow-jit` and
-  # `allow-unsigned-executable-memory` entitlements kills Electron's V8 JIT.
-  # KAN-92 records that trade-off; changing it means adding an entitlements
-  # plist, not flipping a flag.
+  # But the bundle IS ad-hoc signed, by build/adhoc-sign.cjs (afterPack, PR
+  # #83), and that is not the consolation prize KAN-92 turned down. Measured on
+  # a macos-26 arm64 runner against the shipped v0.10.0 DMG: with no signing
+  # step at all the bundle kept only Electron's per-binary linker signatures,
+  # `Sealed Resources=none`, and Gatekeeper judged a quarantined copy INVALID
+  # ("code has no resources but signature indicates they must be present") —
+  # the "is damaged" / silent-hang path. Ad-hoc signing seals 181 resources and
+  # Gatekeeper's verdict becomes a plain "rejected": valid but unnotarized,
+  # which is macOS's normal Open Anyway path.
   #
-  # UNVERIFIED, and the honest caveat on this whole leg: nobody has launched
-  # the DMG on a Mac. On Apple Silicon an unsigned bundle sometimes reports
-  # "is damaged and can't be opened" rather than the normal Gatekeeper
-  # prompt; `xattr -cr` on the installed app clears it, and the README says
-  # so. Confirming which of the two a real Mac shows needs real hardware.
+  # KAN-92's real objection was hardened runtime, and it still stands: it
+  # would kill Electron's V8 JIT without allow-jit entitlements.
+  # electron-builder's `mac.identity: "-"` would turn it on; the hook calls
+  # codesign WITHOUT `--options runtime`, so the signature is `flags=0x2(adhoc)`
+  # and the app launches with all its helpers. Keep it that way.
   #
   # Auto-update is disabled on macOS in src/main/updater.ts (Squirrel.Mac
   # verifies a Developer ID signature that does not exist), so this leg
@@ -166,6 +164,20 @@ jobs:
           file "$app/Contents/Resources/rg"
           file "$app/Contents/Resources/rg" | grep -q '${{ matrix.macho }}'
           "$app/Contents/Resources/rg" --version
+
+      # PR #83. Every released DMG through 0.10.1 could not open a single
+      # terminal or Claude tab: node-pty 1.1.0 ships prebuilds/darwin-*/
+      # spawn-helper as 0644, nothing chmods it, and posix_spawn refuses a
+      # non-executable helper ("posix_spawnp failed."). build/fix-node-pty.cjs
+      # is the fix; this is the assertion. Like `rg --version` above, the bug
+      # only shows when something executes, so it spawns a real pty through the
+      # packaged app's own Electron and node-pty.
+      - name: Verify a terminal can start
+        run: |
+          set -euo pipefail
+          app="$PWD/$(ls -d dist/mac*/'Claude Explorer.app')"
+          ELECTRON_RUN_AS_NODE=1 "$app/Contents/MacOS/Claude Explorer" build/verify-pty.cjs \
+            "$app/Contents/Resources/app.asar/node_modules/node-pty"
 
       # Only the DMG. latest-mac.yml is generated but deliberately NOT
       # uploaded: publishing an update feed for a platform whose updater is

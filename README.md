@@ -101,26 +101,25 @@ Every decision is made in the main process, not the UI, so no call site can forg
 | macOS (Intel) | `Claude-Explorer-x.y.z-x64.dmg` | **No** — see below |
 | Linux (x64) | `Claude-Explorer-x.y.z-x86_64.AppImage` | Yes |
 
-### macOS: the app is unsigned, and Gatekeeper will say so
+### macOS: the app is not notarized, and Gatekeeper will say so
 
 Claude Explorer is not signed with an Apple `Developer ID` certificate and is not notarized. That requires an Apple Developer Program membership at $99/year, which this project does not have. Nothing is wrong with your download — Apple simply has no way to attest to it.
 
-The first time you open it you will get:
+The first time you open it, macOS refuses and says it cannot verify the app is free of malware. To open it anyway:
 
-> **"Claude Explorer" cannot be opened because Apple cannot check it for malicious software.**
-
-To open it anyway:
-
-1. **Right-click** (or Control-click) the app in Applications and choose **Open**, then **Open** again in the dialog. Double-clicking will *not* offer this — the right-click menu is what unlocks it.
-2. On Apple Silicon you may instead need **System Settings → Privacy & Security**, scroll to the message about Claude Explorer, and click **Open Anyway**.
-3. If macOS instead insists the app **"is damaged and can't be opened"**, that is the quarantine flag rather than actual damage. Clear it:
-   ```bash
-   xattr -cr "/Applications/Claude Explorer.app"
-   ```
+1. Try to open the app once, so macOS records the refusal.
+2. Open **System Settings → Privacy & Security**, scroll to the message about Claude Explorer, click **Open Anyway**, and confirm.
+3. On macOS 14 and earlier, right-clicking the app and choosing **Open** also works. macOS 15 removed that shortcut, so use step 2 there.
 
 You only have to do this once per installed version.
 
-**Auto-update is switched off on macOS** as a direct consequence, deliberately rather than by accident. macOS verifies an update against the app's code signature before installing it, so an unsigned build cannot update itself; rather than download ~100 MB on every launch and fail at the last step, the app does not try. Watch the [Releases page](https://github.com/danmano411/claude-explorer/releases) and drag the new DMG over the old app. Windows and Linux update themselves normally.
+Builds up to v0.10.1 carried an incomplete signature, so macOS may instead say one of those **"is damaged and can't be opened"**, or open nothing at all. Nothing is damaged — clear the quarantine flag and it will open:
+
+```bash
+xattr -cr "/Applications/Claude Explorer.app"
+```
+
+**Auto-update is switched off on macOS** as a direct consequence, deliberately rather than by accident. macOS verifies an update against the app's Developer ID signature before installing it, so a build without one cannot update itself; rather than download ~100 MB on every launch and fail at the last step, the app does not try. Watch the [Releases page](https://github.com/danmano411/claude-explorer/releases) and drag the new DMG over the old app. Windows and Linux update themselves normally.
 
 ### Linux
 

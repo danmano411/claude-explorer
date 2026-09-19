@@ -1,9 +1,18 @@
-// postinstall (POSIX only). node-pty ships a `spawn-helper` binary that must be
-// executable. Its own install script normally sets that, but npm now skips
-// dependency install scripts unless approved, leaving the bit unset — and every
-// pty.spawn() then fails with "posix_spawnp failed", so terminal and Claude tabs
-// open but nothing can be typed into them. Fixing it here also covers the copy
-// electron-builder packs into app.asar.unpacked.
+// postinstall (POSIX only). node-pty spawns every macOS pty through its
+// `spawn-helper` binary, which must be executable. node-pty 1.1.0's published
+// tarball stores prebuilds/darwin-*/spawn-helper as 0644, and none of its own
+// install scripts set the bit (post-install.js only handles Windows conpty),
+// so EVERY install leaves it unusable — CI's included. Each pty.spawn() then
+// throws "posix_spawnp failed." and terminal and Claude tabs open dead.
+//
+// Measured on a macos-26 arm64 runner: the shipped v0.10.0 DMG fails exactly
+// so, and chmod +x on that one file alone makes it spawn. electron-builder
+// copies the mode it finds here into app.asar.unpacked, so fixing it at install
+// time covers `npm run dev` and the packaged app both; package.yml's "Verify a
+// terminal can start" step asserts the packaged result.
+//
+// Delete this once node-pty ships the helper executable: check the next
+// version with `npm pack node-pty@<v>` and `tar -tvzf` for -rwxr-xr-x.
 const fs = require('node:fs')
 const path = require('node:path')
 
