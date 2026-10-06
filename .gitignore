@@ -19,3 +19,10 @@ test/harness/*.png
 
 # Scratch output written by the planning/brainstorming tooling, not curated docs.
 docs/superpowers/
+
+# Locally installed agent skills (`npx skills add`) and their lockfile.
+.agents/
+skills-lock.json
+
+# /brag launch-video output: frames, screenshots, render scripts.
+brag-output/
